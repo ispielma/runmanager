@@ -113,6 +113,34 @@ class Client(ZMQClient):
         """Reset the shot output folder to the default path"""
         return self.request('reset_shot_output_folder')
 
+    def queue_request_next(self):
+        """Reserve and return the next queued shot for BLACS."""
+        return self.request('queue_request_next')
+
+    def queue_ack_received(self, offer_id, valid):
+        """Acknowledge receipt of an offered queued shot."""
+        return self.request('queue_ack_received', offer_id, valid)
+
+    def queue_get_state(self):
+        """Return queue settings and summary state."""
+        return self.request('queue_get_state')
+
+    def queue_get_items(self):
+        """Return queued item summaries."""
+        return self.request('queue_get_items')
+
+    def queue_clear(self):
+        """Clear the runmanager-owned queue."""
+        return self.request('queue_clear')
+
+    def queue_delete(self, rows):
+        """Delete queued rows by index."""
+        return self.request('queue_delete', rows)
+
+    def queue_move(self, direction, rows):
+        """Move queued rows in the requested direction."""
+        return self.request('queue_move', direction, rows)
+
 
 _default_client = Client()
 
@@ -138,6 +166,13 @@ set_shot_output_folder = _default_client.set_shot_output_folder
 error_in_globals = _default_client.error_in_globals
 is_output_folder_default = _default_client.is_output_folder_default
 reset_shot_output_folder = _default_client.reset_shot_output_folder
+queue_request_next = _default_client.queue_request_next
+queue_ack_received = _default_client.queue_ack_received
+queue_get_state = _default_client.queue_get_state
+queue_get_items = _default_client.queue_get_items
+queue_clear = _default_client.queue_clear
+queue_delete = _default_client.queue_delete
+queue_move = _default_client.queue_move
 
 if __name__ == '__main__':
     # Test
