@@ -1747,8 +1747,11 @@ class RunManager(object):
         self.on_groups_model_active_changed_recursion_depth = 0
 
     def setup_queue_tab(self):
-        self.tab_queue = QtWidgets.QWidget(self.ui.tabWidget)
+        self.tab_queue = QtWidgets.QWidget()
         self.tab_queue.setObjectName('tab_queue')
+        self.tab_queue.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
+        )
         self.ui.tabWidget.addTab(
             self.tab_queue,
             QtGui.QIcon(':qtutils/fugue/tables-relation'),
@@ -1772,35 +1775,39 @@ class RunManager(object):
             'Repeat standard shot', EMPTY_QUEUE_REPEAT_STANDARD
         )
 
-        self.standard_labscript_lineedit = QtWidgets.QLineEdit(self.tab_queue)
+        self.standard_labscript_lineedit = self.ui.lineEdit_standard_labscript_file
         self.standard_labscript_lineedit.setPlaceholderText(
             'Standard shot labscript file'
         )
-        self.standard_labscript_button = QtWidgets.QToolButton(self.tab_queue)
-        self.standard_labscript_button.setText('...')
-        self.standard_labscript_button.setToolTip('Select standard-shot labscript file')
+        self.standard_labscript_button = self.ui.toolButton_select_standard_labscript_file
 
         self.queue_status_label = QtWidgets.QLabel(self.tab_queue)
+        self.queue_status_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
+        )
+        self.queue_status_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         self.queue_status_label.setWordWrap(True)
 
         self.queue_widget = RunmanagerQueueWidget(self.tab_queue)
+        self.queue_widget.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
+        )
 
         controls_layout = QtWidgets.QGridLayout()
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setColumnStretch(1, 1)
+        controls_layout.setColumnStretch(3, 1)
         controls_layout.addWidget(QtWidgets.QLabel('Compile mode', self.tab_queue), 0, 0)
         controls_layout.addWidget(self.queue_compile_mode_combo, 0, 1)
         controls_layout.addWidget(
             QtWidgets.QLabel('Empty queue', self.tab_queue), 0, 2
         )
         controls_layout.addWidget(self.queue_empty_policy_combo, 0, 3)
-        controls_layout.addWidget(
-            QtWidgets.QLabel('Standard labscript', self.tab_queue), 1, 0
-        )
-        controls_layout.addWidget(self.standard_labscript_lineedit, 1, 1, 1, 3)
-        controls_layout.addWidget(self.standard_labscript_button, 1, 4)
 
         layout = QtWidgets.QVBoxLayout(self.tab_queue)
+        layout.setContentsMargins(9, 9, 9, 9)
         layout.addLayout(controls_layout)
-        layout.addWidget(self.queue_widget)
+        layout.addWidget(self.queue_widget, 1)
         layout.addWidget(self.queue_status_label)
 
         self.queue_compile_mode_combo.setCurrentIndex(

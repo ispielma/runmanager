@@ -110,16 +110,12 @@ class RunmanagerQueueWidget(ShotQueueWidget):
         self.queue_view.setDragEnabled(False)
         self.queue_view.setDropIndicatorShown(False)
         self.queue_view.setDragDropMode(QtWidgets.QAbstractItemView.NoDragDrop)
-        self.add_button.hide()
+        self.queue_view.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
 
         self._disconnect_default_controls()
-        self.delete_button.clicked.connect(self._emit_delete)
-        self.clear_button.clicked.connect(self.clearQueueRequested.emit)
-        self.move_top_button.clicked.connect(lambda: self._emit_move('top'))
-        self.move_up_button.clicked.connect(lambda: self._emit_move('up'))
-        self.move_down_button.clicked.connect(lambda: self._emit_move('down'))
-        self.move_bottom_button.clicked.connect(lambda: self._emit_move('bottom'))
+        self._hide_inline_controls()
         self.queue_view.deleteRequested.connect(self._emit_delete)
+        self.queue_view.customContextMenuRequested.connect(self._show_context_menu)
 
     def _disconnect_default_controls(self):
         for button in (
@@ -143,6 +139,18 @@ class RunmanagerQueueWidget(ShotQueueWidget):
             self.queue_view.filesDropped.disconnect()
         except TypeError:
             pass
+
+    def _hide_inline_controls(self):
+        for button in (
+            self.add_button,
+            self.delete_button,
+            self.clear_button,
+            self.move_top_button,
+            self.move_up_button,
+            self.move_down_button,
+            self.move_bottom_button,
+        ):
+            button.hide()
 
     def selected_item_ids(self):
         item_ids = []
@@ -171,6 +179,30 @@ class RunmanagerQueueWidget(ShotQueueWidget):
         rows = self.selected_rows()
         if rows:
             self.moveRequested.emit(direction, rows)
+
+    def _show_context_menu(self, pos):
+        index = self.queue_view.indexAt(pos)
+        if index.isValid() and not self.queue_view.selectionModel().isSelected(index):
+            self._select_rows([index.row()])
+
+        has_selection = bool(self.selected_rows())
+        row_count = self.queue_model.rowCount()
+        if not has_selection and not row_count:
+            return
+
+        menu = QtWidgets.QMenu(self.queue_view)
+        delete_action = None
+        clear_action = None
+        if has_selection:
+            delete_action = menu.addAction('Delete selected')
+        if row_count:
+            clear_action = menu.addAction('Clear queue')
+
+        action = menu.exec_(self.queue_view.viewport().mapToGlobal(pos))
+        if action is delete_action:
+            self._emit_delete()
+        elif action is clear_action:
+            self.clearQueueRequested.emit()
 
     def _restore_selection(self, item_ids):
         if not item_ids:
