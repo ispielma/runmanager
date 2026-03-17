@@ -1007,6 +1007,35 @@ QToolButton:hover {
         </item>
        </layout>
       </widget>
+      <widget class="QWidget" name="tab_queue">
+       <attribute name="icon">
+        <iconset>
+         <normaloff>:/qtutils/fugue/tables-relation.png</normaloff>:/qtutils/fugue/tables-relation.png</iconset>
+       </attribute>
+       <attribute name="title">
+        <string>Queue</string>
+       </attribute>
+       <attribute name="toolTip">
+        <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Manage the runmanager-owned execution queue.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+       </attribute>
+       <layout class="QVBoxLayout" name="verticalLayout_queue_tab">
+        <property name="spacing">
+         <number>0</number>
+        </property>
+        <property name="leftMargin">
+         <number>9</number>
+        </property>
+        <property name="topMargin">
+         <number>9</number>
+        </property>
+        <property name="rightMargin">
+         <number>9</number>
+        </property>
+        <property name="bottomMargin">
+         <number>9</number>
+        </property>
+       </layout>
+      </widget>
      </widget>
     </item>
    </layout>

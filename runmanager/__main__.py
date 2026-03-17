@@ -1536,8 +1536,8 @@ class RunManager(object):
         self.output_popout_button.setIcon(QtGui.QIcon(':/qtutils/fugue/arrow-out'))
         self.output_popout_button.setToolTip('Toggle whether the output box is in a separate window')
         self.ui.tabWidget.tabBar().setTabButton(output_tab_index, QtWidgets.QTabBar.RightSide, self.output_popout_button)
-        # Fix the first three tabs in place:
-        for index in range(3):
+        # Fix the built-in tabs in place:
+        for index in range(self.ui.tabWidget.count()):
             self.ui.tabWidget.tabBar().setMovable(False, index=index)
         # Whether or not the output box is currently popped out:
         self.output_box_is_popped_out = False
@@ -1747,15 +1747,9 @@ class RunManager(object):
         self.on_groups_model_active_changed_recursion_depth = 0
 
     def setup_queue_tab(self):
-        self.tab_queue = QtWidgets.QWidget()
-        self.tab_queue.setObjectName('tab_queue')
+        self.tab_queue = self.ui.tab_queue
         self.tab_queue.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
-        )
-        self.ui.tabWidget.addTab(
-            self.tab_queue,
-            QtGui.QIcon(':qtutils/fugue/tables-relation'),
-            'Queue',
         )
         queue_tab_index = self.ui.tabWidget.indexOf(self.tab_queue)
         self.ui.tabWidget.tabBar().setMovable(False, index=queue_tab_index)
@@ -1804,8 +1798,7 @@ class RunManager(object):
         )
         controls_layout.addWidget(self.queue_empty_policy_combo, 0, 3)
 
-        layout = QtWidgets.QVBoxLayout(self.tab_queue)
-        layout.setContentsMargins(9, 9, 9, 9)
+        layout = self.ui.verticalLayout_queue_tab
         layout.addLayout(controls_layout)
         layout.addWidget(self.queue_widget, 1)
         layout.addWidget(self.queue_status_label)
