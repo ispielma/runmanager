@@ -141,6 +141,10 @@ class Client(ZMQClient):
         """Move queued rows in the requested direction."""
         return self.request('queue_move', direction, rows)
 
+    def notify_shot_complete(self, filepath):
+        """Notify runmanager that a shot completed and should be analysed."""
+        return self.request('notify_shot_complete', filepath)
+
 
 _default_client = Client()
 
@@ -173,6 +177,7 @@ queue_get_items = _default_client.queue_get_items
 queue_clear = _default_client.queue_clear
 queue_delete = _default_client.queue_delete
 queue_move = _default_client.queue_move
+notify_shot_complete = _default_client.notify_shot_complete
 
 if __name__ == '__main__':
     # Test

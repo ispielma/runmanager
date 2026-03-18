@@ -62,6 +62,7 @@ import h5py
 from zprocess import raise_exception_in_thread
 import runmanager
 import runmanager.remote
+from runmanager.analysis_submission import AnalysisSubmission
 from runmanager.queueing import (
     COMPILE_MODE_ON_REQUEST,
     COMPILE_MODE_PRECOMPILE,
@@ -1556,6 +1557,8 @@ class RunManager(object):
         self.setup_axes_tab()
         self.setup_groups_tab()
         self.setup_queue_tab()
+        run_view_layout = self.ui.findChild(QtWidgets.QLayout, 'verticalLayout_2')
+        self.analysis_submission = AnalysisSubmission(self, run_view_layout)
         self.connect_signals()
 
         # The last location from which a labscript file was selected, defaults
@@ -1656,7 +1659,7 @@ class RunManager(object):
                                   "programs": ["text_editor",
                                                "text_editor_arguments",
                                                ],
-                                  "ports": ['BLACS', 'runviewer'],
+                                  "ports": ['BLACS', 'runviewer', 'lyse'],
                                   "paths": ["shared_drive",
                                             "experiment_shot_storage",
                                             "labscriptlib",
@@ -1910,6 +1913,7 @@ class RunManager(object):
                 return False
             if reply == QtWidgets.QMessageBox.Yes:
                 self.save_configuration(self.last_save_config_file)
+        self.analysis_submission.shutdown()
         self.to_child.put(['quit', None])
         return True
 
@@ -3465,7 +3469,10 @@ class RunManager(object):
                      'queue_compile_mode': self.queue_controller.compile_mode,
                      'queue_empty_policy': self.queue_controller.empty_queue_policy,
                      'standard_labscript_file': self.standard_labscript_lineedit.text(),
-                     'queue_state': self.queue_controller.export_state()}
+                     'queue_state': self.queue_controller.export_state(),
+                     'analysis_data': (
+                         self.analysis_submission.get_configuration_data()
+                     )}
         return save_data
 
     def save_configuration(self, save_file):
@@ -3634,6 +3641,9 @@ class RunManager(object):
             if self.queue_controller.compile_mode == COMPILE_MODE_PRECOMPILE:
                 for item in self.queue_controller.get_queue_items():
                     self.compile_queue.put(item['id'])
+        self.analysis_submission.restore_configuration_data(
+            runmanager_config.get('analysis_data', {})
+        )
         self.refresh_queue_tab()
 
         # Set as self.last_save_data:
@@ -4415,6 +4425,9 @@ class RemoteServer(ZMQServer):
         app.queue_controller.move(direction, rows)
         app.refresh_queue_tab()
         return app.queue_controller.get_queue_state()
+
+    def handle_notify_shot_complete(self, filepath):
+        return app.analysis_submission.notify_shot_complete(filepath)
 
     def handler(self, request_data):
         cmd, args, kwargs = request_data
