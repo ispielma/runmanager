@@ -46,9 +46,6 @@
      <property name="bottomMargin">
       <number>9</number>
      </property>
-     <property name="columnStretch">
-      <string>0,1</string>
-     </property>
      <item row="0" column="0">
       <widget class="QLabel" name="label">
        <property name="text">

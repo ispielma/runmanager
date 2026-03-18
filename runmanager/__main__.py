@@ -752,6 +752,7 @@ class GroupTab(object):
         loader = UiLoader()
         loader.registerCustomWidget(TableView)
         self.ui = loader.load(os.path.join(runmanager_dir, 'group.ui'))
+        self.ui.gridLayout.setColumnStretch(1, 1)
 
         # Add the ui to the parent tabWidget:
         self.tabWidget.addTab(self.ui, group_name, closable=True)
@@ -1191,6 +1192,12 @@ class GroupTab(object):
         scan_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_SCAN)
         expansion_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_EXPANSION)
         scan_enabled = scan_enabled_item.checkState() == QtCore.Qt.Checked
+        default_tooltip = 'Used for standard shots and when Scan? is unchecked.'
+        scan_tooltip = (
+            'Expression used when Scan? is checked.'
+            if scan_enabled
+            else 'Editable, but used only when Scan? is checked.'
+        )
         with self.globals_model_item_changed_disconnected:
             scan_enabled_item.setData(scan_enabled, self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE)
             scan_enabled_item.setData(scan_enabled, self.GLOBALS_ROLE_SORT_DATA)
@@ -1208,15 +1215,23 @@ class GroupTab(object):
                 expansion_item.setToolTip('Enable Scan? to set an expansion mode.')
             self.update_expression_item_metadata(
                 default_item,
-                'Used for standard shots and when Scan? is unchecked.',
+                default_tooltip,
             )
             self.update_expression_item_metadata(
                 scan_item,
-                'Expression used when Scan? is checked.'
-                if scan_enabled
-                else 'Editable, but used only when Scan? is checked.',
+                scan_tooltip,
             )
-        self.update_expression_backgrounds(global_name)
+        active_item = scan_item if scan_enabled else default_item
+        active_tooltip = scan_tooltip if scan_enabled else default_tooltip
+        if not active_item.text().strip():
+            self.update_expression_backgrounds(global_name, error=True)
+            self.update_expression_item_metadata(
+                active_item,
+                active_tooltip + ' Expression is empty.',
+                QtGui.QIcon(':qtutils/fugue/exclamation'),
+            )
+        else:
+            self.update_expression_backgrounds(global_name)
 
     def update_expression_backgrounds(self, global_name, error=False):
         default_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_DEFAULT)
