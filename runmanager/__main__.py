@@ -23,7 +23,7 @@ import desktop_app
 desktop_app.set_process_appid('runmanager')
 
 # Splash screen
-from labscript_utils.splash import Splash
+from labscript_utils.splash import Splash, get_qapplication
 splash = Splash(os.path.join(os.path.dirname(__file__), 'runmanager.svg'))
 splash.show()
 
@@ -39,6 +39,7 @@ import signal
 from pathlib import Path
 import copy
 import uuid
+import unicodedata
 
 splash.update_text('importing matplotlib')
 # Evaluation of globals happens in a thread with the pylab module imported.
@@ -91,6 +92,7 @@ import qtutils.icons
 GLOBAL_MONOSPACE_FONT = "Consolas" if os.name == 'nt' else "Ubuntu Mono"
 
 runmanager_dir = Path(__file__).absolute().parent
+art_dir = runmanager_dir.parent.parent / 'labscript-suite' / 'art'
 
 process_tree = ProcessTree.instance()
 
@@ -127,6 +129,74 @@ def composite_colors(r0, g0, b0, a0, r1, g1, b1, a1):
     g = (a1 * g1 + (1 - a1) * a0 * g0) / a
     b = (a1 * b1 + (1 - a1) * a0 * b0) / a
     return [int(round(x)) for x in (r, g, b, 255 * a)]
+
+
+def set_icon_label_pixmap(label, icon_path, size=16):
+    icon = QtGui.QIcon(str(icon_path))
+    if icon.isNull():
+        label.clear()
+        return
+    label.setPixmap(icon.pixmap(size, size))
+    label.setMinimumSize(size, size)
+    label.setMaximumSize(size + 4, size + 4)
+
+
+def _relative_luminance(color):
+    def channel(value):
+        value /= 255.0
+        if value <= 0.03928:
+            return value / 12.92
+        return ((value + 0.055) / 1.055) ** 2.4
+
+    return (
+        0.2126 * channel(color.red())
+        + 0.7152 * channel(color.green())
+        + 0.0722 * channel(color.blue())
+    )
+
+
+def _contrast_ratio(color_a, color_b):
+    luminance_a = _relative_luminance(color_a)
+    luminance_b = _relative_luminance(color_b)
+    lighter = max(luminance_a, luminance_b)
+    darker = min(luminance_a, luminance_b)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def expression_cell_colors(palette=None):
+    if palette is None:
+        qapplication = QtWidgets.QApplication.instance()
+        palette = qapplication.palette() if qapplication is not None else QtGui.QPalette()
+    text_color = palette.color(QtGui.QPalette.Text)
+    active_candidates = [QtGui.QColor('#D7ECFF'), QtGui.QColor('#234A75')]
+    error_candidates = [QtGui.QColor('#F79494'), QtGui.QColor('#8A2E2E')]
+    active = max(active_candidates, key=lambda color: _contrast_ratio(text_color, color))
+    error = max(error_candidates, key=lambda color: _contrast_ratio(text_color, color))
+    return error.name(), active.name()
+
+
+def hidden_unicode_issues(text):
+    issues = []
+    for index, char in enumerate(text, 1):
+        category = unicodedata.category(char)
+        if char in '\t\n\r':
+            continue
+        if not char.isprintable() or category in {'Cf', 'Cc', 'Cs', 'Co'}:
+            issues.append(
+                'col %d: U+%04X %s'
+                % (index, ord(char), unicodedata.name(char, 'UNKNOWN'))
+            )
+    return issues
+
+
+def tooltip_with_hidden_unicode_warning(base_tooltip, text):
+    issues = hidden_unicode_issues(text)
+    if not issues:
+        return base_tooltip
+    warning = 'Contains hidden Unicode character(s): ' + '; '.join(issues)
+    if base_tooltip:
+        return base_tooltip + '\n' + warning
+    return warning
 
 
 @inmain_decorator()
@@ -524,14 +594,6 @@ class AlternatingColorModel(QtGui.QStandardItemModel):
                 bg_color = self.normal_color
         else:
             bg_color = normal_brush.color()
-            if alternate:
-                # Modify alternate rows:
-                r, g, b, a = normal_rgb
-                alt_r = min(max(r + self.delta_r, 0), 255)
-                alt_g = min(max(g + self.delta_g, 0), 255)
-                alt_b = min(max(b + self.delta_b, 0), 255)
-                alt_a = min(max(a + self.delta_a, 0), 255)
-                bg_color = QtGui.QColor(alt_r, alt_g, alt_b, alt_a)
 
         # If parent is a TableView, we handle selection highlighting as part of the
         # background colours:
@@ -669,21 +731,17 @@ class ItemDelegate(QtWidgets.QStyledItemDelegate):
 
 
 class GroupTab(object):
-    GLOBALS_COL_DELETE = 0
+    GLOBALS_COL_SCAN_ENABLED = 0
     GLOBALS_COL_NAME = 1
     GLOBALS_COL_DEFAULT = 2
-    GLOBALS_COL_UNITS = 3
-    GLOBALS_COL_SCAN_ENABLED = 4
-    GLOBALS_COL_SCAN = 5
-    GLOBALS_COL_EXPANSION = 6
+    GLOBALS_COL_SCAN = 3
+    GLOBALS_COL_UNITS = 4
+    GLOBALS_COL_EXPANSION = 5
 
     GLOBALS_ROLE_IS_DUMMY_ROW = QtCore.Qt.UserRole + 1
     GLOBALS_ROLE_SORT_DATA = QtCore.Qt.UserRole + 2
     GLOBALS_ROLE_PREVIOUS_TEXT = QtCore.Qt.UserRole + 3
     GLOBALS_ROLE_PREVIOUS_CHECKSTATE = QtCore.Qt.UserRole + 4
-
-    COLOR_ERROR = '#F79494'  # light red
-    COLOR_OK = '#A5F7C6'  # light green
 
     GLOBALS_DUMMY_ROW_TEXT = '<Click to add global>'
 
@@ -698,11 +756,13 @@ class GroupTab(object):
         # Add the ui to the parent tabWidget:
         self.tabWidget.addTab(self.ui, group_name, closable=True)
 
+        self.color_error, self.color_active = expression_cell_colors()
+
         self.set_file_and_group_name(globals_file, group_name)
 
         self.globals_model = AlternatingColorModel(view=self.ui.tableView_globals)
         self.globals_model.setHorizontalHeaderLabels(
-            ['Delete', 'Name', 'Default', 'Units', 'Scan?', 'Scan', 'Expansion']
+            ['Scan?', 'Name', 'Default', 'Scan', 'Units', 'Expansion']
         )
         self.globals_model.setSortRole(self.GLOBALS_ROLE_SORT_DATA)
 
@@ -713,7 +773,6 @@ class GroupTab(object):
         # Make it so the user can just start typing on an item to edit:
         self.ui.tableView_globals.setEditTriggers(QtWidgets.QTableView.AnyKeyPressed |
                                                   QtWidgets.QTableView.EditKeyPressed)
-        # Ensure the clickable region of the delete button doesn't extend forever:
         self.ui.tableView_globals.horizontalHeader().setStretchLastSection(False)
         # Stretch the default column to fill available space:
         self.ui.tableView_globals.horizontalHeader().setSectionResizeMode(
@@ -747,7 +806,6 @@ class GroupTab(object):
             self.ui.tableView_globals.setColumnWidth(self.GLOBALS_COL_SCAN, 220)
         if self.ui.tableView_globals.columnWidth(self.GLOBALS_COL_EXPANSION) < 100:
             self.ui.tableView_globals.setColumnWidth(self.GLOBALS_COL_EXPANSION, 100)
-        self.ui.tableView_globals.resizeColumnToContents(self.GLOBALS_COL_DELETE)
 
         # Error state of tab
         self.tab_contains_errors = False
@@ -805,12 +863,10 @@ class GroupTab(object):
             self.on_globals_model_expansion_changed(expansion_item)
 
         # Add the dummy item at the end:
-        dummy_delete_item = QtGui.QStandardItem()
-        # This lets later code know that this row does not correspond to an
-        # actual global:
-        dummy_delete_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
-        dummy_delete_item.setFlags(QtCore.Qt.NoItemFlags)
-        dummy_delete_item.setToolTip('Click to add global')
+        dummy_scan_enabled_item = QtGui.QStandardItem()
+        dummy_scan_enabled_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
+        dummy_scan_enabled_item.setFlags(QtCore.Qt.NoItemFlags)
+        dummy_scan_enabled_item.setToolTip('Click to add global')
 
         dummy_name_item = QtGui.QStandardItem(self.GLOBALS_DUMMY_ROW_TEXT)
         dummy_name_item.setFont(QtGui.QFont(GLOBAL_MONOSPACE_FONT))
@@ -829,11 +885,6 @@ class GroupTab(object):
         dummy_units_item.setFlags(QtCore.Qt.NoItemFlags)
         dummy_units_item.setToolTip('Click to add global')
 
-        dummy_scan_enabled_item = QtGui.QStandardItem()
-        dummy_scan_enabled_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
-        dummy_scan_enabled_item.setFlags(QtCore.Qt.NoItemFlags)
-        dummy_scan_enabled_item.setToolTip('Click to add global')
-
         dummy_scan_item = QtGui.QStandardItem()
         dummy_scan_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
         dummy_scan_item.setFlags(QtCore.Qt.NoItemFlags)
@@ -846,12 +897,11 @@ class GroupTab(object):
 
         self.globals_model.appendRow(
             [
-                dummy_delete_item,
+                dummy_scan_enabled_item,
                 dummy_name_item,
                 dummy_default_item,
-                dummy_units_item,
-                dummy_scan_enabled_item,
                 dummy_scan_item,
+                dummy_units_item,
                 dummy_expansion_item,
             ]
         )
@@ -873,13 +923,6 @@ class GroupTab(object):
         # self.update_parse_indication after runmanager has a chance to parse
         # everything and get back to us about what that data should be.
 
-        delete_item = QtGui.QStandardItem()
-        delete_item.setIcon(QtGui.QIcon(':qtutils/fugue/minus'))
-        # Must be set to something so that the dummy row doesn't get sorted first:
-        delete_item.setData(False, self.GLOBALS_ROLE_SORT_DATA)
-        delete_item.setEditable(False)
-        delete_item.setToolTip('Delete global from group.')
-
         name_item = QtGui.QStandardItem(name)
         name_item.setData(name, self.GLOBALS_ROLE_SORT_DATA)
         name_item.setData(name, self.GLOBALS_ROLE_PREVIOUS_TEXT)
@@ -889,8 +932,8 @@ class GroupTab(object):
         default_item = QtGui.QStandardItem(default)
         default_item.setData(default, self.GLOBALS_ROLE_SORT_DATA)
         default_item.setData(str(default), self.GLOBALS_ROLE_PREVIOUS_TEXT)
-        default_item.setToolTip('Evaluating...')
         default_item.setFont(QtGui.QFont(GLOBAL_MONOSPACE_FONT))
+        self.update_expression_item_metadata(default_item, 'Evaluating...')
 
         units_item = QtGui.QStandardItem(units)
         units_item.setData(units, self.GLOBALS_ROLE_SORT_DATA)
@@ -912,8 +955,8 @@ class GroupTab(object):
         scan_item = QtGui.QStandardItem(scan)
         scan_item.setData(scan, self.GLOBALS_ROLE_SORT_DATA)
         scan_item.setData(scan, self.GLOBALS_ROLE_PREVIOUS_TEXT)
-        scan_item.setToolTip('Used when Scan? is checked.')
         scan_item.setFont(QtGui.QFont(GLOBAL_MONOSPACE_FONT))
+        self.update_expression_item_metadata(scan_item, 'Used when Scan? is checked.')
 
         expansion_item = QtGui.QStandardItem(expansion)
         expansion_item.setData(expansion, self.GLOBALS_ROLE_SORT_DATA)
@@ -921,12 +964,11 @@ class GroupTab(object):
         expansion_item.setToolTip('')
 
         row = [
-            delete_item,
+            scan_enabled_item,
             name_item,
             default_item,
-            units_item,
-            scan_enabled_item,
             scan_item,
+            units_item,
             expansion_item,
         ]
         return row
@@ -945,9 +987,6 @@ class GroupTab(object):
             # the name item so they can enter a name for the new global:
             self.ui.tableView_globals.setCurrentIndex(name_index)
             self.ui.tableView_globals.edit(name_index)
-        elif item.column() == self.GLOBALS_COL_DELETE:
-            # They clicked a delete button.
-            self.delete_global(global_name)
         elif item.column() != self.GLOBALS_COL_SCAN_ENABLED:
             # Edit whatever it is:
             if (self.ui.tableView_globals.currentIndex() != index
@@ -1148,26 +1187,64 @@ class GroupTab(object):
         scan_enabled_item = self.get_global_item_by_name(
             global_name, self.GLOBALS_COL_SCAN_ENABLED
         )
+        default_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_DEFAULT)
         scan_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_SCAN)
         expansion_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_EXPANSION)
         scan_enabled = scan_enabled_item.checkState() == QtCore.Qt.Checked
         with self.globals_model_item_changed_disconnected:
             scan_enabled_item.setData(scan_enabled, self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE)
             scan_enabled_item.setData(scan_enabled, self.GLOBALS_ROLE_SORT_DATA)
-            scan_item.setEditable(scan_enabled)
+            scan_item.setEditable(True)
             if scan_enabled:
-                scan_item.setToolTip('Expression used when Scan? is checked.')
                 expansion_item.setEditable(True)
                 expansion_item.setToolTip(expansion_item.toolTip() or 'Evaluating...')
                 expansion_item.setData(expansion_item.text(), self.GLOBALS_ROLE_SORT_DATA)
             else:
-                scan_item.setToolTip('Enable Scan? to edit the Scan expression.')
                 expansion_item.setEditable(False)
                 expansion_item.setText('')
                 expansion_item.setData('', self.GLOBALS_ROLE_PREVIOUS_TEXT)
                 expansion_item.setData('', self.GLOBALS_ROLE_SORT_DATA)
                 expansion_item.setData(None, QtCore.Qt.DecorationRole)
                 expansion_item.setToolTip('Enable Scan? to set an expansion mode.')
+            self.update_expression_item_metadata(
+                default_item,
+                'Used for standard shots and when Scan? is unchecked.',
+            )
+            self.update_expression_item_metadata(
+                scan_item,
+                'Expression used when Scan? is checked.'
+                if scan_enabled
+                else 'Editable, but used only when Scan? is checked.',
+            )
+        self.update_expression_backgrounds(global_name)
+
+    def update_expression_backgrounds(self, global_name, error=False):
+        default_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_DEFAULT)
+        scan_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_SCAN)
+        scan_enabled_item = self.get_global_item_by_name(
+            global_name, self.GLOBALS_COL_SCAN_ENABLED
+        )
+        active_item = (
+            scan_item
+            if scan_enabled_item.checkState() == QtCore.Qt.Checked
+            else default_item
+        )
+        inactive_item = default_item if active_item is scan_item else scan_item
+        with self.globals_model_item_changed_disconnected:
+            inactive_item.setData(None, QtCore.Qt.BackgroundRole)
+            color = self.color_error if error else self.color_active
+            active_item.setBackground(QtGui.QBrush(QtGui.QColor(color)))
+
+    def update_expression_item_metadata(self, item, base_tooltip, icon=None):
+        tooltip = tooltip_with_hidden_unicode_warning(base_tooltip, item.text())
+        if item.toolTip() != tooltip:
+            item.setToolTip(tooltip)
+        if icon is not None:
+            item.setIcon(icon)
+        elif hidden_unicode_issues(item.text()):
+            item.setIcon(QtGui.QIcon(':qtutils/fugue/exclamation-red'))
+        elif not item.icon().isNull():
+            item.setData(None, QtCore.Qt.DecorationRole)
 
     def do_model_sort(self):
         header = self.ui.tableView_globals.horizontalHeader()
@@ -1244,7 +1321,6 @@ class GroupTab(object):
         previous_icon = item.icon()
         item.setData(new_default, self.GLOBALS_ROLE_PREVIOUS_TEXT)
         item.setData(new_default, self.GLOBALS_ROLE_SORT_DATA)
-        item.setData(None, QtCore.Qt.BackgroundRole)
         item.setIcon(QtGui.QIcon(':qtutils/fugue/hourglass'))
         args = global_name, previous_default, new_default, item, previous_background, previous_icon
         if interactive:
@@ -1279,7 +1355,7 @@ class GroupTab(object):
                 raise
         else:
             self.do_model_sort()
-            item.setToolTip('Evaluating...')
+            self.update_expression_item_metadata(item, 'Evaluating...')
             self.globals_changed()
             if not interactive:
                 return
@@ -1335,7 +1411,21 @@ class GroupTab(object):
         else:
             item.setData(new_state, self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE)
             item.setData(new_state, self.GLOBALS_ROLE_SORT_DATA)
+            if new_state:
+                expansion_item = self.get_global_item_by_name(
+                    global_name, self.GLOBALS_COL_EXPANSION
+                )
+                if not expansion_item.text():
+                    with self.globals_model_item_changed_disconnected:
+                        expansion_item.setText('outer')
+                        expansion_item.setData('outer', self.GLOBALS_ROLE_PREVIOUS_TEXT)
+                        expansion_item.setData('outer', self.GLOBALS_ROLE_SORT_DATA)
             self.update_scan_controls(global_name)
+            if new_state:
+                expansion_item = self.get_global_item_by_name(
+                    global_name, self.GLOBALS_COL_EXPANSION
+                )
+                self.on_globals_model_expansion_changed(expansion_item)
             self.do_model_sort()
             self.globals_changed()
             if new_state:
@@ -1347,6 +1437,10 @@ class GroupTab(object):
                     self.ui.tableView_globals.setCurrentIndex(scan_item.index())
                     self.ui.tableView_globals.edit(scan_item.index())
             else:
+                default_item = self.get_global_item_by_name(
+                    global_name, self.GLOBALS_COL_DEFAULT
+                )
+                self.ui.tableView_globals.setCurrentIndex(default_item.index())
                 scroll_view_to_row_if_current(self.ui.tableView_globals, item)
 
     def change_global_scan(self, global_name, previous_scan, new_scan):
@@ -1363,7 +1457,7 @@ class GroupTab(object):
             item.setData(new_scan, self.GLOBALS_ROLE_PREVIOUS_TEXT)
             item.setData(new_scan, self.GLOBALS_ROLE_SORT_DATA)
             self.do_model_sort()
-            item.setToolTip('Evaluating...')
+            self.update_expression_item_metadata(item, 'Evaluating...')
             self.globals_changed()
             scroll_view_to_row_if_current(self.ui.tableView_globals, item)
 
@@ -1436,25 +1530,27 @@ class GroupTab(object):
                     if expansion_item.data(self.GLOBALS_ROLE_SORT_DATA) != expansion:
                         expansion_item.setData(expansion, self.GLOBALS_ROLE_SORT_DATA)
                 expansion_item.setText(expansion)
-                inactive_item.setData(None, QtCore.Qt.DecorationRole)
-                inactive_item.setData(None, QtCore.Qt.BackgroundRole)
+                inactive_base_tooltip = (
+                    'Used for standard shots and when Scan? is unchecked.'
+                    if active_item is scan_item
+                    else 'Used only when Scan? is checked.'
+                )
+                self.update_expression_item_metadata(
+                    inactive_item, inactive_base_tooltip
+                )
                 if isinstance(value, Exception):
-                    active_item.setBackground(QtGui.QBrush(QtGui.QColor(self.COLOR_ERROR)))
-                    active_item.setIcon(QtGui.QIcon(':qtutils/fugue/exclamation'))
+                    self.update_expression_backgrounds(global_name, error=True)
                     tooltip = '%s: %s' % (value.__class__.__name__, str(value))
+                    self.update_expression_item_metadata(
+                        active_item,
+                        tooltip,
+                        QtGui.QIcon(':qtutils/fugue/exclamation'),
+                    )
                     self.tab_contains_errors = True
                 else:
-                    if active_item.background().color().name().lower() != self.COLOR_OK.lower():
-                        active_item.setBackground(QtGui.QBrush(QtGui.QColor(self.COLOR_OK)))
-                    if not active_item.icon().isNull():
-                        active_item.setData(None, QtCore.Qt.DecorationRole)
+                    self.update_expression_backgrounds(global_name)
                     tooltip = repr(value)
-                if active_item.toolTip() != tooltip:
-                    active_item.setToolTip(tooltip)
-                if active_item is scan_item:
-                    default_item.setToolTip('Used for standard shots and when Scan? is unchecked.')
-                else:
-                    scan_item.setToolTip('Used only when Scan? is checked.')
+                    self.update_expression_item_metadata(active_item, tooltip)
             if self.tab_contains_errors:
                 self.set_tab_icon(':qtutils/fugue/exclamation')
             else:
@@ -1468,9 +1564,8 @@ class GroupTab(object):
                     continue
                 scan_item = self.globals_model.item(row, self.GLOBALS_COL_SCAN)
                 for item in (default_item, scan_item):
-                    item.setData(None, QtCore.Qt.DecorationRole)
-                    item.setToolTip('Group inactive')
-                    item.setData(None, QtCore.Qt.BackgroundRole)
+                    self.update_expression_item_metadata(item, 'Group inactive')
+                self.update_expression_backgrounds(self.globals_model.item(row, self.GLOBALS_COL_NAME).text())
 
 
 class RunmanagerMainWindow(QtWidgets.QMainWindow):
@@ -1528,6 +1623,8 @@ class RunManager(object):
         self.ui = loader.load(
             os.path.join(runmanager_dir, 'main.ui'), RunmanagerMainWindow()
         )
+        self.move_queue_tab_to_front()
+        self.setup_shot_target_controls()
 
         self.output_box = OutputBox(self.ui.verticalLayout_output_tab)
 
@@ -1557,7 +1654,7 @@ class RunManager(object):
         self.setup_axes_tab()
         self.setup_groups_tab()
         self.setup_queue_tab()
-        run_view_layout = self.ui.findChild(QtWidgets.QLayout, 'verticalLayout_2')
+        run_view_layout = self.ui.findChild(QtWidgets.QLayout, 'gridLayout_shot_targets')
         self.analysis_submission = AnalysisSubmission(self, run_view_layout)
         self.connect_signals()
 
@@ -1590,13 +1687,6 @@ class RunManager(object):
 
         # A flag telling the compilation thread to abort:
         self.compilation_aborted = threading.Event()
-
-        # A few attributes for self.guess_expansion_modes() to keep track of
-        # its state, and thus detect changes:
-        self.previous_evaled_globals = {}
-        self.previous_global_hierarchy = {}
-        self.previous_expansion_types = {}
-        self.previous_expansions = {}
 
         # The prospective number of shots resulting from compilation
         self.n_shots = None
@@ -1653,6 +1743,31 @@ class RunManager(object):
 
         splash.update_text('done')
         self.ui.show()
+
+    def move_queue_tab_to_front(self):
+        queue_tab = self.ui.tab_queue
+        queue_index = self.ui.tabWidget.indexOf(queue_tab)
+        if queue_index <= 0:
+            return
+        icon = self.ui.tabWidget.tabIcon(queue_index)
+        title = self.ui.tabWidget.tabText(queue_index)
+        tooltip = self.ui.tabWidget.tabToolTip(queue_index)
+        whats_this = self.ui.tabWidget.tabWhatsThis(queue_index)
+        enabled = self.ui.tabWidget.isTabEnabled(queue_index)
+        self.ui.tabWidget.removeTab(queue_index)
+        self.ui.tabWidget.insertTab(0, queue_tab, icon, title)
+        self.ui.tabWidget.setTabToolTip(0, tooltip)
+        self.ui.tabWidget.setTabWhatsThis(0, whats_this)
+        self.ui.tabWidget.setTabEnabled(0, enabled)
+        self.ui.tabWidget.setCurrentWidget(queue_tab)
+
+    def setup_shot_target_controls(self):
+        set_icon_label_pixmap(
+            self.ui.label_run_shots_icon, art_dir / 'blacs_22x22.png'
+        )
+        set_icon_label_pixmap(
+            self.ui.label_view_shots_icon, art_dir / 'runviewer_22x22.png'
+        )
 
     def setup_config(self):
         required_config_params = {"DEFAULT": ["apparatus_name"],
@@ -2667,7 +2782,8 @@ class RunManager(object):
         parent_item = item.parent()
         # File rows are supposed to be uneditable, but just to be sure we have
         # a group row:
-        assert parent_item is not None
+        if parent_item is None:
+            return
         if item.data(self.GROUPS_ROLE_IS_DUMMY_ROW):
             item_text = item.text()
             if item_text != self.GROUPS_DUMMY_ROW_TEXT:
@@ -2916,23 +3032,14 @@ class RunManager(object):
             # There was an error, get_active_groups has already shown
             # it to the user.
             return
-        # Expansion mode is automatically updated when the global's
-        # type changes. If this occurs, we will have to parse again to
-        # include the change:
-        while True:
-            results = self.parse_globals(active_groups, raise_exceptions=False, expand_globals=False, return_dimensions = True)
-            sequence_globals, shots, evaled_globals, global_hierarchy, expansions, dimensions = results
-            self.n_shots = len(shots)
-            expansions_changed = self.guess_expansion_modes(
-                active_groups, evaled_globals, global_hierarchy, expansions)
-            if not expansions_changed:
-                # Now expand globals while parsing to calculate the number of shots.
-                # this must only be done after the expansion type guessing has been updated to avoid exceptions
-                # when changing a zip group from a list to a single value
-                results = self.parse_globals(active_groups, raise_exceptions=False, expand_globals=True, return_dimensions = True)
-                sequence_globals, shots, evaled_globals, global_hierarchy, expansions, dimensions = results
-                self.n_shots = len(shots)
-                break
+        results = self.parse_globals(
+            active_groups,
+            raise_exceptions=False,
+            expand_globals=True,
+            return_dimensions=True,
+        )
+        sequence_globals, shots, evaled_globals, global_hierarchy, expansions, dimensions = results
+        self.n_shots = len(shots)
         self.update_tabs_parsing_indication(active_groups, sequence_globals, evaled_globals, self.n_shots)
         self.update_axes_tab(expansions, dimensions)
 
@@ -3050,9 +3157,10 @@ class RunManager(object):
         if self.groups_model.findItems(new_path, column=self.GROUPS_COL_NAME):
             raise RuntimeError("A globals file named %s is already open." % new_path)
         file_name_item = matching_items[0]
-        file_name_item.setText(new_path)
-        file_name_item.setToolTip(new_path)
-        file_name_item.setData(new_path, self.GROUPS_ROLE_SORT_DATA)
+        with self.groups_model_item_changed_disconnected:
+            file_name_item.setText(new_path)
+            file_name_item.setToolTip(new_path)
+            file_name_item.setData(new_path, self.GROUPS_ROLE_SORT_DATA)
         updated_groups = {}
         for (globals_file, group_name), group_tab in self.currently_open_groups.items():
             if globals_file == old_path:
@@ -3439,9 +3547,6 @@ class RunManager(object):
         if is_using_default_shot_output_folder:
             shot_output_folder = ''
 
-        # Get the server hostnames:
-        blacs_host = self.ui.lineEdit_BLACS_hostname.text()
-
         send_to_runviewer = self.ui.checkBox_view_shots.isChecked()
         send_to_blacs = self.ui.checkBox_run_shots.isChecked()
         shuffle = self.ui.pushButton_shuffle.isChecked()
@@ -3465,7 +3570,6 @@ class RunManager(object):
                      'send_to_blacs': send_to_blacs,
                      'shuffle': shuffle,
                      'axes': axes,
-                     'blacs_host': blacs_host,
                      'queue_compile_mode': self.queue_controller.compile_mode,
                      'queue_empty_policy': self.queue_controller.empty_queue_policy,
                      'standard_labscript_file': self.standard_labscript_lineedit.text(),
@@ -3602,10 +3706,6 @@ class RunManager(object):
             for name, shuffle in axes:
                 self.add_item_to_axes_model(name, shuffle)
             self.update_axes_indentation() 
-
-        blacs_host = runmanager_config.get('blacs_host')
-        if blacs_host is not None:
-            self.ui.lineEdit_BLACS_hostname.setText(blacs_host)
 
         queue_compile_mode = runmanager_config.get('queue_compile_mode')
         if queue_compile_mode is not None:
@@ -3976,185 +4076,6 @@ class RunManager(object):
         else:
             return sequence_globals, shots, evaled_globals, global_hierarchy, expansions
 
-    def guess_expansion_modes(self, active_groups, evaled_globals, global_hierarchy, expansions):
-        """This function is designed to be called iteratively. It changes the
-        expansion type of globals that reference other globals - such that
-        globals referencing an iterable global will be zipped with it, rather
-        than outer producted. Each time this method is called,
-        self.parse_globals should also be called, so that the globals are
-        evaluated with their new expansion modes, if they changed. This should
-        be performed repeatedly until there are no more changes. Note that
-        this method does not return what expansion types it thinks globals
-        should have - it *actually writes them to the globals HDF5 file*. So
-        it is up to later code to ensure it re-reads the expansion mode from
-        the HDF5 file before proceeding. At present this method is only called
-        from self.preparse_globals(), so see there to see how it fits in with
-        everything else. This method uses four instance attributes to store
-        state: self.previous_evaled_globals, self.previous_global_hierarchy,
-        self.previous_expansion_types and self.previous_expansions. This is
-        neccesary so that it can detect changes."""
-
-        # Do nothing if there were exceptions:
-        globals_details = runmanager.get_globals_details(active_groups)
-        scan_enabled = {
-            global_name: record['scan_enabled']
-            for group_name, group_globals in globals_details.items()
-            for global_name, record in group_globals.items()
-        }
-        for group_name in evaled_globals:
-            for global_name in evaled_globals[group_name]:
-                value = evaled_globals[group_name][global_name]
-                if isinstance(value, Exception):
-                    # Let ExpansionErrors through through, as they occur
-                    # when the user has changed the value without changing
-                    # the expansion type:
-                    if isinstance(value, runmanager.ExpansionError):
-                        continue
-                    return False
-        # Did the guessed expansion type for any of the globals change?
-        expansion_types_changed = False
-        expansion_types = {}
-        for group_name in evaled_globals:
-            for global_name in evaled_globals[group_name]:
-                new_value = evaled_globals[group_name][global_name]
-                try:
-                    previous_value = self.previous_evaled_globals[group_name][global_name]
-                except KeyError:
-                    # This variable is used to guess the expansion type
-                    # 
-                    # If we already have an expansion specified for this, but
-                    # don't have a previous value, then we should use the 
-                    # new_value for the guess as we are likely loading from HDF5
-                    # file for the first time (and either way, don't want to 
-                    # overwrite what the user has put in the expansion type)
-                    #
-                    # If we don't have an expansion...
-                    # then we set it to '0' which will result in an
-                    # expansion type guess of '' (emptys string) This will
-                    # either result in nothing being done to the expansion
-                    # type or the expansion type being found to be 'outer',
-                    # which will then make it go through the machinery below
-                    if global_name in expansions and expansions[global_name]:
-                        previous_value = new_value
-                    else:
-                        previous_value = 0
-
-                new_guess = runmanager.guess_expansion_type(new_value)
-                previous_guess = runmanager.guess_expansion_type(previous_value)
-                if not scan_enabled.get(global_name, False):
-                    continue
-
-                if new_guess == 'outer':
-                    expansion_types[global_name] = {'previous_guess': previous_guess,
-                                                    'new_guess': new_guess,
-                                                    'group_name': group_name,
-                                                    'value': new_value
-                                                    }
-                elif new_guess != previous_guess:
-                    filename = active_groups[group_name]
-                    runmanager.set_expansion(filename, group_name, global_name, new_guess)
-                    expansions[global_name] = new_guess
-                    expansion_types_changed = True
-
-        # recursively find dependencies and add them to a zip group!
-        def find_dependencies(global_name, global_hierarchy, expansion_types):
-            results = set()
-            for name, dependencies in global_hierarchy.items():
-                if name in expansion_types and global_name in dependencies:
-                    results.add(name)
-                    results = results.union(find_dependencies(name, global_hierarchy, expansion_types))
-            return results
-
-        def global_depends_on_global_with_outer_product(global_name, global_hierarchy, expansions):
-            if global_name not in global_hierarchy:
-                return False
-            else:
-                for dependency in global_hierarchy[global_name]:
-                    if expansions[dependency]:
-                        return True
-
-        def set_expansion_type_guess(expansion_types, expansions, global_name, expansion_to_set, new=True):
-            if new:
-                key = 'new_guess'
-            else:
-                key = 'previous_guess'
-                
-            # debug logging
-            log_if_global(global_name, [], 'setting expansion type for new dependency' if new else 'setting expansion type for old dependencies')
-            
-            
-            # only do this if the expansion is *not* already set to a specific zip group
-            if global_name in expansions and expansions[global_name] != '' and expansions[global_name] != 'outer':
-                expansion_types[global_name][key] = expansions[global_name]
-                
-                # debug logging
-                log_if_global(global_name, [], 'Using existing expansion %s for %s'%(expansions[global_name], global_name))
-            else:
-                expansion_types[global_name][key] = expansion_to_set
-                expansions[global_name] = expansion_to_set
-                
-                # debug logging
-                log_if_global(global_name, [], 'Using existing expansion %s for %s'%(expansion_to_set, global_name))
-            
-        
-        for global_name in sorted(expansion_types):
-            # we have a global that does not depend on anything that has an
-            # expansion type of 'outer'
-            if (not global_depends_on_global_with_outer_product(global_name, global_hierarchy, expansions)
-                    and not isinstance(expansion_types[global_name]['value'], runmanager.ExpansionError)):
-                current_dependencies = find_dependencies(global_name, global_hierarchy, expansion_types)
-
-                # if this global has other globals that use it, then add them
-                # all to a zip group with the name of this global
-                if current_dependencies:
-                    for dependency in current_dependencies:                        
-                        set_expansion_type_guess(expansion_types, expansions, dependency,  str(global_name))
-                            
-                    set_expansion_type_guess(expansion_types, expansions, global_name,  str(global_name))
-
-        for global_name in sorted(self.previous_expansion_types):
-            if (not global_depends_on_global_with_outer_product(
-                global_name, self.previous_global_hierarchy, self.previous_expansions)
-                    and not isinstance(self.previous_expansion_types[global_name]['value'], runmanager.ExpansionError)):
-                old_dependencies = find_dependencies(global_name, self.previous_global_hierarchy, self.previous_expansion_types)
-                # if this global has other globals that use it, then add them
-                # all to a zip group with the name of this global
-                if old_dependencies:
-                    for dependency in old_dependencies:
-                        if dependency in expansion_types:
-                            set_expansion_type_guess(expansion_types, self.previous_expansions, dependency, str(global_name), new=False)
-                    if global_name in expansion_types:
-                        set_expansion_type_guess(expansion_types, self.previous_expansions, global_name, str(global_name), new=False)
-
-        for global_name, guesses in expansion_types.items():
-            if guesses['new_guess'] != guesses['previous_guess']:
-                filename = active_groups[guesses['group_name']]
-                runmanager.set_expansion(
-                    filename, str(guesses['group_name']), str(global_name), str(guesses['new_guess']))
-                expansions[global_name] = guesses['new_guess']
-                expansion_types_changed = True
-
-        # Now check everything that has an expansion type not equal to outer.
-        # If it has one, but is not iteratble, remove it from teh zip group
-        for group_name in evaled_globals:
-            for global_name in evaled_globals[group_name]:
-                if not scan_enabled.get(global_name, False):
-                    continue
-                if expansions[global_name] and expansions[global_name] != 'outer':
-                    try:
-                        iter(evaled_globals[group_name][global_name])
-                    except Exception:
-                        filename = active_groups[group_name]
-                        runmanager.set_expansion(filename, group_name, global_name, '')
-                        expansion_types_changed = True
-
-        self.previous_evaled_globals = evaled_globals
-        self.previous_global_hierarchy = global_hierarchy
-        self.previous_expansion_types = expansion_types
-        self.previous_expansions = expansions
-
-        return expansion_types_changed
-
     def make_h5_files(self, labscript_file, output_folder, sequence_globals, shots, shuffle):
         sequence_attrs, default_output_dir, filename_prefix = runmanager.new_sequence_details(
             labscript_file, config=self.exp_config, increment_sequence_index=True
@@ -4177,8 +4098,10 @@ class RunManager(object):
         logger.debug(run_files)
         return labscript_file, run_files
 
-    def send_to_BLACS(self, run_file, BLACS_hostname):
+    def send_to_BLACS(self, run_file, BLACS_hostname=None):
         port = int(self.exp_config.get('ports', 'BLACS'))
+        if BLACS_hostname is None:
+            BLACS_hostname = self.exp_config.get('servers', 'blacs', fallback='localhost')
         agnostic_path = shared_drive.path_to_agnostic(run_file)
         self.output_box.output('Submitting run file %s.\n' % os.path.basename(run_file))
         try:
@@ -4447,10 +4370,7 @@ if __name__ == "__main__":
     logger = setup_logging('runmanager')
     labscript_utils.excepthook.set_logger(logger)
     logger.info('\n\n===============starting===============\n')
-    qapplication = QtWidgets.QApplication.instance()
-    if qapplication is None:
-        qapplication = QtWidgets.QApplication(sys.argv)
-    qapplication.setAttribute(QtCore.Qt.AA_DontShowIconsInMenus, False)
+    qapplication = get_qapplication()
     app = RunManager()
     splash.update_text('Starting remote server')
     remote_server = RemoteServer()

@@ -50,6 +50,8 @@ def _normalise_record(record):
     )
     if not normalised["scan_enabled"]:
         normalised["expansion"] = ""
+    elif not normalised["expansion"]:
+        normalised["expansion"] = "outer"
     return normalised
 
 
@@ -357,6 +359,11 @@ def set_field(filename, groupname, globalname, field, value):
         record[field] = bool(value)
         if not record[field]:
             record["expansion"] = ""
+        elif not record["expansion"]:
+            # Scan membership is explicit. When a global is marked as scanned,
+            # default to a simple outer-product scan unless the user has
+            # already chosen a zip/outer mode.
+            record["expansion"] = "outer"
     else:
         record[field] = value
     set_global_record(filename, groupname, globalname, record)

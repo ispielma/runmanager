@@ -23,6 +23,7 @@ from pathlib import Path
 from qtutils import UiLoader, inmain_decorator
 from qtutils.qt import QtGui
 from qtutils.qt.QtCore import Qt, QSize
+from qtutils.qt import QtWidgets
 from qtutils.qt.QtWidgets import QSizePolicy
 from zprocess import TimeoutError, raise_exception_in_thread
 from zprocess.security import AuthenticationFailure
@@ -33,6 +34,17 @@ from labscript_utils.qtwidgets.elide_label import elide_label
 
 
 runmanager_dir = Path(__file__).absolute().parent
+art_dir = runmanager_dir.parent.parent / 'labscript-suite' / 'art'
+
+
+def set_icon_label_pixmap(label, icon_path, size=16):
+    icon = QtGui.QIcon(str(icon_path))
+    if icon.isNull():
+        label.clear()
+        return
+    label.setPixmap(icon.pixmap(size, size))
+    label.setMinimumSize(size, size)
+    label.setMaximumSize(size + 4, size + 4)
 
 
 class AnalysisSubmission(object):
@@ -40,18 +52,23 @@ class AnalysisSubmission(object):
         self.inqueue = queue.Queue()
         self.runmanager = runmanager
         self.port = self.runmanager.exp_config.getint('ports', 'lyse')
+        self.host = self.runmanager.exp_config.get('servers', 'lyse', fallback='localhost')
 
         self.widget = UiLoader().load(
             os.path.join(runmanager_dir, 'analysis_submission.ui')
         )
-        if parent_layout is not None:
-            try:
-                parent_layout.insertWidget(parent_layout.count(), self.widget)
-            except AttributeError:
-                parent_layout.addWidget(self.widget)
-        self.widget.frame.setSizePolicy(
-            QSizePolicy.MinimumExpanding, QSizePolicy.Preferred
+        set_icon_label_pixmap(
+            self.widget.send_to_server_icon, art_dir / 'lyse_22x22.png'
         )
+        if parent_layout is not None:
+            if isinstance(parent_layout, QtWidgets.QGridLayout):
+                self._attach_to_grid_layout(parent_layout)
+            else:
+                try:
+                    parent_layout.insertWidget(parent_layout.count(), self.widget)
+                except AttributeError:
+                    parent_layout.addWidget(self.widget)
+        self.widget.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
         elide_label(
             self.widget.resend_shots_label,
             self.widget.failed_to_send_frame.layout(),
@@ -59,9 +76,6 @@ class AnalysisSubmission(object):
         )
 
         self.widget.send_to_server.toggled.connect(self._set_send_to_server)
-        self.widget.server.editingFinished.connect(
-            lambda: self._set_server(self.widget.server.text())
-        )
         self.widget.clear_unsent_shots_button.clicked.connect(
             lambda _=False: self.clear_waiting_files()
         )
@@ -71,10 +85,8 @@ class AnalysisSubmission(object):
         self.failure_reason = None
         self.time_of_last_connectivity_check = 0
         self._shutdown = False
-        self._server = ''
         self._send_to_server = False
         self._server_online = ''
-        self.server = ''
         self.server_online = ''
         self.send_to_server = False
 
@@ -82,22 +94,36 @@ class AnalysisSubmission(object):
         self.mainloop_thread.daemon = True
         self.mainloop_thread.start()
 
+    def _attach_to_grid_layout(self, parent_layout):
+        row = parent_layout.rowCount()
+        source_layout = self.widget.layout()
+        widgets = [
+            self.widget.send_to_server,
+            self.widget.send_to_server_icon,
+            self.widget.send_to_server_text,
+            self.widget.server_online,
+            self.widget.failed_to_send_frame,
+        ]
+        for widget in widgets:
+            source_layout.removeWidget(widget)
+        parent_layout.addWidget(self.widget.send_to_server, row, 0)
+        parent_layout.addWidget(self.widget.send_to_server_icon, row, 1)
+        parent_layout.addWidget(self.widget.send_to_server_text, row, 2)
+        parent_layout.addWidget(self.widget.server_online, row, 3)
+        parent_layout.addWidget(self.widget.failed_to_send_frame, row + 1, 0, 1, 4)
+        self.widget.hide()
+
     def get_configuration_data(self):
-        return {'server': self.server, 'send_to_server': self.send_to_server}
+        return {'send_to_server': self.send_to_server}
 
     def restore_configuration_data(self, data):
         data = data or {}
-        self.server = data.get('server', '')
         self._apply_send_to_server(
             data.get('send_to_server', False), clear_waiting=False
         )
 
     def _set_send_to_server(self, value):
         self.send_to_server = value
-
-    def _set_server(self, server):
-        self.server = server
-        self.check_retry()
 
     @property
     @inmain_decorator(True)
@@ -113,7 +139,6 @@ class AnalysisSubmission(object):
         self._send_to_server = bool(value)
         self.widget.send_to_server.setChecked(self.send_to_server)
         if self.send_to_server:
-            self.widget.server.setEnabled(True)
             self.widget.server_online.show()
             self.check_retry()
         else:
@@ -121,19 +146,7 @@ class AnalysisSubmission(object):
                 self.clear_waiting_files()
             else:
                 self.widget.failed_to_send_frame.hide()
-            self.widget.server.setEnabled(False)
             self.widget.server_online.hide()
-
-    @property
-    @inmain_decorator(True)
-    def server(self):
-        return str(self._server)
-
-    @server.setter
-    @inmain_decorator(True)
-    def server(self, value):
-        self._server = value
-        self.widget.server.setText(self.server)
 
     @property
     @inmain_decorator(True)
@@ -164,6 +177,7 @@ class AnalysisSubmission(object):
             self._server_online,
             'Invalid server status: %s' % self._server_online,
         )
+        tooltip += '\nHost: %s' % self.host
         if self.failure_reason is not None:
             tooltip += '\n' + self.failure_reason
 
@@ -256,7 +270,7 @@ class AnalysisSubmission(object):
                 self._mainloop_logger.exception('Exception in mainloop, continuing')
 
     def check_connectivity(self):
-        host = self.server
+        host = self.host
         send_to_server = self.send_to_server
         if host and send_to_server:
             self.server_online = 'checking'
@@ -285,7 +299,7 @@ class AnalysisSubmission(object):
             data = {'filepath': labscript_utils.shared_drive.path_to_agnostic(path)}
             self.server_online = 'checking'
             try:
-                response = zmq_get(self.port, self.server, data, timeout=1)
+                response = zmq_get(self.port, self.host, data, timeout=1)
                 self.failure_reason = None
             except (TimeoutError, OSError, AuthenticationFailure) as e:
                 success = False

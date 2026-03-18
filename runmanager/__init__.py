@@ -254,13 +254,6 @@ def convert_globals_file(filename, dest_filename):
     return _globals_file.convert_to_toml(filename, dest_filename)
 
 
-def guess_expansion_type(value):
-    if isinstance(value, np.ndarray) or isinstance(value, list):
-        return u'outer'
-    else:
-        return u''
-
-
 def iterator_to_tuple(iterator, max_length=1000000):
     # We want to prevent infinite length tuples, but we cannot know
     # whether they are infinite or not in advance. So we'll convert to
