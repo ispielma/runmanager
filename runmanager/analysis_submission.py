@@ -71,9 +71,12 @@ class AnalysisSubmission(object):
         self.failure_reason = None
         self.time_of_last_connectivity_check = 0
         self._shutdown = False
+        self._server = ''
+        self._send_to_server = False
+        self._server_online = ''
         self.server = ''
-        self.send_to_server = False
         self.server_online = ''
+        self.send_to_server = False
 
         self.mainloop_thread = threading.Thread(target=self.mainloop)
         self.mainloop_thread.daemon = True
