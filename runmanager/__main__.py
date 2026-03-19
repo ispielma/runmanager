@@ -23,7 +23,7 @@ import desktop_app
 desktop_app.set_process_appid('runmanager')
 
 # Splash screen
-from labscript_utils.splash import Splash, get_qapplication
+from labscript_utils.splash import Splash, get_qapplication, run_qapplication
 splash = Splash(os.path.join(os.path.dirname(__file__), 'runmanager.svg'))
 splash.show()
 
@@ -35,7 +35,6 @@ import threading
 import ast
 import pprint
 import traceback
-import signal
 from pathlib import Path
 import copy
 import uuid
@@ -4320,13 +4319,4 @@ if __name__ == "__main__":
     splash.update_text('Starting remote server')
     remote_server = RemoteServer()
     splash.hide()
-
-    # Let the interpreter run every 500ms so it sees Ctrl-C interrupts:
-    timer = QtCore.QTimer()
-    timer.start(500)
-    timer.timeout.connect(lambda: None)
-    # Upon seeing a ctrl-c interrupt, quit the event loop
-    signal.signal(signal.SIGINT, lambda *args: qapplication.exit())
-
-    qapplication.exec_()
-    remote_server.shutdown()
+    run_qapplication(qapplication, on_shutdown=remote_server.shutdown)
