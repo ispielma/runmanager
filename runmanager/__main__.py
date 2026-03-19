@@ -52,7 +52,11 @@ from qtutils.qt.QtCore import pyqtSignal as Signal
 
 splash.update_text('importing labscript suite modules')
 from labscript_utils.ls_zprocess import zmq_get, ProcessTree, ZMQServer
-from labscript_utils.labconfig import LabConfig, save_appconfig, load_appconfig
+from labscript_utils.labconfig import (
+    LabConfig,
+    save_appconfig,
+    load_appconfig,
+)
 from labscript_utils.setup_logging import setup_logging
 import labscript_utils.shared_drive as shared_drive
 from labscript_utils import dedent
@@ -3350,11 +3354,11 @@ class RunManager(object):
         if self.last_save_config_file is not None:
             default = self.last_save_config_file
         else:
-            default = os.path.join(self.exp_config.get('paths', 'experiment_shot_storage'), 'runmanager.ini')
+            default = os.path.join(self.exp_config.get('paths', 'experiment_shot_storage'), 'runmanager.toml')
         save_file = QtWidgets.QFileDialog.getSaveFileName(self.ui,
                                                       'Select  file to save current runmanager configuration',
                                                       default,
-                                                      "config files (*.ini)")
+                                                      "Config files (*.toml)")
         if type(save_file) is tuple:
             save_file, _ = save_file
 
@@ -3365,7 +3369,9 @@ class RunManager(object):
         # forward slashes:
         save_file = os.path.abspath(save_file)
         self.save_configuration(save_file)
-        self.ui.actionSave_configuration.setText('Save configuration {}'.format(save_file))
+        self.ui.actionSave_configuration.setText(
+            'Save configuration {}'.format(self.last_save_config_file)
+        )
 
     def get_save_data(self):
         # Get the currently open files and active groups:
@@ -3433,9 +3439,9 @@ class RunManager(object):
 
     def save_configuration(self, save_file):
         save_data = self.get_save_data()
+        save_file = save_appconfig(save_file, {'runmanager_state': save_data})
         self.last_save_config_file = save_file
         self.last_save_data = save_data
-        save_appconfig(save_file, {'runmanager_state': save_data})
 
     def on_load_configuration_triggered(self):
         save_data = self.get_save_data()
@@ -3452,12 +3458,12 @@ class RunManager(object):
         if self.last_save_config_file is not None:
             default = self.last_save_config_file
         else:
-            default = os.path.join(self.exp_config.get('paths', 'experiment_shot_storage'), 'runmanager.ini')
+            default = os.path.join(self.exp_config.get('paths', 'experiment_shot_storage'), 'runmanager.toml')
 
         file = QtWidgets.QFileDialog.getOpenFileName(self.ui,
                                                  'Select runmanager configuration file to load',
                                                  default,
-                                                 "config files (*.ini)")
+                                                 "Config files (*.toml *.ini)")
         if type(file) is tuple:
             file, _ = file
 
@@ -3470,15 +3476,16 @@ class RunManager(object):
         self.load_configuration(file)
 
     def load_configuration(self, filename):
-        self.last_save_config_file = filename
-        self.ui.actionSave_configuration.setText('Save configuration %s'%filename)
         # Close all files:
         save_data = self.get_save_data()
         for globals_file in save_data['h5_files_open']:
             self.close_globals_file(globals_file, confirm=False)
         # Ensure folder exists, if this was opened programmatically we are
         # creating the file, so the directory had better exist!
-        runmanager_config = load_appconfig(filename).get('runmanager_state', {})
+        appconfig, save_target = load_appconfig(filename, return_save_path=True)
+        self.last_save_config_file = save_target
+        self.ui.actionSave_configuration.setText('Save configuration %s'%save_target)
+        runmanager_config = appconfig.get('runmanager_state', {})
 
         has_been_a_warning = [False]
         def warning(message):
@@ -3549,7 +3556,7 @@ class RunManager(object):
             self.axes_model.removeRows(0, self.axes_model.rowCount())
 
         # set the state of the global shuffle button. This ensure that if no axes items get loaded afterwards
-        # (e.g. because the globals in the .ini file are no longer expansion globals), then we still have 
+        # (e.g. because the globals in the saved config file are no longer expansion globals), then we still have 
         # an approximate state for the shuffle button that will apply to whatever globals are to be expanded.
         if runmanager_config.get('shuffle', False):
             self.ui.pushButton_shuffle.setChecked(True)
