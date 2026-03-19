@@ -56,6 +56,7 @@ splash.update_text('importing labscript suite modules')
 from labscript_utils.ls_zprocess import zmq_get, ProcessTree, ZMQServer
 from labscript_utils.labconfig import (
     LabConfig,
+    launch_from_config,
     save_appconfig,
     load_appconfig,
 )
@@ -2108,27 +2109,20 @@ class RunManager(object):
         self.ui.lineEdit_labscript_file.setText(labscript_file)
 
     def on_edit_labscript_file_clicked(self, checked):
-        # get path to text editor
-        editor_path = self.exp_config.get('programs', 'text_editor')
-        editor_args = self.exp_config.get('programs', 'text_editor_arguments')
         # Get the current labscript file:
         current_labscript_file = self.ui.lineEdit_labscript_file.text()
         # Ignore if no file selected
         if not current_labscript_file:
             return
-        if not editor_path:
-            error_dialog("No editor specified in the labconfig.")
-        if '{file}' in editor_args:
-            # Split the args on spaces into a list, replacing {file} with the labscript file
-            editor_args = [arg if arg != '{file}' else current_labscript_file for arg in editor_args.split()]
-        else:
-            # Otherwise if {file} isn't already in there, append it to the other args:
-            editor_args = [current_labscript_file] + editor_args.split()
-        try:
-            subprocess.Popen([editor_path] + editor_args)
-        except Exception as e:
-            error_dialog("Unable to launch text editor specified in %s. Error was: %s" %
-                         (self.exp_config.config_path, str(e)))
+        launch_from_config(
+            self.exp_config,
+            current_labscript_file,
+            'text_editor',
+            'text_editor_arguments',
+            "No editor specified in the labconfig.",
+            "Unable to launch text editor specified in %s. Error was: %s",
+            error_dialog,
+        )
 
     def on_select_shot_output_folder_clicked(self, checked):
         shot_output_folder = QtWidgets.QFileDialog.getExistingDirectory(self.ui,
