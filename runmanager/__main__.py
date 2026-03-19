@@ -63,6 +63,7 @@ from labscript_utils.setup_logging import setup_logging
 import labscript_utils.shared_drive as shared_drive
 from labscript_utils import dedent
 import labscript_utils.h5_lock
+from labscript_utils.qtwidgets.appconfig import AppConfigActions
 import h5py
 from zprocess import raise_exception_in_thread
 import runmanager
@@ -1683,8 +1684,6 @@ class RunManager(object):
         # The last location from which a globals file was selected, defaults
         # to experiment_shot_storage:
         self.last_opened_globals_folder = self.exp_config.get('paths', 'experiment_shot_storage')
-        # The last file to which the user saved or loaded a configuration:
-        self.last_save_config_file = None
         # The last manually selected shot output folder, defaults to
         # experiment_shot_storage:
         self.last_selected_shot_output_folder = self.exp_config.get('paths', 'experiment_shot_storage')
@@ -1732,9 +1731,19 @@ class RunManager(object):
         inthread(self.rollover_shot_output_folder)
         self.non_default_folder = None
 
-        # The data from the last time we saved the configuration, so we can
-        # know if something's changed:
-        self.last_save_data = None
+        self.appconfig = AppConfigActions(
+            self.ui,
+            'runmanager configuration',
+            self.get_default_configuration_path,
+            self.ui.actionSave_configuration,
+            self.ui.actionSave_configuration_as,
+            self.ui.actionLoad_configuration,
+            self.ui.actionRevert_configuration,
+            self.get_save_data,
+            self.save_configuration,
+            self.load_configuration,
+            error_dialog,
+        )
 
         # autoload a config file, if labconfig is set to do so:
         try:
@@ -1953,10 +1962,6 @@ class RunManager(object):
         self.output_popout_button.clicked.connect(self.on_output_popout_button_clicked)
 
         # The menu items:
-        self.ui.actionLoad_configuration.triggered.connect(self.on_load_configuration_triggered)
-        self.ui.actionRevert_configuration.triggered.connect(self.on_revert_configuration_triggered)
-        self.ui.actionSave_configuration.triggered.connect(self.on_save_configuration_triggered)
-        self.ui.actionSave_configuration_as.triggered.connect(self.on_save_configuration_as_triggered)
         self.ui.actionQuit.triggered.connect(self.ui.close)
 
         # labscript file and folder selection stuff:
@@ -2036,17 +2041,22 @@ class RunManager(object):
         QtWidgets.QShortcut('ctrl+Tab', self.ui, lambda: self.switch_tabs(+1))
         QtWidgets.QShortcut('ctrl+shift+Tab', self.ui, lambda: self.switch_tabs(-1))
 
+    def get_default_configuration_path(self):
+        """Return the default runmanager configuration path."""
+
+        return os.path.join(
+            self.exp_config.get('paths', 'experiment_shot_storage'),
+            'runmanager.toml',
+        )
+
     def on_close_event(self):
-        save_data = self.get_save_data()
-        if self.last_save_data is not None and save_data != self.last_save_data:
-            message = ('Current configuration (which groups are active/open and other GUI state) '
-                       'has changed: save config file \'%s\'?' % self.last_save_config_file)
-            reply = QtWidgets.QMessageBox.question(self.ui, 'Quit runmanager', message,
-                                               QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel)
-            if reply == QtWidgets.QMessageBox.Cancel:
-                return False
-            if reply == QtWidgets.QMessageBox.Yes:
-                self.save_configuration(self.last_save_config_file)
+        if not self.appconfig.prompt_to_save_if_dirty(
+            'Quit runmanager',
+            ('Current configuration (which groups are active/open and other GUI state) '
+             'has changed: save config file \'%s\'?'
+             % self.appconfig.last_save_config_file),
+        ):
+            return False
         self.analysis_submission.shutdown()
         self.to_child.put(['quit', None])
         return True
@@ -3491,50 +3501,6 @@ class RunManager(object):
         name_item.parent().removeRow(name_item.row())
         self.globals_changed()
 
-    def on_save_configuration_triggered(self):
-        if self.last_save_config_file is None:
-            self.on_save_configuration_as_triggered()
-            self.ui.actionSave_configuration_as.setEnabled(True)
-            self.ui.actionRevert_configuration.setEnabled(True)
-        else:
-            self.save_configuration(self.last_save_config_file)
-
-    def on_revert_configuration_triggered(self):
-        save_data = self.get_save_data()
-        if self.last_save_data is not None and save_data != self.last_save_data:
-            message = 'Revert configuration to the last saved state in \'%s\'?' % self.last_save_config_file
-            reply = QtWidgets.QMessageBox.question(self.ui, 'Load configuration', message,
-                                               QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel)
-            if reply == QtWidgets.QMessageBox.Cancel:
-                return
-            elif reply == QtWidgets.QMessageBox.Yes:
-                self.load_configuration(self.last_save_config_file)
-        else:
-            error_dialog('no changes to revert')
-
-    def on_save_configuration_as_triggered(self):
-        if self.last_save_config_file is not None:
-            default = self.last_save_config_file
-        else:
-            default = os.path.join(self.exp_config.get('paths', 'experiment_shot_storage'), 'runmanager.toml')
-        save_file = QtWidgets.QFileDialog.getSaveFileName(self.ui,
-                                                      'Select  file to save current runmanager configuration',
-                                                      default,
-                                                      "Config files (*.toml)")
-        if type(save_file) is tuple:
-            save_file, _ = save_file
-
-        if not save_file:
-            # User cancelled
-            return
-        # Convert to standard platform specific path, otherwise Qt likes
-        # forward slashes:
-        save_file = os.path.abspath(save_file)
-        self.save_configuration(save_file)
-        self.ui.actionSave_configuration.setText(
-            'Save configuration {}'.format(self.last_save_config_file)
-        )
-
     def get_save_data(self):
         # Get the currently open files and active groups:
         h5_files_open = []
@@ -3603,40 +3569,7 @@ class RunManager(object):
     def save_configuration(self, save_file):
         save_data = self.get_save_data()
         save_file = save_appconfig(save_file, {'runmanager_state': save_data})
-        self.last_save_config_file = save_file
-        self.last_save_data = save_data
-
-    def on_load_configuration_triggered(self):
-        save_data = self.get_save_data()
-        if self.last_save_data is not None and save_data != self.last_save_data:
-            message = ('Current configuration (which groups are active/open and other GUI state) '
-                       'has changed: save config file \'%s\'?' % self.last_save_config_file)
-            reply = QtWidgets.QMessageBox.question(self.ui, 'Load configuration', message,
-                                               QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel)
-            if reply == QtWidgets.QMessageBox.Cancel:
-                return
-            if reply == QtWidgets.QMessageBox.Yes:
-                self.save_configuration(self.last_save_config_file)
-
-        if self.last_save_config_file is not None:
-            default = self.last_save_config_file
-        else:
-            default = os.path.join(self.exp_config.get('paths', 'experiment_shot_storage'), 'runmanager.toml')
-
-        file = QtWidgets.QFileDialog.getOpenFileName(self.ui,
-                                                 'Select runmanager configuration file to load',
-                                                 default,
-                                                 "Config files (*.toml *.ini)")
-        if type(file) is tuple:
-            file, _ = file
-
-        if not file:
-            # User cancelled
-            return
-        # Convert to standard platform specific path, otherwise Qt likes
-        # forward slashes:
-        file = os.path.abspath(file)
-        self.load_configuration(file)
+        self.appconfig.mark_clean(save_file, save_data)
 
     def load_configuration(self, filename):
         # Close all files:
@@ -3646,8 +3579,6 @@ class RunManager(object):
         # Ensure folder exists, if this was opened programmatically we are
         # creating the file, so the directory had better exist!
         appconfig, save_target = load_appconfig(filename, return_save_path=True)
-        self.last_save_config_file = save_target
-        self.ui.actionSave_configuration.setText('Save configuration %s'%save_target)
         runmanager_config = appconfig.get('runmanager_state', {})
 
         has_been_a_warning = [False]
@@ -3770,9 +3701,7 @@ class RunManager(object):
 
         # Set as self.last_save_data:
         save_data = self.get_save_data()
-        self.last_save_data = save_data
-        self.ui.actionSave_configuration_as.setEnabled(True)
-        self.ui.actionRevert_configuration.setEnabled(True)
+        self.appconfig.mark_clean(save_target, save_data)
 
     def compile_loop(self):
         while True:
