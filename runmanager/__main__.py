@@ -211,17 +211,6 @@ def tooltip_with_hidden_unicode_warning(base_tooltip, text):
         return base_tooltip + '\n' + warning
     return warning
 
-
-@inmain_decorator()
-def error_dialog(message):
-    show_error_dialog(app.ui, 'runmanager', message)
-
-
-@inmain_decorator()
-def question_dialog(message):
-    return ask_question_dialog(app.ui, 'runmanager', message)
-
-
 @contextlib.contextmanager
 def nested(*contextmanagers):
     if contextmanagers:
@@ -1132,7 +1121,7 @@ class GroupTab(object):
         # message.
         confirm_multiple = (len(name_items) > 1)
         if confirm_multiple:
-            if not question_dialog("Delete %d globals?" % len(name_items)):
+            if not ask_question_dialog(app.ui, 'runmanager', "Delete %d globals?" % len(name_items)):
                 return
         for item in name_items:
             global_name = item.text()
@@ -1286,7 +1275,7 @@ class GroupTab(object):
             self.ensure_editable_globals_file()
             runmanager.new_global(self.globals_file, self.group_name, global_name)
         except Exception as e:
-            error_dialog(str(e))
+            show_error_dialog(app.ui, 'runmanager', str(e))
         else:
             # Insert the newly created global into the model:
             global_row = self.make_global_row(global_name)
@@ -1316,7 +1305,7 @@ class GroupTab(object):
             self.ensure_editable_globals_file()
             runmanager.rename_global(self.globals_file, self.group_name, previous_global_name, new_global_name)
         except Exception as e:
-            error_dialog(str(e))
+            show_error_dialog(app.ui, 'runmanager', str(e))
             # Set the item text back to the old name, since the rename failed:
             item.setText(previous_global_name)
         else:
@@ -1369,7 +1358,7 @@ class GroupTab(object):
             runmanager.set_value(self.globals_file, self.group_name, global_name, new_default)
         except Exception as e:
             if interactive:
-                error_dialog(str(e))
+                show_error_dialog(app.ui, 'runmanager', str(e))
             # Set the item text back to the old name, since the change failed:
             with self.globals_model_item_changed_disconnected:
                 item.setText(previous_default)
@@ -1404,7 +1393,7 @@ class GroupTab(object):
             self.ensure_editable_globals_file()
             runmanager.set_units(self.globals_file, self.group_name, global_name, new_units)
         except Exception as e:
-            error_dialog(str(e))
+            show_error_dialog(app.ui, 'runmanager', str(e))
             # Set the item text back to the old units, since the change failed:
             item.setText(previous_units)
         else:
@@ -1428,7 +1417,7 @@ class GroupTab(object):
             self.ensure_editable_globals_file()
             runmanager.set_scan_enabled(self.globals_file, self.group_name, global_name, new_state)
         except Exception as e:
-            error_dialog(str(e))
+            show_error_dialog(app.ui, 'runmanager', str(e))
             with self.globals_model_item_changed_disconnected:
                 item.setCheckState(QtCore.Qt.Checked if previous_state else QtCore.Qt.Unchecked)
                 item.setData(previous_state, self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE)
@@ -1477,7 +1466,7 @@ class GroupTab(object):
             self.ensure_editable_globals_file()
             runmanager.set_scan(self.globals_file, self.group_name, global_name, new_scan)
         except Exception as e:
-            error_dialog(str(e))
+            show_error_dialog(app.ui, 'runmanager', str(e))
             item.setText(previous_scan)
         else:
             item.setData(new_scan, self.GLOBALS_ROLE_PREVIOUS_TEXT)
@@ -1495,7 +1484,7 @@ class GroupTab(object):
             self.ensure_editable_globals_file()
             runmanager.set_expansion(self.globals_file, self.group_name, global_name, new_expansion)
         except Exception as e:
-            error_dialog(str(e))
+            show_error_dialog(app.ui, 'runmanager', str(e))
             # Set the item text back to the old units, since the change failed:
             item.setText(previous_expansion)
         else:
@@ -1519,7 +1508,7 @@ class GroupTab(object):
         logger.info('%s:%s - delete global: %s' %
                     (self.globals_file, self.group_name, global_name))
         if confirm:
-            if not question_dialog("Delete the global '%s'?" % global_name):
+            if not ask_question_dialog(app.ui, 'runmanager', "Delete the global '%s'?" % global_name):
                 return
         self.ensure_editable_globals_file()
         runmanager.delete_global(self.globals_file, self.group_name, global_name)
@@ -1735,7 +1724,7 @@ class RunManager(object):
             self.get_save_data,
             self.save_configuration,
             self.load_configuration,
-            error_dialog,
+            lambda message: show_error_dialog(self.ui, 'runmanager', message),
         )
 
         # autoload a config file, if labconfig is set to do so:
@@ -2094,7 +2083,7 @@ class RunManager(object):
         if not labscript_file:
             return
         if not os.path.isfile(labscript_file):
-            error_dialog("No such file %s." % labscript_file)
+            show_error_dialog(app.ui, 'runmanager', "No such file %s." % labscript_file)
             return
         # Save the containing folder for use next time we open the dialog box:
         self.last_opened_labscript_folder = os.path.dirname(labscript_file)
@@ -2114,7 +2103,7 @@ class RunManager(object):
             'text_editor_arguments',
             "No editor specified in the labconfig.",
             "Unable to launch text editor specified in %s. Error was: %s",
-            error_dialog,
+            lambda message: show_error_dialog(self.ui, 'runmanager', message),
         )
 
     def on_select_shot_output_folder_clicked(self, checked):
@@ -2191,7 +2180,7 @@ class RunManager(object):
         if not labscript_file:
             return
         if not os.path.isfile(labscript_file):
-            error_dialog("No such file %s." % labscript_file)
+            show_error_dialog(app.ui, 'runmanager', "No such file %s." % labscript_file)
             return
         self.last_opened_labscript_folder = os.path.dirname(labscript_file)
         self.standard_labscript_lineedit.setText(labscript_file)
@@ -2538,7 +2527,7 @@ class RunManager(object):
         # message.
         confirm_multiple = (len(name_items) > 1)
         if confirm_multiple:
-            if not question_dialog("Delete %d groups?" % len(name_items)):
+            if not ask_question_dialog(app.ui, 'runmanager', "Delete %d groups?" % len(name_items)):
                 return
         for item in name_items:
             globals_file = item.parent().text()
@@ -2592,7 +2581,7 @@ class RunManager(object):
         child_is_open = [child_item.data(self.GROUPS_ROLE_GROUP_IS_OPEN)
                          for child_item in child_openclose_items]
         if any(child_is_open):
-            if not question_dialog('Close %d file(s)? This will close %d currently open group(s).' %
+            if not ask_question_dialog(app.ui, 'runmanager', 'Close %d file(s)? This will close %d currently open group(s).' %
                                    (len(name_items), child_is_open.count(True))):
                 return
         for item in name_items:
@@ -2609,7 +2598,7 @@ class RunManager(object):
         if not globals_file:
             return
         if not os.path.isfile(globals_file):
-            error_dialog("No such file %s." % globals_file)
+            show_error_dialog(app.ui, 'runmanager', "No such file %s." % globals_file)
             return
         # Save the containing folder for use next time we open the dialog box:
         self.last_opened_globals_folder = os.path.dirname(globals_file)
@@ -3141,7 +3130,7 @@ class RunManager(object):
                             + 'Active groups must have unique names.'
                         )
                         if interactive:
-                            error_dialog(msg)
+                            show_error_dialog(app.ui, 'runmanager', msg)
                             return
                         raise RuntimeError(msg)
                     active_groups[group_name] = globals_file
@@ -3308,7 +3297,7 @@ class RunManager(object):
         child_is_open = [child_item.data(self.GROUPS_ROLE_GROUP_IS_OPEN)
                          for child_item in child_openclose_items]
         if confirm and any(child_is_open):
-            if not question_dialog('Close %s? This will close %d currently open group(s).' %
+            if not ask_question_dialog(app.ui, 'runmanager', 'Close %s? This will close %d currently open group(s).' %
                                    (globals_file, child_is_open.count(True))):
                 return
         to_close = [name_item for name_item, is_open in zip(child_name_items, child_is_open) if is_open]
@@ -3335,12 +3324,12 @@ class RunManager(object):
             if source_globals_file == dest_globals_file and delete_source_group:
                 source_globals_file = dest_globals_file
         except Exception as e:
-            error_dialog(str(e))
+            show_error_dialog(app.ui, 'runmanager', str(e))
             return
         try:
             dest_group_name = runmanager.copy_group(source_globals_file, source_group_name, dest_globals_file, delete_source_group)
         except Exception as e:
-            error_dialog(str(e))
+            show_error_dialog(app.ui, 'runmanager', str(e))
         else:
             # Insert the newly created globals group into the model, as a
             # child row of the new globals file.
@@ -3379,7 +3368,7 @@ class RunManager(object):
             globals_file = self.ensure_editable_globals_file(globals_file)
             runmanager.new_group(globals_file, group_name)
         except Exception as e:
-            error_dialog(str(e))
+            show_error_dialog(app.ui, 'runmanager', str(e))
         else:
             # Insert the newly created globals group into the model, as a
             # child row of the globals file it belong to.
@@ -3425,7 +3414,7 @@ class RunManager(object):
             globals_file = self.ensure_editable_globals_file(globals_file)
             runmanager.rename_group(globals_file, previous_group_name, new_group_name)
         except Exception as e:
-            error_dialog(str(e))
+            show_error_dialog(app.ui, 'runmanager', str(e))
             # Set the item text back to the old name, since the rename failed:
             item.setText(previous_group_name)
         else:
@@ -3450,7 +3439,7 @@ class RunManager(object):
 
     def delete_group(self, globals_file, group_name, confirm=True):
         if confirm:
-            if not question_dialog("Delete the group '%s'?" % group_name):
+            if not ask_question_dialog(app.ui, 'runmanager', "Delete the group '%s'?" % group_name):
                 return
         # If the group is open, close it:
         group_tab = self.currently_open_groups.get((globals_file, group_name))
@@ -3459,7 +3448,7 @@ class RunManager(object):
         try:
             globals_file = self.ensure_editable_globals_file(globals_file)
         except Exception as e:
-            error_dialog(str(e))
+            show_error_dialog(app.ui, 'runmanager', str(e))
             return
         runmanager.delete_group(globals_file, group_name)
         # Find the entry for this group in self.groups_model and remove it:
