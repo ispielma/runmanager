@@ -188,6 +188,7 @@ class QueueController(object):
         self.empty_queue_policy = EMPTY_QUEUE_STOP
         self.standard_labscript_file = ''
         self._items = []
+        self._sent = {}
         self._last_queue_descriptor = None
         self._lock = threading.RLock()
 
@@ -241,10 +242,10 @@ class QueueController(object):
                     return True
         return False
 
-    def pop_next(self, repeat_standard_factory):
+    def get_next_descriptor(self, repeat_standard_factory):
         with self._lock:
             if self._items:
-                descriptor = self._items.pop(0)
+                descriptor = copy.deepcopy(self._items[0])
             elif self.empty_queue_policy == EMPTY_QUEUE_STOP:
                 return None
             elif self.empty_queue_policy == EMPTY_QUEUE_REPEAT_LAST:
@@ -261,8 +262,48 @@ class QueueController(object):
                 descriptor = repeat_standard_factory()
             else:
                 raise AssertionError('Unhandled empty queue policy: %s' % self.empty_queue_policy)
-            self._refresh_last_queue_descriptor_locked(clear_if_empty=False)
             return copy.deepcopy(descriptor)
+
+    def mark_descriptor_sent(self, descriptor):
+        with self._lock:
+            sent_descriptor = None
+            for index, queued_descriptor in enumerate(self._items):
+                if queued_descriptor.shot_id == descriptor.shot_id:
+                    sent_descriptor = self._items.pop(index)
+                    break
+            if sent_descriptor is None:
+                sent_descriptor = copy.deepcopy(descriptor)
+            sent_descriptor.status = descriptor.status
+            sent_descriptor.compiled_path = descriptor.compiled_path
+            sent_descriptor.compile_error = descriptor.compile_error
+            self._sent[sent_descriptor.run_file] = copy.deepcopy(sent_descriptor)
+            self._refresh_last_queue_descriptor_locked(clear_if_empty=False)
+
+    def add_sent_descriptor(self, run_file, start=False):
+        with self._lock:
+            descriptor = self._sent.pop(run_file, None)
+            if descriptor is None:
+                return False
+            if descriptor.compiled_path:
+                descriptor.status = STATUS_READY
+                descriptor.compile_error = None
+            else:
+                descriptor.status = STATUS_QUEUED
+            if start:
+                self._items.insert(0, descriptor)
+            else:
+                self._items.append(descriptor)
+            self._refresh_last_queue_descriptor_locked(clear_if_empty=False)
+            return True
+
+    def note_compile_error(self, shot_id, error):
+        with self._lock:
+            for descriptor in self._items:
+                if descriptor.shot_id == shot_id:
+                    descriptor.status = STATUS_ERROR
+                    descriptor.compile_error = error
+                    return True
+        return False
 
     def delete_rows(self, rows):
         removed = []
@@ -278,6 +319,7 @@ class QueueController(object):
         with self._lock:
             removed = self._items
             self._items = []
+            self._sent = {}
             self._last_queue_descriptor = None
         self._discard_items(removed)
 
@@ -315,6 +357,7 @@ class QueueController(object):
             )
             self.standard_labscript_file = state.get('standard_labscript_file', '')
             self._items = []
+            self._sent = {}
             for descriptor_data in state.get('items', []):
                 data = copy.deepcopy(descriptor_data)
                 data['compiled_path'] = None

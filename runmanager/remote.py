@@ -114,8 +114,16 @@ class Client(ZMQClient):
         return self.request('reset_shot_output_folder')
 
     def queue_request_next(self):
-        """Reserve and return the next queued shot for BLACS."""
+        """Compile if needed and return the next queued shot for BLACS."""
         return self.request('queue_request_next')
+
+    def queue_add_shot(self, agnostic_path, start=False):
+        """Add a shot back into the runmanager queue.
+
+        By default the shot is appended to the end of the queue. If
+        ``start=True`` it is inserted at the front.
+        """
+        return self.request('queue_add_shot', agnostic_path, start=start)
 
     def queue_get_state(self):
         """Return queue settings and summary state."""
@@ -163,6 +171,7 @@ error_in_globals = _default_client.error_in_globals
 is_output_folder_default = _default_client.is_output_folder_default
 reset_shot_output_folder = _default_client.reset_shot_output_folder
 queue_request_next = _default_client.queue_request_next
+queue_add_shot = _default_client.queue_add_shot
 queue_get_state = _default_client.queue_get_state
 queue_get_items = _default_client.queue_get_items
 queue_clear = _default_client.queue_clear
