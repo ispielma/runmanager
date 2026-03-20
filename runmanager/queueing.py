@@ -378,9 +378,9 @@ class QueueController(object):
             items = []
             for descriptor in self._items:
                 data = copy.deepcopy(descriptor.__dict__)
-                data['compiled_path'] = None
-                data['compile_error'] = None
                 data['status'] = STATUS_QUEUED
+                data.pop('compiled_path', None)
+                data.pop('compile_error', None)
                 items.append(data)
             return {
                 'compile_mode': self.compile_mode,

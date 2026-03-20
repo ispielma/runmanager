@@ -1789,7 +1789,7 @@ class RunManager(object):
         )
 
     def setup_config(self):
-        required_config_params = {"DEFAULT": ["apparatus_name"],
+        required_config_params = {"default": ["apparatus_name"],
                                   "programs": ["text_editor",
                                                "text_editor_arguments",
                                                ],
@@ -3516,7 +3516,17 @@ class RunManager(object):
         if self.last_save_config_file is not None:
             default = self.last_save_config_file
         else:
-            default = os.path.join(self.exp_config.get('paths', 'experiment_shot_storage'), 'runmanager.toml')
+            try:
+                default = os.path.join(
+                    self.exp_config.get('default', 'app_saved_configs'),
+                    'runmanager',
+                    'runmanager.toml',
+                )
+            except LabConfig.NoOptionError:
+                default = os.path.join(
+                    self.exp_config.get('paths', 'experiment_shot_storage'),
+                    'runmanager.toml',
+                )
         save_file = QtWidgets.QFileDialog.getSaveFileName(self.ui,
                                                       'Select  file to save current runmanager configuration',
                                                       default,
@@ -3621,7 +3631,17 @@ class RunManager(object):
         if self.last_save_config_file is not None:
             default = self.last_save_config_file
         else:
-            default = os.path.join(self.exp_config.get('paths', 'experiment_shot_storage'), 'runmanager.toml')
+            try:
+                default = os.path.join(
+                    self.exp_config.get('default', 'app_saved_configs'),
+                    'runmanager',
+                    'runmanager.toml',
+                )
+            except LabConfig.NoOptionError:
+                default = os.path.join(
+                    self.exp_config.get('paths', 'experiment_shot_storage'),
+                    'runmanager.toml',
+                )
 
         file = QtWidgets.QFileDialog.getOpenFileName(self.ui,
                                                  'Select runmanager configuration file to load',
