@@ -63,7 +63,15 @@ from labscript_utils.setup_logging import setup_logging
 import labscript_utils.shared_drive as shared_drive
 from labscript_utils import dedent
 import labscript_utils.h5_lock
-from labscript_utils.qtwidgets.appconfig import AppConfigActions
+from labscript_utils.qtwidgets.appconfig import (
+    AppConfigActions,
+    error_dialog as show_error_dialog,
+    question_dialog as ask_question_dialog,
+    select_directory,
+    select_open_file,
+    select_save_file,
+)
+from labscript_utils.splash import FirstPaintMainWindow
 import h5py
 from zprocess import raise_exception_in_thread
 import runmanager
@@ -206,14 +214,12 @@ def tooltip_with_hidden_unicode_warning(base_tooltip, text):
 
 @inmain_decorator()
 def error_dialog(message):
-    QtWidgets.QMessageBox.warning(app.ui, 'runmanager', message)
+    show_error_dialog(app.ui, 'runmanager', message)
 
 
 @inmain_decorator()
 def question_dialog(message):
-    reply = QtWidgets.QMessageBox.question(app.ui, 'runmanager', message,
-                                       QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
-    return (reply == QtWidgets.QMessageBox.Yes)
+    return ask_question_dialog(app.ui, 'runmanager', message)
 
 
 @contextlib.contextmanager
@@ -1588,26 +1594,15 @@ class GroupTab(object):
                 self.update_expression_backgrounds(self.globals_model.item(row, self.GLOBALS_COL_NAME).text())
 
 
-class RunmanagerMainWindow(QtWidgets.QMainWindow):
-    # A signal to show that the window is shown and painted.
-    firstPaint = Signal()
-
+class RunmanagerMainWindow(FirstPaintMainWindow):
     def __init__(self, *args, **kwargs):
-        QtWidgets.QMainWindow.__init__(self, *args, **kwargs)
-        self._previously_painted = False
+        super().__init__(*args, **kwargs)
 
     def closeEvent(self, event):
         if app.on_close_event():
-            return QtWidgets.QMainWindow.closeEvent(self, event)
+            return super().closeEvent(event)
         else:
             event.ignore()
-
-    def paintEvent(self, event):
-        result = QtWidgets.QMainWindow.paintEvent(self, event)
-        if not self._previously_painted:
-            self._previously_painted = True
-            self.firstPaint.emit()
-        return result
 
 
 class PoppedOutOutputBoxWindow(QtWidgets.QDialog):
@@ -2087,18 +2082,14 @@ class RunManager(object):
         self.output_box_is_popped_out = not self.output_box_is_popped_out
 
     def on_select_labscript_file_clicked(self, checked):
-        labscript_file = QtWidgets.QFileDialog.getOpenFileName(self.ui,
-                                                           'Select labscript file',
-                                                           self.last_opened_labscript_folder,
-                                                           "Python files (*.py)")
-        if type(labscript_file) is tuple:
-            labscript_file, _ = labscript_file
-
+        labscript_file = select_open_file(
+            self.ui,
+            'Select labscript file',
+            self.last_opened_labscript_folder,
+            "Python files (*.py)",
+        )
         if not labscript_file:
-            # User cancelled selection
             return
-        # Convert to standard platform specific path, otherwise Qt likes forward slashes:
-        labscript_file = os.path.abspath(labscript_file)
         if not os.path.isfile(labscript_file):
             error_dialog("No such file %s." % labscript_file)
             return
@@ -2124,17 +2115,13 @@ class RunManager(object):
         )
 
     def on_select_shot_output_folder_clicked(self, checked):
-        shot_output_folder = QtWidgets.QFileDialog.getExistingDirectory(self.ui,
-                                                                    'Select shot output folder',
-                                                                    self.last_selected_shot_output_folder)
-        if type(shot_output_folder) is tuple:
-            shot_output_folder, _ = shot_output_folder
-
+        shot_output_folder = select_directory(
+            self.ui,
+            'Select shot output folder',
+            self.last_selected_shot_output_folder,
+        )
         if not shot_output_folder:
-            # User cancelled selection
             return
-        # Convert to standard platform specific path, otherwise Qt likes forward slashes:
-        shot_output_folder = os.path.abspath(shot_output_folder)
         # Save the containing folder for use next time we open the dialog box:
         self.last_selected_shot_output_folder = os.path.dirname(shot_output_folder)
         # Write the file to the lineEdit:
@@ -2192,18 +2179,14 @@ class RunManager(object):
         self.refresh_queue_tab()
 
     def on_select_standard_labscript_file_clicked(self):
-        labscript_file = QtWidgets.QFileDialog.getOpenFileName(
+        labscript_file = select_open_file(
             self.ui,
             'Select standard-shot labscript file',
             self.last_opened_labscript_folder,
             "Python files (*.py)",
         )
-        if type(labscript_file) is tuple:
-            labscript_file, _ = labscript_file
-
         if not labscript_file:
             return
-        labscript_file = os.path.abspath(labscript_file)
         if not os.path.isfile(labscript_file):
             error_dialog("No such file %s." % labscript_file)
             return
@@ -2608,18 +2591,14 @@ class RunManager(object):
             self.close_globals_file(globals_file, confirm=False)
 
     def on_open_globals_file_clicked(self):
-        globals_file = QtWidgets.QFileDialog.getOpenFileName(self.ui,
-                                                         'Select globals file',
-                                                         self.last_opened_globals_folder,
-                                                         "Globals files (*.toml *.h5 *.hdf5)")
-        if type(globals_file) is tuple:
-            globals_file, _ = globals_file
-
+        globals_file = select_open_file(
+            self.ui,
+            'Select globals file',
+            self.last_opened_globals_folder,
+            "Globals files (*.toml *.h5 *.hdf5)",
+        )
         if not globals_file:
-            # User cancelled selection
             return
-        # Convert to standard platform specific path, otherwise Qt likes forward slashes:
-        globals_file = os.path.abspath(globals_file)
         if not os.path.isfile(globals_file):
             error_dialog("No such file %s." % globals_file)
             return
@@ -2629,21 +2608,15 @@ class RunManager(object):
         self.open_globals_file(globals_file)
 
     def on_new_globals_file_clicked(self):
-        globals_file = QtWidgets.QFileDialog.getSaveFileName(self.ui,
-                                                         'Create new globals file',
-                                                         self.last_opened_globals_folder,
-                                                         "TOML files (*.toml)")
-        if type(globals_file) is tuple:
-            globals_file, _ = globals_file
-
+        globals_file = select_save_file(
+            self.ui,
+            'Create new globals file',
+            self.last_opened_globals_folder,
+            "TOML files (*.toml)",
+            suffix='.toml',
+        )
         if not globals_file:
-            # User cancelled
             return
-        if not globals_file.lower().endswith('.toml'):
-            globals_file += '.toml'
-        # Convert to standard platform specific path, otherwise Qt likes
-        # forward slashes:
-        globals_file = os.path.abspath(globals_file)
         # Save the containing folder for use next time we open the dialog box:
         self.last_opened_globals_folder = os.path.dirname(globals_file)
         # Create the new file and open it:
@@ -2651,19 +2624,14 @@ class RunManager(object):
         self.open_globals_file(globals_file)
 
     def on_diff_globals_file_clicked(self):
-        globals_file = QtWidgets.QFileDialog.getOpenFileName(self.ui,
-                                                         'Select globals file to compare',
-                                                         self.last_opened_globals_folder,
-                                                         "Globals files (*.toml *.h5 *.hdf5)")
-        if type(globals_file) is tuple:
-            globals_file, _ = globals_file
-
+        globals_file = select_open_file(
+            self.ui,
+            'Select globals file to compare',
+            self.last_opened_globals_folder,
+            "Globals files (*.toml *.h5 *.hdf5)",
+        )
         if not globals_file:
-            # User cancelled
             return
-
-        # Convert to standard platform specific path, otherwise Qt likes forward slashes:
-        globals_file = os.path.abspath(globals_file)
 
         # Get runmanager's globals
         active_groups = self.get_active_groups()
@@ -3198,19 +3166,15 @@ class RunManager(object):
         if not runmanager.globals_file_requires_conversion(globals_file):
             return globals_file
         suggested_path = runmanager.default_toml_globals_file(globals_file)
-        destination = QtWidgets.QFileDialog.getSaveFileName(
+        destination = select_save_file(
             parent or self.ui,
             'Convert globals file to TOML',
             suggested_path,
             "TOML files (*.toml)",
+            suffix='.toml',
         )
-        if type(destination) is tuple:
-            destination, _ = destination
         if not destination:
             raise RuntimeError('Conversion to TOML cancelled.')
-        if not destination.lower().endswith('.toml'):
-            destination += '.toml'
-        destination = os.path.abspath(destination)
         if destination != globals_file and self.groups_model.findItems(destination, column=self.GROUPS_COL_NAME):
             raise RuntimeError("A globals file named %s is already open." % destination)
         runmanager.convert_globals_file(globals_file, destination)
