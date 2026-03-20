@@ -1666,9 +1666,7 @@ class RunManager(object):
         self.output_box_window.resize(800, 1000)
         self.setup_config()
         self.queue_controller = QueueController(
-            ack_timeout=self.exp_config.getfloat(
-                'timeouts', 'communication_timeout', fallback=30
-            )
+            on_items_discarded=self.delete_queue_placeholder_files,
         )
         self.setup_axes_tab()
         self.setup_groups_tab()
@@ -2026,7 +2024,6 @@ class RunManager(object):
         )
         self.queue_widget.deleteRowsRequested.connect(self.on_queue_delete_rows_requested)
         self.queue_widget.clearQueueRequested.connect(self.on_queue_clear_requested)
-        self.queue_widget.moveRequested.connect(self.on_queue_move_requested)
         
         # Keyboard shortcuts:
         engage_shortcut = QtWidgets.QShortcut('F5', self.ui,
@@ -2215,10 +2212,6 @@ class RunManager(object):
         self.queue_controller.clear()
         self.refresh_queue_tab()
 
-    def on_queue_move_requested(self, direction, rows):
-        self.queue_controller.move(direction, rows)
-        self.refresh_queue_tab()
-
     @inmain_decorator()
     def refresh_queue_tab(self):
         items = []
@@ -2233,7 +2226,7 @@ class RunManager(object):
         self.queue_widget.set_queue_items(items)
         state = self.queue_controller.get_queue_state()
         self.queue_status_label.setText(
-            'Queued: {n_items}    Reserved: {n_offers}    Mode: {compile_mode}    Empty: {empty_queue_policy}'.format(
+            'Queued: {n_items}    Mode: {compile_mode}    Empty: {empty_queue_policy}'.format(
                 **state
             )
         )
@@ -2241,6 +2234,7 @@ class RunManager(object):
     def on_engage_clicked(self):
         logger.info('Engage')
         try:
+            send_to_blacs = self.ui.checkBox_run_shots.isChecked()
             send_to_runviewer = self.ui.checkBox_view_shots.isChecked()
             labscript_file = self.ui.lineEdit_labscript_file.text()
             # even though we shuffle on a per global basis, if ALL of the globals are set to shuffle, then we may as well shuffle again. This helps shuffle shots more randomly than just shuffling within each level (because without this, you would still do all shots with the outer most variable the same, etc)
@@ -2274,15 +2268,23 @@ class RunManager(object):
                 shuffle,
                 send_to_runviewer,
             )
-            shot_ids = self.queue_controller.enqueue(descriptors)
-            self.refresh_queue_tab()
-            if self.queue_controller.compile_mode == COMPILE_MODE_PRECOMPILE:
+            if send_to_blacs:
+                shot_ids = self.queue_controller.enqueue(descriptors)
+                self.refresh_queue_tab()
+                if self.queue_controller.compile_mode == COMPILE_MODE_PRECOMPILE:
+                    self.ui.pushButton_abort.setEnabled(True)
+                    for shot_id in shot_ids:
+                        self.compile_queue.put(shot_id)
+                self.output_box.output(
+                    'Queued %d shot(s) in runmanager.\n\n' % len(shot_ids)
+                )
+            else:
                 self.ui.pushButton_abort.setEnabled(True)
-                for shot_id in shot_ids:
-                    self.compile_queue.put(shot_id)
-            self.output_box.output(
-                'Queued %d shot(s) in runmanager.\n\n' % len(shot_ids)
-            )
+                self.compile_queue.put(('compile_descriptors', descriptors))
+                self.output_box.output(
+                    'Compiling %d shot(s) without queueing for BLACS.\n\n'
+                    % len(descriptors)
+                )
         except Exception as e:
             self.output_box.output('%s\n\n' % str(e), red=True)
         logger.info('end engage')
@@ -3767,6 +3769,9 @@ class RunManager(object):
         queue_state = runmanager_config.get('queue_state')
         if isinstance(queue_state, dict):
             self.queue_controller.restore_state(queue_state)
+            self.initialise_queue_placeholders(
+                self.queue_controller.get_descriptors()
+            )
             self.standard_labscript_lineedit.setText(
                 self.queue_controller.standard_labscript_file
             )
@@ -3797,7 +3802,7 @@ class RunManager(object):
     def compile_loop(self):
         while True:
             try:
-                shot_id = self.compile_queue.get()
+                job = self.compile_queue.get()
                 if self.compilation_aborted.is_set():
                     self.output_box.output('Compilation aborted.\n\n', red=True)
                     while True:
@@ -3808,20 +3813,35 @@ class RunManager(object):
                     self.compilation_aborted.clear()
                     inmain(self.ui.pushButton_abort.setEnabled, False)
                     continue
-                descriptor = self.queue_controller.get_descriptor_for_precompile(shot_id)
-                if descriptor is None:
-                    continue
-                self.refresh_queue_tab()
-                try:
-                    run_file = self.compile_descriptor(
-                        descriptor, use_current_defaults=False
-                    )
-                except Exception as e:
-                    self.output_box.output(str(e) + '\n', red=True)
-                    self.queue_controller.finish_precompile(shot_id, error=str(e))
+                if isinstance(job, tuple) and job and job[0] == 'compile_descriptors':
+                    descriptors = job[1]
+                    for descriptor in descriptors:
+                        if self.compilation_aborted.is_set():
+                            break
+                        try:
+                            self.compile_descriptor(
+                                descriptor, use_current_defaults=False
+                            )
+                        except Exception as e:
+                            self.output_box.output(str(e) + '\n', red=True)
+                            self.compilation_aborted.set()
+                            break
                 else:
-                    self.queue_controller.finish_precompile(shot_id, compiled_path=run_file)
-                self.refresh_queue_tab()
+                    shot_id = job
+                    descriptor = self.queue_controller.get_descriptor_for_precompile(shot_id)
+                    if descriptor is None:
+                        continue
+                    self.refresh_queue_tab()
+                    try:
+                        run_file = self.compile_descriptor(
+                            descriptor, use_current_defaults=False
+                        )
+                    except Exception as e:
+                        self.output_box.output(str(e) + '\n', red=True)
+                        self.queue_controller.finish_precompile(shot_id, error=str(e))
+                    else:
+                        self.queue_controller.finish_precompile(shot_id, compiled_path=run_file)
+                    self.refresh_queue_tab()
                 inmain(self.ui.pushButton_abort.setEnabled, not self.compile_queue.empty())
                 self.compilation_aborted.clear()
             except Exception:
@@ -3884,7 +3904,44 @@ class RunManager(object):
                     source_kind=SOURCE_KIND_QUEUE,
                 )
             )
+        self.initialise_queue_placeholders(descriptors)
         return descriptors
+
+    def initialise_queue_placeholders(self, descriptors):
+        created_paths = []
+        try:
+            for descriptor in descriptors:
+                self._write_queue_placeholder(descriptor)
+                created_paths.append(descriptor.run_file)
+        except Exception:
+            for path in created_paths:
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError:
+                    pass
+            raise
+
+    def _write_queue_placeholder(self, descriptor):
+        os.makedirs(os.path.dirname(descriptor.run_file), exist_ok=True)
+        with h5py.File(descriptor.run_file, 'w') as h5_file:
+            h5_file.attrs.update(descriptor.sequence_attrs)
+            h5_file.attrs['run number'] = descriptor.run_no
+            h5_file.attrs['n_runs'] = descriptor.n_runs
+            h5_file.attrs['runmanager_queue_source'] = descriptor.source_kind
+
+    def delete_queue_placeholder_files(self, descriptors):
+        paths = set()
+        for descriptor in descriptors:
+            for path in (descriptor.run_file, descriptor.compiled_path):
+                if path:
+                    paths.add(path)
+        for path in paths:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
 
     def compile_descriptor(self, descriptor, use_current_defaults):
         if descriptor.source_kind == SOURCE_KIND_REPEAT_STANDARD:
@@ -3968,15 +4025,10 @@ class RunManager(object):
             raise RuntimeError('Compilation failed for %s' % os.path.basename(run_file))
 
     def _prepare_run_file_path(self, descriptor, force_fresh=False):
-        if (
-            not force_fresh
-            and descriptor.source_kind == SOURCE_KIND_QUEUE
-            and self.queue_controller.compile_mode == COMPILE_MODE_PRECOMPILE
-        ):
+        if descriptor.source_kind == SOURCE_KIND_QUEUE:
             return descriptor.run_file
         if (
             not force_fresh
-            and descriptor.source_kind == SOURCE_KIND_QUEUE
             and descriptor.compiled_path
         ):
             return descriptor.compiled_path
@@ -4066,11 +4118,10 @@ class RunManager(object):
         )
 
     def queue_request_next(self):
-        reservation = self.queue_controller.reserve_next(self.build_repeat_standard_descriptor)
+        descriptor = self.queue_controller.pop_next(self.build_repeat_standard_descriptor)
         self.refresh_queue_tab()
-        if reservation is None:
+        if descriptor is None:
             return None
-        offer_id, descriptor = reservation
         if descriptor.compiled_path and os.path.exists(descriptor.compiled_path):
             run_file = descriptor.compiled_path
         else:
@@ -4082,22 +4133,13 @@ class RunManager(object):
                     descriptor, use_current_defaults=use_current_defaults
                 )
             except Exception as e:
-                self.queue_controller.update_offer(offer_id, compile_error=str(e))
-                self.queue_controller.ack_received(offer_id, False)
                 self.refresh_queue_tab()
                 raise
-        self.queue_controller.update_offer(offer_id, compiled_path=run_file)
         self.refresh_queue_tab()
         return {
-            'offer_id': offer_id,
             'agnostic_path': shared_drive.path_to_agnostic(run_file),
             'source_kind': descriptor.source_kind,
         }
-
-    def queue_ack_received(self, offer_id, valid):
-        handled = self.queue_controller.ack_received(offer_id, valid)
-        self.refresh_queue_tab()
-        return handled
 
     def parse_globals(self, active_groups, raise_exceptions=True, expand_globals=True, expansion_order = None, return_dimensions = False):
         sequence_globals = runmanager.get_globals(active_groups)
@@ -4367,9 +4409,6 @@ class RemoteServer(ZMQServer):
     def handle_queue_request_next(self):
         return app.queue_request_next()
 
-    def handle_queue_ack_received(self, offer_id, valid):
-        return app.queue_ack_received(offer_id, valid)
-
     def handle_queue_get_state(self):
         return app.queue_controller.get_queue_state()
 
@@ -4386,9 +4425,6 @@ class RemoteServer(ZMQServer):
         app.refresh_queue_tab()
         return app.queue_controller.get_queue_state()
 
-    def handle_queue_move(self, direction, rows):
-        app.queue_controller.move(direction, rows)
-        app.refresh_queue_tab()
         return app.queue_controller.get_queue_state()
 
     def handle_notify_shot_complete(self, filepath):

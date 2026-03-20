@@ -117,10 +117,6 @@ class Client(ZMQClient):
         """Reserve and return the next queued shot for BLACS."""
         return self.request('queue_request_next')
 
-    def queue_ack_received(self, offer_id, valid):
-        """Acknowledge receipt of an offered queued shot."""
-        return self.request('queue_ack_received', offer_id, valid)
-
     def queue_get_state(self):
         """Return queue settings and summary state."""
         return self.request('queue_get_state')
@@ -136,10 +132,6 @@ class Client(ZMQClient):
     def queue_delete(self, rows):
         """Delete queued rows by index."""
         return self.request('queue_delete', rows)
-
-    def queue_move(self, direction, rows):
-        """Move queued rows in the requested direction."""
-        return self.request('queue_move', direction, rows)
 
     def notify_shot_complete(self, filepath):
         """Notify runmanager that a shot completed and should be analysed."""
@@ -171,12 +163,10 @@ error_in_globals = _default_client.error_in_globals
 is_output_folder_default = _default_client.is_output_folder_default
 reset_shot_output_folder = _default_client.reset_shot_output_folder
 queue_request_next = _default_client.queue_request_next
-queue_ack_received = _default_client.queue_ack_received
 queue_get_state = _default_client.queue_get_state
 queue_get_items = _default_client.queue_get_items
 queue_clear = _default_client.queue_clear
 queue_delete = _default_client.queue_delete
-queue_move = _default_client.queue_move
 notify_shot_complete = _default_client.notify_shot_complete
 
 if __name__ == '__main__':
