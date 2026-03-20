@@ -10,7 +10,11 @@
 # the project for the full license.                                 #
 #                                                                   #
 #####################################################################
-"""Lyse submission widget and retry loop for runmanager."""
+"""Lyse submission widget and retry loop for runmanager.
+
+If ``servers.lyse`` is omitted from labconfig, submissions default to
+``localhost``.
+"""
 
 import logging
 import os
@@ -52,7 +56,9 @@ class AnalysisSubmission(object):
         self.inqueue = queue.Queue()
         self.runmanager = runmanager
         self.port = self.runmanager.exp_config.getint('ports', 'lyse')
-        self.host = self.runmanager.exp_config.get('servers', 'lyse', fallback='localhost')
+        self.host = self.runmanager.exp_config.get(
+            'servers', 'lyse', fallback='localhost'
+        )
 
         self.widget = UiLoader().load(
             os.path.join(runmanager_dir, 'analysis_submission.ui')

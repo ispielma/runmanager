@@ -2262,6 +2262,7 @@ class RunManager(object):
                 sequenceglobals,
                 shots,
                 shuffle,
+                send_to_blacs,
                 send_to_runviewer,
             )
             if send_to_blacs:
@@ -3788,6 +3789,7 @@ class RunManager(object):
                     continue
                 if isinstance(job, tuple) and job and job[0] == 'compile_descriptors':
                     descriptors = job[1]
+                    pending_cleanup = list(descriptors)
                     for descriptor in descriptors:
                         if self.compilation_aborted.is_set():
                             break
@@ -3799,6 +3801,10 @@ class RunManager(object):
                             self.output_box.output(str(e) + '\n', red=True)
                             self.compilation_aborted.set()
                             break
+                        else:
+                            pending_cleanup.remove(descriptor)
+                    if pending_cleanup:
+                        self.delete_queue_placeholder_files(pending_cleanup)
                 else:
                     shot_id = job
                     descriptor = self.queue_controller.get_descriptor_for_precompile(shot_id)
@@ -3832,6 +3838,7 @@ class RunManager(object):
         sequence_globals,
         shots,
         shuffle,
+        send_to_blacs,
         send_to_runviewer,
     ):
         sequence_attrs, default_output_dir, filename_prefix = runmanager.new_sequence_details(
@@ -3852,7 +3859,11 @@ class RunManager(object):
         n_runs = len(shots)
         for run_no, shot_globals in enumerate(shots):
             run_file = self._queue_run_file_path(
-                output_folder, filename_prefix, run_no, n_runs
+                output_folder,
+                filename_prefix,
+                run_no,
+                n_runs,
+                suffix='_view' if send_to_runviewer and not send_to_blacs else '',
             )
             label = os.path.basename(run_file)
             descriptors.append(
@@ -4015,12 +4026,14 @@ class RunManager(object):
             descriptor.output_folder, filename_prefix, descriptor.run_no, descriptor.n_runs
         )
 
-    def _queue_run_file_path(self, output_folder, filename_prefix, run_no, n_runs):
+    def _queue_run_file_path(
+        self, output_folder, filename_prefix, run_no, n_runs, suffix=''
+    ):
         if n_runs <= 1:
             digits = 1
         else:
             digits = len(str(n_runs - 1))
-        basename = os.path.join(output_folder, filename_prefix)
+        basename = os.path.join(output_folder, filename_prefix + suffix)
         return ('%s_%0' + str(digits) + 'd.h5') % (basename, run_no)
 
     def _get_varying_globals(self, shots, active_groups=None):
@@ -4091,7 +4104,9 @@ class RunManager(object):
         )
 
     def queue_request_next(self):
-        descriptor = self.queue_controller.pop_next(self.build_repeat_standard_descriptor)
+        descriptor = self.queue_controller.get_next_descriptor(
+            self.build_repeat_standard_descriptor
+        )
         self.refresh_queue_tab()
         if descriptor is None:
             return None
@@ -4106,13 +4121,27 @@ class RunManager(object):
                     descriptor, use_current_defaults=use_current_defaults
                 )
             except Exception as e:
+                self.queue_controller.note_compile_error(descriptor.shot_id, str(e))
                 self.refresh_queue_tab()
                 raise
+        descriptor.compiled_path = run_file
+        descriptor.status = STATUS_READY
+        descriptor.compile_error = None
+        agnostic_path = shared_drive.path_to_agnostic(run_file)
+        self.queue_controller.mark_descriptor_sent(descriptor)
         self.refresh_queue_tab()
         return {
-            'agnostic_path': shared_drive.path_to_agnostic(run_file),
+            'agnostic_path': agnostic_path,
             'source_kind': descriptor.source_kind,
         }
+
+    def queue_add_shot(self, agnostic_path, start=False):
+        restored = self.queue_controller.add_sent_descriptor(
+            shared_drive.path_to_local(agnostic_path), start=start
+        )
+        if restored:
+            self.refresh_queue_tab()
+        return restored
 
     def parse_globals(self, active_groups, raise_exceptions=True, expand_globals=True, expansion_order = None, return_dimensions = False):
         sequence_globals = runmanager.get_globals(active_groups)
@@ -4382,6 +4411,9 @@ class RemoteServer(ZMQServer):
     def handle_queue_request_next(self):
         return app.queue_request_next()
 
+    def handle_queue_add_shot(self, agnostic_path, start=False):
+        return app.queue_add_shot(agnostic_path, start=start)
+
     def handle_queue_get_state(self):
         return app.queue_controller.get_queue_state()
 
@@ -4396,8 +4428,6 @@ class RemoteServer(ZMQServer):
     def handle_queue_delete(self, rows):
         app.queue_controller.delete_rows(rows)
         app.refresh_queue_tab()
-        return app.queue_controller.get_queue_state()
-
         return app.queue_controller.get_queue_state()
 
     def handle_notify_shot_complete(self, filepath):
