@@ -615,7 +615,7 @@ def new_sequence_details(script_path, config=None, increment_sequence_index=True
     if config is None:
         config = LabConfig()
     script_basename = os.path.splitext(os.path.basename(script_path))[0]
-    shot_storage = config.get('DEFAULT', 'experiment_shot_storage')
+    shot_storage = config.get('default', 'experiment_shot_storage')
     shot_basedir = os.path.join(shot_storage, script_basename)
     now = datetime.datetime.now()
     sequence_timestamp = now.strftime('%Y%m%dT%H%M%S')

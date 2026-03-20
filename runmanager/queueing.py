@@ -15,9 +15,8 @@
 import copy
 import os
 import threading
-import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from qtutils.qt import QtCore, QtGui, QtWidgets
 from qtutils.qt.QtCore import pyqtSignal as Signal
@@ -39,7 +38,6 @@ SOURCE_KIND_REPEAT_STANDARD = 'repeat_standard'
 STATUS_QUEUED = 'queued'
 STATUS_PRECOMPILING = 'precompiling'
 STATUS_READY = 'ready'
-STATUS_OFFERED = 'offered'
 STATUS_ERROR = 'error'
 
 
@@ -81,21 +79,11 @@ class QueueShotDescriptor:
             'run_file': self.run_file,
         }
 
-
-@dataclass
-class QueueOffer:
-    offer_id: str
-    descriptor: QueueShotDescriptor
-    deadline: float
-    created_at: float = field(default_factory=time.monotonic)
-
-
 class RunmanagerQueueWidget(ShotQueueWidget):
     """Shared queue widget adapted for logical runmanager queue items."""
 
     deleteRowsRequested = Signal(list)
     clearQueueRequested = Signal()
-    moveRequested = Signal(str, list)
 
     def __init__(self, parent=None):
         ShotQueueWidget.__init__(
@@ -113,7 +101,6 @@ class RunmanagerQueueWidget(ShotQueueWidget):
         self.queue_view.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
 
         self._disconnect_default_controls()
-        self._hide_inline_controls()
         self.queue_view.deleteRequested.connect(self._emit_delete)
         self.queue_view.customContextMenuRequested.connect(self._show_context_menu)
 
@@ -122,10 +109,6 @@ class RunmanagerQueueWidget(ShotQueueWidget):
             self.add_button,
             self.delete_button,
             self.clear_button,
-            self.move_top_button,
-            self.move_up_button,
-            self.move_down_button,
-            self.move_bottom_button,
         ):
             try:
                 button.clicked.disconnect()
@@ -139,18 +122,6 @@ class RunmanagerQueueWidget(ShotQueueWidget):
             self.queue_view.filesDropped.disconnect()
         except TypeError:
             pass
-
-    def _hide_inline_controls(self):
-        for button in (
-            self.add_button,
-            self.delete_button,
-            self.clear_button,
-            self.move_top_button,
-            self.move_up_button,
-            self.move_down_button,
-            self.move_bottom_button,
-        ):
-            button.hide()
 
     def selected_item_ids(self):
         item_ids = []
@@ -174,11 +145,6 @@ class RunmanagerQueueWidget(ShotQueueWidget):
         rows = self.selected_rows()
         if rows:
             self.deleteRowsRequested.emit(rows)
-
-    def _emit_move(self, direction):
-        rows = self.selected_rows()
-        if rows:
-            self.moveRequested.emit(direction, rows)
 
     def _show_context_menu(self, pos):
         index = self.queue_view.indexAt(pos)
@@ -216,13 +182,12 @@ class RunmanagerQueueWidget(ShotQueueWidget):
 
 
 class QueueController(object):
-    def __init__(self, ack_timeout=30):
-        self.ack_timeout = float(ack_timeout)
+    def __init__(self, on_items_discarded=None):
+        self.on_items_discarded = on_items_discarded
         self.compile_mode = COMPILE_MODE_PRECOMPILE
         self.empty_queue_policy = EMPTY_QUEUE_STOP
         self.standard_labscript_file = ''
         self._items = []
-        self._offers = {}
         self._last_queue_descriptor = None
         self._lock = threading.RLock()
 
@@ -276,9 +241,8 @@ class QueueController(object):
                     return True
         return False
 
-    def reserve_next(self, repeat_standard_factory):
+    def pop_next(self, repeat_standard_factory):
         with self._lock:
-            self._requeue_expired_locked()
             if self._items:
                 descriptor = self._items.pop(0)
             elif self.empty_queue_policy == EMPTY_QUEUE_STOP:
@@ -297,90 +261,42 @@ class QueueController(object):
                 descriptor = repeat_standard_factory()
             else:
                 raise AssertionError('Unhandled empty queue policy: %s' % self.empty_queue_policy)
-            descriptor.status = STATUS_OFFERED
-            offer_id = uuid.uuid4().hex
-            self._offers[offer_id] = QueueOffer(
-                offer_id=offer_id,
-                descriptor=descriptor,
-                deadline=time.monotonic() + self.ack_timeout,
-            )
-            return offer_id, copy.deepcopy(descriptor)
-
-    def ack_received(self, offer_id, valid):
-        with self._lock:
-            self._requeue_expired_locked()
-            offer = self._offers.pop(offer_id, None)
-            if offer is None:
-                return False
-            if valid:
-                return True
-            self._restore_to_head_locked(offer.descriptor)
-            return True
-
-    def update_offer(self, offer_id, compiled_path=None, compile_error=None):
-        with self._lock:
-            offer = self._offers.get(offer_id)
-            if offer is None:
-                return False
-            if compiled_path is not None:
-                offer.descriptor.compiled_path = compiled_path
-                offer.descriptor.status = STATUS_READY
-            if compile_error is not None:
-                offer.descriptor.compile_error = compile_error
-                offer.descriptor.status = STATUS_ERROR
-            return True
+            self._refresh_last_queue_descriptor_locked(clear_if_empty=False)
+            return copy.deepcopy(descriptor)
 
     def delete_rows(self, rows):
+        removed = []
         with self._lock:
             for row in sorted(set(rows), reverse=True):
                 if 0 <= row < len(self._items):
-                    del self._items[row]
+                    removed.append(self._items.pop(row))
             self._refresh_last_queue_descriptor_locked(clear_if_empty=True)
+        self._discard_items(removed)
 
     def clear(self):
+        removed = []
         with self._lock:
+            removed = self._items
             self._items = []
-            self._offers = {}
             self._last_queue_descriptor = None
-
-    def move(self, direction, rows):
-        rows = sorted(set(rows))
-        if not rows:
-            return
-        with self._lock:
-            items = self._items
-            if direction == 'up':
-                for row in rows:
-                    if row > 0 and row - 1 not in rows:
-                        items[row - 1], items[row] = items[row], items[row - 1]
-            elif direction == 'down':
-                for row in reversed(rows):
-                    if row < len(items) - 1 and row + 1 not in rows:
-                        items[row + 1], items[row] = items[row], items[row + 1]
-            elif direction == 'top':
-                selected = [items[row] for row in rows]
-                remaining = [item for index, item in enumerate(items) if index not in rows]
-                self._items = selected + remaining
-            elif direction == 'bottom':
-                selected = [items[row] for row in rows]
-                remaining = [item for index, item in enumerate(items) if index not in rows]
-                self._items = remaining + selected
-            else:
-                raise ValueError('Invalid move direction: %s' % direction)
-            self._refresh_last_queue_descriptor_locked(clear_if_empty=True)
+        self._discard_items(removed)
 
     def get_queue_items(self):
         with self._lock:
             return [descriptor.summary() for descriptor in self._items]
+
+    def get_descriptors(self):
+        with self._lock:
+            return [copy.deepcopy(descriptor) for descriptor in self._items]
 
     def export_state(self):
         with self._lock:
             items = []
             for descriptor in self._items:
                 data = copy.deepcopy(descriptor.__dict__)
-                data['compiled_path'] = None
-                data['compile_error'] = None
                 data['status'] = STATUS_QUEUED
+                data.pop('compiled_path', None)
+                data.pop('compile_error', None)
                 items.append(data)
             return {
                 'compile_mode': self.compile_mode,
@@ -390,13 +306,14 @@ class QueueController(object):
             }
 
     def restore_state(self, state):
+        removed = []
         with self._lock:
+            removed = self._items
             self.compile_mode = state.get('compile_mode', COMPILE_MODE_PRECOMPILE)
             self.empty_queue_policy = state.get(
                 'empty_queue_policy', EMPTY_QUEUE_STOP
             )
             self.standard_labscript_file = state.get('standard_labscript_file', '')
-            self._offers = {}
             self._items = []
             for descriptor_data in state.get('items', []):
                 data = copy.deepcopy(descriptor_data)
@@ -405,44 +322,17 @@ class QueueController(object):
                 data['status'] = STATUS_QUEUED
                 self._items.append(QueueShotDescriptor(**data))
             self._refresh_last_queue_descriptor_locked(clear_if_empty=True)
+        self._discard_items(removed)
 
     def get_queue_state(self):
         with self._lock:
-            self._requeue_expired_locked()
             return {
                 'compile_mode': self.compile_mode,
                 'empty_queue_policy': self.empty_queue_policy,
                 'standard_labscript_file': self.standard_labscript_file,
                 'n_items': len(self._items),
-                'n_offers': len(self._offers),
                 'items': [descriptor.summary() for descriptor in self._items],
-                'offers': {
-                    offer_id: {
-                        'label': offer.descriptor.label,
-                        'source_kind': offer.descriptor.source_kind,
-                        'status': offer.descriptor.status,
-                    }
-                    for offer_id, offer in self._offers.items()
-                },
             }
-
-    def _requeue_expired_locked(self):
-        now = time.monotonic()
-        expired_offer_ids = [
-            offer_id
-            for offer_id, offer in self._offers.items()
-            if offer.deadline <= now
-        ]
-        expired_offer_ids.sort(key=lambda offer_id: self._offers[offer_id].created_at)
-        for offer_id in reversed(expired_offer_ids):
-            offer = self._offers.pop(offer_id)
-            self._restore_to_head_locked(offer.descriptor)
-
-    def _restore_to_head_locked(self, descriptor):
-        descriptor = copy.deepcopy(descriptor)
-        descriptor.status = STATUS_READY if descriptor.compiled_path else STATUS_QUEUED
-        self._items.insert(0, descriptor)
-        self._refresh_last_queue_descriptor_locked(clear_if_empty=False)
 
     def _refresh_last_queue_descriptor_locked(self, clear_if_empty=False):
         queue_descriptors = [
@@ -452,3 +342,8 @@ class QueueController(object):
             self._last_queue_descriptor = copy.deepcopy(queue_descriptors[-1])
         elif clear_if_empty:
             self._last_queue_descriptor = None
+
+    def _discard_items(self, descriptors):
+        if self.on_items_discarded is None or not descriptors:
+            return
+        self.on_items_discarded(copy.deepcopy(descriptors))
