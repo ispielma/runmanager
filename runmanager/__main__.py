@@ -2041,7 +2041,7 @@ class RunManager(object):
             'Quit runmanager',
             ('Current configuration (which groups are active/open and other GUI state) '
              'has changed: save config file \'%s\'?'
-             % self.appconfig.last_save_config_file),
+             % self.appconfig.current_save_target()),
         ):
             return False
         self.analysis_submission.shutdown()
