@@ -3533,6 +3533,7 @@ class RunManager(object):
             self.close_globals_file(globals_file, confirm=False)
         # Ensure folder exists, if this was opened programmatically we are
         # creating the file, so the directory had better exist!
+        # LEGACY INI COMPATIBILITY. DEPRECATED CODE, WILL BE REMOVED.
         appconfig, save_target = load_appconfig(filename, return_save_path=True)
         runmanager_config = appconfig.get('runmanager_state', {})
 
