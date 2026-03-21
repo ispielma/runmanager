@@ -93,6 +93,7 @@ class RunmanagerQueueWidget(ShotQueueWidget):
             file_dialog_filter='Shot files (*.h5 *.hdf5)',
             allow_duplicates=True,
             column_title='Queued shot',
+            controls=(),
         )
         self.queue_view.setAcceptDrops(False)
         self.queue_view.setDragEnabled(False)
@@ -105,15 +106,6 @@ class RunmanagerQueueWidget(ShotQueueWidget):
         self.queue_view.customContextMenuRequested.connect(self._show_context_menu)
 
     def _disconnect_default_controls(self):
-        for button in (
-            self.add_button,
-            self.delete_button,
-            self.clear_button,
-        ):
-            try:
-                button.clicked.disconnect()
-            except TypeError:
-                pass
         try:
             self.queue_view.deleteRequested.disconnect()
         except TypeError:
