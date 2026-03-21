@@ -3646,6 +3646,7 @@ class RunManager(object):
                     'runmanager.toml',
                 )
 
+        # LEGACY INI COMPATIBILITY. DEPRECATED CODE, WILL BE REMOVED.
         file = QtWidgets.QFileDialog.getOpenFileName(self.ui,
                                                  'Select runmanager configuration file to load',
                                                  default,
@@ -3668,6 +3669,7 @@ class RunManager(object):
             self.close_globals_file(globals_file, confirm=False)
         # Ensure folder exists, if this was opened programmatically we are
         # creating the file, so the directory had better exist!
+        # LEGACY INI COMPATIBILITY. DEPRECATED CODE, WILL BE REMOVED.
         appconfig, save_target = load_appconfig(filename, return_save_path=True)
         self.last_save_config_file = save_target
         self.ui.actionSave_configuration.setText('Save configuration %s'%save_target)
