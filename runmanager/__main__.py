@@ -59,6 +59,8 @@ from labscript_utils import dedent
 from zprocess import raise_exception_in_thread
 import runmanager
 import runmanager.remote
+from runmanager.analysis_submission import AnalysisSubmission
+from runmanager.queueing import QueueManager, RunmanagerQueueWidget
 
 from qtutils import (
     inmain,
@@ -1622,6 +1624,14 @@ class RunManager(object):
         self.setup_config()
         self.setup_axes_tab()
         self.setup_groups_tab()
+        self.queue_manager = QueueManager(
+            ack_timeout=self.exp_config.getfloat(
+                'timeouts', 'communication_timeout', fallback=30
+            )
+        )
+        self.setup_queue_tab()
+        run_view_layout = self.ui.findChild(QtWidgets.QLayout, 'verticalLayout_2')
+        self.analysis_submission = AnalysisSubmission(self, run_view_layout)
         self.connect_signals()
 
         # The last location from which a labscript file was selected, defaults
@@ -1721,7 +1731,7 @@ class RunManager(object):
                                   "programs": ["text_editor",
                                                "text_editor_arguments",
                                                ],
-                                  "ports": ['BLACS', 'runviewer'],
+                                  "ports": ['BLACS', 'runviewer', 'lyse'],
                                   "paths": ["shared_drive",
                                             "experiment_shot_storage",
                                             "labscriptlib",
@@ -1811,6 +1821,31 @@ class RunManager(object):
         # flow-on changes made by the method itself:
         self.on_groups_model_active_changed_recursion_depth = 0
 
+    def setup_queue_tab(self):
+        self.tab_queue = QtWidgets.QWidget(self.ui.tabWidget)
+        self.tab_queue.setObjectName('tab_queue')
+        self.tab_queue.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
+        )
+        self.verticalLayout_queue_tab = QtWidgets.QVBoxLayout(self.tab_queue)
+        self.verticalLayout_queue_tab.setObjectName('verticalLayout_queue_tab')
+        self.queue_widget = RunmanagerQueueWidget(self.tab_queue)
+        self.queue_widget.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
+        )
+        self.queue_status_label = QtWidgets.QLabel(self.tab_queue)
+        self.queue_status_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
+        )
+        self.queue_status_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        self.queue_status_label.setWordWrap(True)
+        self.verticalLayout_queue_tab.addWidget(self.queue_widget)
+        self.verticalLayout_queue_tab.addWidget(self.queue_status_label)
+        self.ui.tabWidget.insertTab(0, self.tab_queue, 'Queue')
+        queue_tab_index = self.ui.tabWidget.indexOf(self.tab_queue)
+        self.ui.tabWidget.tabBar().setMovable(False, index=queue_tab_index)
+        self.refresh_queue_tab()
+
     def connect_signals(self):
         # The button that pops the output box in and out:
         self.output_popout_button.clicked.connect(self.on_output_popout_button_clicked)
@@ -1874,6 +1909,11 @@ class RunManager(object):
         # A context manager with which we can temporarily disconnect the above connection.
         self.groups_model_item_changed_disconnected = DisconnectContextManager(
             self.groups_model.itemChanged, self.on_groups_model_item_changed)
+
+        self.queue_manager.queueChanged.connect(self.refresh_queue_tab)
+        self.queue_widget.deleteRowsRequested.connect(self.on_queue_delete_rows_requested)
+        self.queue_widget.clearQueueRequested.connect(self.on_queue_clear_requested)
+        self.queue_widget.moveRequested.connect(self.on_queue_move_requested)
         
         # Keyboard shortcuts:
         engage_shortcut = QtWidgets.QShortcut('F5', self.ui,
@@ -1894,6 +1934,8 @@ class RunManager(object):
                 return False
             if reply == QtWidgets.QMessageBox.Yes:
                 self.save_configuration(self.last_save_config_file)
+        self.analysis_submission.shutdown()
+        self.queue_manager.shutdown()
         self.to_child.put(['quit', None])
         return True
 
@@ -1908,6 +1950,26 @@ class RunManager(object):
         n_tabs = self.ui.tabWidget.count()
         new_index = (current_index + change) % n_tabs
         self.ui.tabWidget.setCurrentIndex(new_index)
+
+    def on_queue_delete_rows_requested(self, rows):
+        self.queue_manager.delete_rows(rows)
+        self.refresh_queue_tab()
+
+    def on_queue_clear_requested(self):
+        self.queue_manager.clear()
+        self.refresh_queue_tab()
+
+    def on_queue_move_requested(self, direction, rows):
+        self.queue_manager.move(direction, rows)
+        self.refresh_queue_tab()
+
+    @inmain_decorator()
+    def refresh_queue_tab(self):
+        self.queue_widget.set_queue_paths(self.queue_manager.get_queue_paths())
+        state = self.queue_manager.get_queue_state()
+        self.queue_status_label.setText(
+            'Queued: {n_items}    Mode: eager compile'.format(**state)
+        )
 
     def on_output_popout_button_clicked(self):
         if self.output_box_is_popped_out:
@@ -2020,6 +2082,12 @@ class RunManager(object):
         try:
             send_to_BLACS = self.ui.checkBox_run_shots.isChecked()
             send_to_runviewer = self.ui.checkBox_view_shots.isChecked()
+            if not send_to_BLACS and not send_to_runviewer:
+                self.output_box.output(
+                    "Warning: neither 'Run shot(s)' nor 'View shot(s)' is selected.\n\n",
+                    red=True,
+                )
+                return
             labscript_file = self.ui.lineEdit_labscript_file.text()
             # even though we shuffle on a per global basis, if ALL of the globals are set to shuffle, then we may as well shuffle again. This helps shuffle shots more randomly than just shuffling within each level (because without this, you would still do all shots with the outer most variable the same, etc)
             shuffle = self.ui.pushButton_shuffle.checkState() == QtCore.Qt.Checked
@@ -3358,7 +3426,9 @@ class RunManager(object):
                      'send_to_blacs': send_to_blacs,
                      'shuffle': shuffle,
                      'axes': axes,
-                     'blacs_host': blacs_host}
+                     'blacs_host': blacs_host,
+                     'queue_state': self.queue_manager.export_state(),
+                     'analysis_submission': self.analysis_submission.get_configuration_data()}
         return save_data
 
     def save_configuration(self, save_file):
@@ -3497,6 +3567,14 @@ class RunManager(object):
         if blacs_host is not None:
             self.ui.lineEdit_BLACS_hostname.setText(blacs_host)
 
+        queue_state = runmanager_config.get('queue_state')
+        if isinstance(queue_state, dict):
+            self.queue_manager.restore_state(queue_state)
+
+        self.analysis_submission.restore_configuration_data(
+            runmanager_config.get('analysis_submission')
+        )
+
         # Set as self.last_save_data:
         save_data = self.get_save_data()
         self.last_save_data = save_data
@@ -3529,7 +3607,12 @@ class RunManager(object):
                                 self.compilation_aborted.set()
                                 continue
                             if send_to_BLACS:
-                                self.send_to_BLACS(run_file, BLACS_host)
+                                self.queue_manager.enqueue([run_file])
+                                inmain(self.refresh_queue_tab)
+                                self.output_box.output(
+                                    'Queued shot %s in runmanager.\n'
+                                    % os.path.basename(run_file)
+                                )
                             if send_to_runviewer:
                                 self.send_to_runviewer(run_file)
                     except Exception as e:
@@ -3805,6 +3888,12 @@ class RunManager(object):
         except Exception as e:
             self.output_box.output('Couldn\'t submit shot to runviewer: %s\n\n' % str(e), red=True)
 
+    def queue_request_next(self):
+        run_file = self.queue_manager.pop_next()
+        if run_file is None:
+            return None
+        return shared_drive.path_to_agnostic(run_file)
+
 
 class RemoteServer(ZMQServer):
     def __init__(self):
@@ -3975,6 +4064,12 @@ class RemoteServer(ZMQServer):
     @inmain_decorator()
     def handle_reset_shot_output_folder(self):
         app.on_reset_shot_output_folder_clicked(None)
+
+    def handle_queue_request_next(self):
+        return app.queue_request_next()
+
+    def handle_notify_shot_complete(self, filepath):
+        return app.analysis_submission.notify_shot_complete(filepath)
 
     def handler(self, request_data):
         cmd, args, kwargs = request_data

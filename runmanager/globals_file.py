@@ -2,7 +2,7 @@
 #                                                                   #
 # /globals_file.py                                                  #
 #                                                                   #
-# Copyright 2013, Monash University                                 #
+# Copyright 2026, Ian Spielman                                      #
 #                                                                   #
 # This file is part of the program runmanager, in the labscript     #
 # suite (see http://labscriptsuite.org), and is licensed under the  #

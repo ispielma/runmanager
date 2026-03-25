@@ -113,6 +113,14 @@ class Client(ZMQClient):
         """Reset the shot output folder to the default path"""
         return self.request('reset_shot_output_folder')
 
+    def queue_request_next(self):
+        """Reserve and return the next queued shot for BLACS."""
+        return self.request('queue_request_next')
+
+    def notify_shot_complete(self, filepath):
+        """Notify runmanager that a shot completed and should be analysed."""
+        return self.request('notify_shot_complete', filepath)
+
 
 _default_client = Client()
 
@@ -138,6 +146,8 @@ set_shot_output_folder = _default_client.set_shot_output_folder
 error_in_globals = _default_client.error_in_globals
 is_output_folder_default = _default_client.is_output_folder_default
 reset_shot_output_folder = _default_client.reset_shot_output_folder
+queue_request_next = _default_client.queue_request_next
+notify_shot_complete = _default_client.notify_shot_complete
 
 if __name__ == '__main__':
     # Test
