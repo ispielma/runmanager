@@ -1731,7 +1731,7 @@ class RunManager(object):
         self.ui.show()
 
     def setup_config(self):
-        required_config_params = {"DEFAULT": ["apparatus_name"],
+        required_config_params = {"default": ["apparatus_name"],
                                   "programs": ["text_editor",
                                                "text_editor_arguments",
                                                ],
@@ -2100,7 +2100,6 @@ class RunManager(object):
             output_folder = self.ui.lineEdit_shot_output_folder.text()
             if not output_folder:
                 raise Exception('Error: No output folder selected')
-            BLACS_host = self.ui.lineEdit_BLACS_hostname.text()
             logger.info('Parsing globals...')
             active_groups = self.get_active_groups()
             # Get ordering of expansion globals
@@ -2119,7 +2118,9 @@ class RunManager(object):
             labscript_file, run_files = self.make_h5_files(
                 labscript_file, output_folder, sequenceglobals, shots, shuffle)
             self.ui.pushButton_abort.setEnabled(True)
-            self.compile_queue.put([labscript_file, run_files, send_to_BLACS, BLACS_host, send_to_runviewer])
+            self.compile_queue.put(
+                [labscript_file, run_files, send_to_BLACS, send_to_runviewer]
+            )
         except Exception as e:
             self.output_box.output('%s\n\n' % str(e), red=True)
         logger.info('end engage')
@@ -3354,7 +3355,17 @@ class RunManager(object):
         if self.last_save_config_file is not None:
             default = self.last_save_config_file
         else:
-            default = os.path.join(self.exp_config.get('paths', 'experiment_shot_storage'), 'runmanager.toml')
+            try:
+                default = os.path.join(
+                    self.exp_config.get('default', 'app_saved_configs'),
+                    'runmanager',
+                    'runmanager.toml',
+                )
+            except LabConfig.NoOptionError:
+                default = os.path.join(
+                    self.exp_config.get('paths', 'experiment_shot_storage'),
+                    'runmanager.toml',
+                )
         save_file = QtWidgets.QFileDialog.getSaveFileName(self.ui,
                                                       'Select  file to save current runmanager configuration',
                                                       default,
@@ -3406,9 +3417,6 @@ class RunManager(object):
         if is_using_default_shot_output_folder:
             shot_output_folder = ''
 
-        # Get the server hostnames:
-        blacs_host = self.ui.lineEdit_BLACS_hostname.text()
-
         send_to_runviewer = self.ui.checkBox_view_shots.isChecked()
         send_to_blacs = self.ui.checkBox_run_shots.isChecked()
         shuffle = self.ui.pushButton_shuffle.isChecked()
@@ -3432,7 +3440,6 @@ class RunManager(object):
                      'send_to_blacs': send_to_blacs,
                      'shuffle': shuffle,
                      'axes': axes,
-                     'blacs_host': blacs_host,
                      'queue_state': self.queue_manager.export_state(),
                      'analysis_submission': self.analysis_submission.get_configuration_data()}
         return save_data
@@ -3458,7 +3465,17 @@ class RunManager(object):
         if self.last_save_config_file is not None:
             default = self.last_save_config_file
         else:
-            default = os.path.join(self.exp_config.get('paths', 'experiment_shot_storage'), 'runmanager.toml')
+            try:
+                default = os.path.join(
+                    self.exp_config.get('default', 'app_saved_configs'),
+                    'runmanager',
+                    'runmanager.toml',
+                )
+            except LabConfig.NoOptionError:
+                default = os.path.join(
+                    self.exp_config.get('paths', 'experiment_shot_storage'),
+                    'runmanager.toml',
+                )
 
         file = QtWidgets.QFileDialog.getOpenFileName(self.ui,
                                                  'Select runmanager configuration file to load',
@@ -3570,10 +3587,6 @@ class RunManager(object):
                 self.add_item_to_axes_model(name, shuffle)
             self.update_axes_indentation() 
 
-        blacs_host = runmanager_config.get('blacs_host')
-        if blacs_host is not None:
-            self.ui.lineEdit_BLACS_hostname.setText(blacs_host)
-
         queue_state = runmanager_config.get('queue_state')
         if isinstance(queue_state, dict):
             self.queue_manager.restore_state(queue_state)
@@ -3591,7 +3604,7 @@ class RunManager(object):
     def compile_loop(self):
         while True:
             try:
-                labscript_file, run_files, send_to_BLACS, BLACS_host, send_to_runviewer = self.compile_queue.get()
+                labscript_file, run_files, send_to_BLACS, send_to_runviewer = self.compile_queue.get()
                 run_files = iter(run_files)  # Should already be in iterator but just in case
                 while True:
                     if self.compilation_aborted.is_set():

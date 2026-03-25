@@ -307,19 +307,6 @@ subprocess</string>
          <property name="bottomMargin">
           <number>6</number>
          </property>
-         <item row="2" column="1">
-          <widget class="QLineEdit" name="lineEdit_BLACS_hostname">
-           <property name="toolTip">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;The host computer running BLACS.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
-           </property>
-           <property name="text">
-            <string>localhost</string>
-           </property>
-           <property name="frame">
-            <bool>true</bool>
-           </property>
-          </widget>
-         </item>
          <item row="0" column="0">
           <widget class="QLabel" name="label_3">
            <property name="text">
@@ -348,13 +335,6 @@ subprocess</string>
           <widget class="QLabel" name="label_2">
            <property name="text">
             <string>Shot output folder</string>
-           </property>
-          </widget>
-         </item>
-         <item row="2" column="0">
-          <widget class="QLabel" name="label">
-           <property name="text">
-            <string>BLACS hostname</string>
            </property>
           </widget>
          </item>
@@ -1029,7 +1009,6 @@ QToolButton:hover {
   <tabstop>lineEdit_shot_output_folder</tabstop>
   <tabstop>toolButton_select_shot_output_folder</tabstop>
   <tabstop>toolButton_reset_shot_output_folder</tabstop>
-  <tabstop>lineEdit_BLACS_hostname</tabstop>
   <tabstop>tabWidget</tabstop>
   <tabstop>scrollArea</tabstop>
   <tabstop>toolButton_axis_to_top</tabstop>
