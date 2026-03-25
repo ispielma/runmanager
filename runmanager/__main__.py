@@ -36,6 +36,7 @@ import ast
 import pprint
 import traceback
 import signal
+import unicodedata
 from pathlib import Path
 
 splash.update_text('importing matplotlib')
@@ -109,6 +110,64 @@ def composite_colors(r0, g0, b0, a0, r1, g1, b1, a1):
     g = (a1 * g1 + (1 - a1) * a0 * g0) / a
     b = (a1 * b1 + (1 - a1) * a0 * b0) / a
     return [int(round(x)) for x in (r, g, b, 255 * a)]
+
+
+def _relative_luminance(color):
+    def channel(value):
+        value /= 255.0
+        if value <= 0.03928:
+            return value / 12.92
+        return ((value + 0.055) / 1.055) ** 2.4
+
+    return (
+        0.2126 * channel(color.red())
+        + 0.7152 * channel(color.green())
+        + 0.0722 * channel(color.blue())
+    )
+
+
+def _contrast_ratio(color_a, color_b):
+    luminance_a = _relative_luminance(color_a)
+    luminance_b = _relative_luminance(color_b)
+    lighter = max(luminance_a, luminance_b)
+    darker = min(luminance_a, luminance_b)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def expression_cell_colors(palette=None):
+    if palette is None:
+        qapplication = QtWidgets.QApplication.instance()
+        palette = qapplication.palette() if qapplication is not None else QtGui.QPalette()
+    text_color = palette.color(QtGui.QPalette.Text)
+    active_candidates = [QtGui.QColor('#D7ECFF'), QtGui.QColor('#234A75')]
+    error_candidates = [QtGui.QColor('#F79494'), QtGui.QColor('#8A2E2E')]
+    active = max(active_candidates, key=lambda color: _contrast_ratio(text_color, color))
+    error = max(error_candidates, key=lambda color: _contrast_ratio(text_color, color))
+    return error.name(), active.name()
+
+
+def hidden_unicode_issues(text):
+    issues = []
+    for index, char in enumerate(text, 1):
+        category = unicodedata.category(char)
+        if char in '\t\n\r':
+            continue
+        if not char.isprintable() or category in {'Cf', 'Cc', 'Cs', 'Co'}:
+            issues.append(
+                'col %d: U+%04X %s'
+                % (index, ord(char), unicodedata.name(char, 'UNKNOWN'))
+            )
+    return issues
+
+
+def tooltip_with_hidden_unicode_warning(base_tooltip, text):
+    issues = hidden_unicode_issues(text)
+    if not issues:
+        return base_tooltip
+    warning = 'Contains hidden Unicode character(s): ' + '; '.join(issues)
+    if base_tooltip:
+        return base_tooltip + '\n' + warning
+    return warning
 
 
 @inmain_decorator()
@@ -651,101 +710,100 @@ class ItemDelegate(QtWidgets.QStyledItemDelegate):
 
 
 class GroupTab(object):
-    GLOBALS_COL_DELETE = 0
+    GLOBALS_COL_SCAN_ENABLED = 0
     GLOBALS_COL_NAME = 1
-    GLOBALS_COL_VALUE = 2
-    GLOBALS_COL_UNITS = 3
-    GLOBALS_COL_EXPANSION = 4
+    GLOBALS_COL_DEFAULT = 2
+    GLOBALS_COL_SCAN = 3
+    GLOBALS_COL_UNITS = 4
+    GLOBALS_COL_EXPANSION = 5
 
     GLOBALS_ROLE_IS_DUMMY_ROW = QtCore.Qt.UserRole + 1
     GLOBALS_ROLE_SORT_DATA = QtCore.Qt.UserRole + 2
     GLOBALS_ROLE_PREVIOUS_TEXT = QtCore.Qt.UserRole + 3
-    GLOBALS_ROLE_IS_BOOL = QtCore.Qt.UserRole + 4
-
-    COLOR_ERROR = '#F79494'  # light red
-    COLOR_OK = '#A5F7C6'  # light green
-    COLOR_BOOL_ON = '#63F731'  # bright green
-    COLOR_BOOL_OFF = '#608060'  # dark green
+    GLOBALS_ROLE_PREVIOUS_CHECKSTATE = QtCore.Qt.UserRole + 4
+    GLOBALS_ROLE_IS_BOOL = QtCore.Qt.UserRole + 5
 
     GLOBALS_DUMMY_ROW_TEXT = '<Click to add global>'
 
     def __init__(self, tabWidget, globals_file, group_name):
-
         self.tabWidget = tabWidget
 
         loader = UiLoader()
         loader.registerCustomWidget(TableView)
         self.ui = loader.load(os.path.join(runmanager_dir, 'group.ui'))
-
-        # Add the ui to the parent tabWidget:
+        self.ui.gridLayout.setColumnStretch(1, 1)
         self.tabWidget.addTab(self.ui, group_name, closable=True)
 
+        self.color_error, self.color_active = expression_cell_colors()
         self.set_file_and_group_name(globals_file, group_name)
 
         self.globals_model = AlternatingColorModel(view=self.ui.tableView_globals)
-        self.globals_model.setHorizontalHeaderLabels(['Delete', 'Name', 'Value', 'Units', 'Expansion'])
+        self.globals_model.setHorizontalHeaderLabels(
+            ['Scan?', 'Name', 'Default', 'Scan', 'Units', 'Expansion']
+        )
         self.globals_model.setSortRole(self.GLOBALS_ROLE_SORT_DATA)
-
         self.ui.tableView_globals.setModel(self.globals_model)
         self.ui.tableView_globals.setSelectionBehavior(QtWidgets.QTableView.SelectRows)
         self.ui.tableView_globals.setSelectionMode(QtWidgets.QTableView.ExtendedSelection)
         self.ui.tableView_globals.setSortingEnabled(True)
-        # Make it so the user can just start typing on an item to edit:
-        self.ui.tableView_globals.setEditTriggers(QtWidgets.QTableView.AnyKeyPressed |
-                                                  QtWidgets.QTableView.EditKeyPressed)
-        # Ensure the clickable region of the delete button doesn't extend forever:
-        self.ui.tableView_globals.horizontalHeader().setStretchLastSection(False)
-        # Stretch the value column to fill available space:
-        self.ui.tableView_globals.horizontalHeader().setSectionResizeMode(
-            self.GLOBALS_COL_VALUE, QtWidgets.QHeaderView.Stretch
+        self.ui.tableView_globals.setEditTriggers(
+            QtWidgets.QTableView.AnyKeyPressed | QtWidgets.QTableView.EditKeyPressed
         )
-        # Setup stuff for a custom context menu:
+        self.ui.tableView_globals.horizontalHeader().setStretchLastSection(False)
+        self.ui.tableView_globals.horizontalHeader().setSectionResizeMode(
+            self.GLOBALS_COL_DEFAULT, QtWidgets.QHeaderView.Stretch
+        )
         self.ui.tableView_globals.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
-        # Make the actions for the context menu:
         self.action_globals_delete_selected = QtWidgets.QAction(
-            QtGui.QIcon(':qtutils/fugue/minus'), 'Delete selected global(s)',  self.ui)
+            QtGui.QIcon(':qtutils/fugue/minus'), 'Delete selected global(s)', self.ui
+        )
         self.action_globals_set_selected_true = QtWidgets.QAction(
-            QtGui.QIcon(':qtutils/fugue/ui-check-box'), 'Set selected Booleans True',  self.ui)
+            QtGui.QIcon(':qtutils/fugue/ui-check-box'), 'Set selected Booleans True', self.ui
+        )
         self.action_globals_set_selected_false = QtWidgets.QAction(
-            QtGui.QIcon(':qtutils/fugue/ui-check-box-uncheck'), 'Set selected Booleans False',  self.ui)
-
+            QtGui.QIcon(':qtutils/fugue/ui-check-box-uncheck'),
+            'Set selected Booleans False',
+            self.ui,
+        )
         self.connect_signals()
 
-        # Populate the model with globals from the h5 file:
         self.populate_model()
-        # Set sensible column widths:
         for col in range(self.globals_model.columnCount()):
-            if col != self.GLOBALS_COL_VALUE:
+            if col != self.GLOBALS_COL_DEFAULT:
                 self.ui.tableView_globals.resizeColumnToContents(col)
         if self.ui.tableView_globals.columnWidth(self.GLOBALS_COL_NAME) < 200:
             self.ui.tableView_globals.setColumnWidth(self.GLOBALS_COL_NAME, 200)
-        if self.ui.tableView_globals.columnWidth(self.GLOBALS_COL_VALUE) < 200:
-            self.ui.tableView_globals.setColumnWidth(self.GLOBALS_COL_VALUE, 200)
+        if self.ui.tableView_globals.columnWidth(self.GLOBALS_COL_DEFAULT) < 220:
+            self.ui.tableView_globals.setColumnWidth(self.GLOBALS_COL_DEFAULT, 220)
         if self.ui.tableView_globals.columnWidth(self.GLOBALS_COL_UNITS) < 100:
             self.ui.tableView_globals.setColumnWidth(self.GLOBALS_COL_UNITS, 100)
+        if self.ui.tableView_globals.columnWidth(self.GLOBALS_COL_SCAN) < 220:
+            self.ui.tableView_globals.setColumnWidth(self.GLOBALS_COL_SCAN, 220)
         if self.ui.tableView_globals.columnWidth(self.GLOBALS_COL_EXPANSION) < 100:
             self.ui.tableView_globals.setColumnWidth(self.GLOBALS_COL_EXPANSION, 100)
-        self.ui.tableView_globals.resizeColumnToContents(self.GLOBALS_COL_DELETE)
 
-        # Error state of tab
         self.tab_contains_errors = False
 
     def connect_signals(self):
         self.ui.tableView_globals.leftClicked.connect(self.on_tableView_globals_leftClicked)
-        self.ui.tableView_globals.customContextMenuRequested.connect(self.on_tableView_globals_context_menu_requested)
+        self.ui.tableView_globals.customContextMenuRequested.connect(
+            self.on_tableView_globals_context_menu_requested
+        )
         self.action_globals_set_selected_true.triggered.connect(
-            lambda: self.on_globals_set_selected_bools_triggered('True'))
+            lambda: self.on_globals_set_selected_bools_triggered('True')
+        )
         self.action_globals_set_selected_false.triggered.connect(
-            lambda: self.on_globals_set_selected_bools_triggered('False'))
-        self.action_globals_delete_selected.triggered.connect(self.on_globals_delete_selected_triggered)
+            lambda: self.on_globals_set_selected_bools_triggered('False')
+        )
+        self.action_globals_delete_selected.triggered.connect(
+            self.on_globals_delete_selected_triggered
+        )
         self.globals_model.itemChanged.connect(self.on_globals_model_item_changed)
-        # A context manager with which we can temporarily disconnect the above connection.
         self.globals_model_item_changed_disconnected = DisconnectContextManager(
-            self.globals_model.itemChanged, self.on_globals_model_item_changed)
+            self.globals_model.itemChanged, self.on_globals_model_item_changed
+        )
 
     def set_file_and_group_name(self, globals_file, group_name):
-        """Provided as a separate method so the main app can call it if the
-        group gets renamed"""
         self.globals_file = globals_file
         self.group_name = group_name
         self.ui.label_globals_file.setText(globals_file)
@@ -756,43 +814,50 @@ class GroupTab(object):
 
     def set_tab_icon(self, icon_string):
         index = self.tabWidget.indexOf(self.ui)
-        if icon_string is not None:
-            icon = QtGui.QIcon(icon_string)
-        else:
-            icon = QtGui.QIcon()
+        icon = QtGui.QIcon(icon_string) if icon_string is not None else QtGui.QIcon()
         if self.tabWidget.tabIcon(index).cacheKey() != icon.cacheKey():
             logger.info('setting tab icon')
             self.tabWidget.setTabIcon(index, icon)
 
     def populate_model(self):
-        globals = runmanager.get_globals({self.group_name: self.globals_file})[self.group_name]
-        for name, (value, units, expansion) in globals.items():
-            row = self.make_global_row(name, value, units, expansion)
+        globals_details = runmanager.get_globals_details(
+            {self.group_name: self.globals_file}
+        )[self.group_name]
+        for name, details in globals_details.items():
+            row = self.make_global_row(
+                name,
+                default=details['default'],
+                units=details['units'],
+                scan_enabled=details['scan_enabled'],
+                scan=details['scan'],
+                expansion=details['expansion'],
+            )
             self.globals_model.appendRow(row)
-            value_item = row[self.GLOBALS_COL_VALUE]
-            self.check_for_boolean_values(value_item)
-            expansion_item = row[self.GLOBALS_COL_EXPANSION]
-            self.on_globals_model_expansion_changed(expansion_item)
+            self.update_scan_controls(name)
+            self._update_boolean_state(name)
+            self.on_globals_model_expansion_changed(row[self.GLOBALS_COL_EXPANSION])
 
-        # Add the dummy item at the end:
-        dummy_delete_item = QtGui.QStandardItem()
-        # This lets later code know that this row does not correspond to an
-        # actual global:
-        dummy_delete_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
-        dummy_delete_item.setFlags(QtCore.Qt.NoItemFlags)
-        dummy_delete_item.setToolTip('Click to add global')
+        dummy_scan_enabled_item = QtGui.QStandardItem()
+        dummy_scan_enabled_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
+        dummy_scan_enabled_item.setFlags(QtCore.Qt.NoItemFlags)
+        dummy_scan_enabled_item.setToolTip('Click to add global')
 
         dummy_name_item = QtGui.QStandardItem(self.GLOBALS_DUMMY_ROW_TEXT)
         dummy_name_item.setFont(QtGui.QFont(GLOBAL_MONOSPACE_FONT))
         dummy_name_item.setToolTip('Click to add global')
         dummy_name_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
         dummy_name_item.setData(self.GLOBALS_DUMMY_ROW_TEXT, self.GLOBALS_ROLE_PREVIOUS_TEXT)
-        dummy_name_item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsEditable)  # Clears the 'selectable' flag
+        dummy_name_item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsEditable)
 
-        dummy_value_item = QtGui.QStandardItem()
-        dummy_value_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
-        dummy_value_item.setFlags(QtCore.Qt.NoItemFlags)
-        dummy_value_item.setToolTip('Click to add global')
+        dummy_default_item = QtGui.QStandardItem()
+        dummy_default_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
+        dummy_default_item.setFlags(QtCore.Qt.NoItemFlags)
+        dummy_default_item.setToolTip('Click to add global')
+
+        dummy_scan_item = QtGui.QStandardItem()
+        dummy_scan_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
+        dummy_scan_item.setFlags(QtCore.Qt.NoItemFlags)
+        dummy_scan_item.setToolTip('Click to add global')
 
         dummy_units_item = QtGui.QStandardItem()
         dummy_units_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
@@ -805,23 +870,27 @@ class GroupTab(object):
         dummy_expansion_item.setToolTip('Click to add global')
 
         self.globals_model.appendRow(
-            [dummy_delete_item, dummy_name_item, dummy_value_item, dummy_units_item, dummy_expansion_item])
-
-        # Sort by name:
+            [
+                dummy_scan_enabled_item,
+                dummy_name_item,
+                dummy_default_item,
+                dummy_scan_item,
+                dummy_units_item,
+                dummy_expansion_item,
+            ]
+        )
         self.ui.tableView_globals.sortByColumn(self.GLOBALS_COL_NAME, QtCore.Qt.AscendingOrder)
 
-    def make_global_row(self, name, value='', units='', expansion=''):
-        logger.debug('%s:%s - make global row: %s ' % (self.globals_file, self.group_name, name))
-        # We just set some data here, other stuff is set in
-        # self.update_parse_indication after runmanager has a chance to parse
-        # everything and get back to us about what that data should be.
-
-        delete_item = QtGui.QStandardItem()
-        delete_item.setIcon(QtGui.QIcon(':qtutils/fugue/minus'))
-        # Must be set to something so that the dummy row doesn't get sorted first:
-        delete_item.setData(False, self.GLOBALS_ROLE_SORT_DATA)
-        delete_item.setEditable(False)
-        delete_item.setToolTip('Delete global from group.')
+    def make_global_row(
+        self,
+        name,
+        default='',
+        units='',
+        scan_enabled=False,
+        scan='',
+        expansion='',
+    ):
+        logger.debug('%s:%s - make global row: %s ', self.globals_file, self.group_name, name)
 
         name_item = QtGui.QStandardItem(name)
         name_item.setData(name, self.GLOBALS_ROLE_SORT_DATA)
@@ -829,11 +898,27 @@ class GroupTab(object):
         name_item.setToolTip(name)
         name_item.setFont(QtGui.QFont(GLOBAL_MONOSPACE_FONT))
 
-        value_item = QtGui.QStandardItem(value)
-        value_item.setData(value, self.GLOBALS_ROLE_SORT_DATA)
-        value_item.setData(str(value), self.GLOBALS_ROLE_PREVIOUS_TEXT)
-        value_item.setToolTip('Evaluating...')
-        value_item.setFont(QtGui.QFont(GLOBAL_MONOSPACE_FONT))
+        default_item = QtGui.QStandardItem(default)
+        default_item.setData(default, self.GLOBALS_ROLE_SORT_DATA)
+        default_item.setData(str(default), self.GLOBALS_ROLE_PREVIOUS_TEXT)
+        default_item.setFont(QtGui.QFont(GLOBAL_MONOSPACE_FONT))
+        self.update_expression_item_metadata(default_item, 'Evaluating...')
+
+        scan_enabled_item = QtGui.QStandardItem()
+        scan_enabled_item.setCheckable(True)
+        scan_enabled_item.setCheckState(
+            QtCore.Qt.Checked if scan_enabled else QtCore.Qt.Unchecked
+        )
+        scan_enabled_item.setData(scan_enabled, self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE)
+        scan_enabled_item.setData(scan_enabled, self.GLOBALS_ROLE_SORT_DATA)
+        scan_enabled_item.setEditable(False)
+        scan_enabled_item.setToolTip('Use the Scan expression when generating sequences.')
+
+        scan_item = QtGui.QStandardItem(scan)
+        scan_item.setData(scan, self.GLOBALS_ROLE_SORT_DATA)
+        scan_item.setData(scan, self.GLOBALS_ROLE_PREVIOUS_TEXT)
+        scan_item.setFont(QtGui.QFont(GLOBAL_MONOSPACE_FONT))
+        self.update_expression_item_metadata(scan_item, 'Used when Scan? is checked.')
 
         units_item = QtGui.QStandardItem(units)
         units_item.setData(units, self.GLOBALS_ROLE_SORT_DATA)
@@ -846,128 +931,131 @@ class GroupTab(object):
         expansion_item.setData(expansion, self.GLOBALS_ROLE_PREVIOUS_TEXT)
         expansion_item.setToolTip('')
 
-        row = [delete_item, name_item, value_item, units_item, expansion_item]
-        return row
+        return [
+            scan_enabled_item,
+            name_item,
+            default_item,
+            scan_item,
+            units_item,
+            expansion_item,
+        ]
 
     def on_tableView_globals_leftClicked(self, index):
         if qapplication.keyboardModifiers() != QtCore.Qt.NoModifier:
-            # Only handle mouseclicks with no keyboard modifiers.
             return
         item = self.globals_model.itemFromIndex(index)
-        # The 'name' item in the same row:
         name_index = index.sibling(index.row(), self.GLOBALS_COL_NAME)
         name_item = self.globals_model.itemFromIndex(name_index)
         global_name = name_item.text()
         if item.data(self.GLOBALS_ROLE_IS_DUMMY_ROW):
-            # They clicked on an 'add new global' row. Enter editing mode on
-            # the name item so they can enter a name for the new global:
             self.ui.tableView_globals.setCurrentIndex(name_index)
             self.ui.tableView_globals.edit(name_index)
-        elif item.data(self.GLOBALS_ROLE_IS_BOOL):
-            # It's a bool indicator. Toggle it
-            value_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_VALUE)
-            if value_item.text() == 'True':
-                value_item.setText('False')
-            elif value_item.text() == 'False':
-                value_item.setText('True')
-            else:
-                raise AssertionError('expected boolean value')
-        elif item.column() == self.GLOBALS_COL_DELETE:
-            # They clicked a delete button.
-            self.delete_global(global_name)
-        elif not item.data(self.GLOBALS_ROLE_IS_BOOL):
-            # Edit whatever it is:
-            if (self.ui.tableView_globals.currentIndex() != index
-                    or self.ui.tableView_globals.state() != QtWidgets.QTreeView.EditingState):
+        elif item.column() == self.GLOBALS_COL_UNITS and item.data(self.GLOBALS_ROLE_IS_BOOL):
+            active_item = self.get_active_value_item(global_name)
+            active_item.setText('False' if item.checkState() == QtCore.Qt.Checked else 'True')
+        elif item.column() != self.GLOBALS_COL_SCAN_ENABLED:
+            if (
+                self.ui.tableView_globals.currentIndex() != index
+                or self.ui.tableView_globals.state() != QtWidgets.QTreeView.EditingState
+            ):
                 self.ui.tableView_globals.setCurrentIndex(index)
                 self.ui.tableView_globals.edit(index)
 
     def on_globals_model_item_changed(self, item):
         if item.column() == self.GLOBALS_COL_NAME:
             self.on_globals_model_name_changed(item)
-        elif item.column() == self.GLOBALS_COL_VALUE:
-            self.on_globals_model_value_changed(item)
+        elif item.column() == self.GLOBALS_COL_DEFAULT:
+            self.on_globals_model_default_changed(item)
         elif item.column() == self.GLOBALS_COL_UNITS:
             self.on_globals_model_units_changed(item)
+        elif item.column() == self.GLOBALS_COL_SCAN_ENABLED:
+            self.on_globals_model_scan_enabled_changed(item)
+        elif item.column() == self.GLOBALS_COL_SCAN:
+            self.on_globals_model_scan_changed(item)
         elif item.column() == self.GLOBALS_COL_EXPANSION:
             self.on_globals_model_expansion_changed(item)
 
     def on_globals_model_name_changed(self, item):
-        """Handles global renaming and creation of new globals due to the user
-        editing the <click to add global> item"""
         item_text = item.text()
         if item.data(self.GLOBALS_ROLE_IS_DUMMY_ROW):
             if item_text != self.GLOBALS_DUMMY_ROW_TEXT:
-                # The user has made a new global by editing the <click to add
-                # global> item
-                global_name = item_text
-                self.new_global(global_name)
+                self.new_global(item_text)
         else:
-            # User has renamed a global.
             new_global_name = item_text
             previous_global_name = item.data(self.GLOBALS_ROLE_PREVIOUS_TEXT)
-            # Ensure the name actually changed, rather than something else
-            # about the item:
             if new_global_name != previous_global_name:
                 self.rename_global(previous_global_name, new_global_name)
 
-    def on_globals_model_value_changed(self, item):
-        index = item.index()
-        new_value = item.text()
-        previous_value = item.data(self.GLOBALS_ROLE_PREVIOUS_TEXT)
-        name_index = index.sibling(index.row(), self.GLOBALS_COL_NAME)
-        name_item = self.globals_model.itemFromIndex(name_index)
-        global_name = name_item.text()
-        # Ensure the value actually changed, rather than something else about
-        # the item:
-        if new_value != previous_value:
-            self.change_global_value(global_name, previous_value, new_value)
+    def on_globals_model_default_changed(self, item):
+        new_default = item.text()
+        previous_default = item.data(self.GLOBALS_ROLE_PREVIOUS_TEXT)
+        global_name = self.globals_model.itemFromIndex(
+            item.index().sibling(item.index().row(), self.GLOBALS_COL_NAME)
+        ).text()
+        if new_default != previous_default:
+            self.change_global_default(global_name, previous_default, new_default)
 
     def on_globals_model_units_changed(self, item):
-        index = item.index()
         new_units = item.text()
         previous_units = item.data(self.GLOBALS_ROLE_PREVIOUS_TEXT)
-        name_index = index.sibling(index.row(), self.GLOBALS_COL_NAME)
-        name_item = self.globals_model.itemFromIndex(name_index)
-        global_name = name_item.text()
-        # If it's a boolean value, ensure the check state matches the bool state:
-        if item.data(self.GLOBALS_ROLE_IS_BOOL):
-            value_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_VALUE)
-            if value_item.text() == 'True':
-                item.setCheckState(QtCore.Qt.Checked)
-            elif value_item.text() == 'False':
-                item.setCheckState(QtCore.Qt.Unchecked)
-            else:
-                raise AssertionError('expected boolean value')
-        # Ensure the value actually changed, rather than something else about
-        # the item:
+        global_name = self.globals_model.itemFromIndex(
+            item.index().sibling(item.index().row(), self.GLOBALS_COL_NAME)
+        ).text()
         if new_units != previous_units:
             self.change_global_units(global_name, previous_units, new_units)
 
+    def on_globals_model_scan_enabled_changed(self, item):
+        new_state = item.checkState() == QtCore.Qt.Checked
+        previous_state = item.data(self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE)
+        global_name = self.globals_model.itemFromIndex(
+            item.index().sibling(item.index().row(), self.GLOBALS_COL_NAME)
+        ).text()
+        if new_state != previous_state:
+            self.change_global_scan_enabled(global_name, previous_state, new_state)
+
+    def on_globals_model_scan_changed(self, item):
+        new_scan = item.text()
+        previous_scan = item.data(self.GLOBALS_ROLE_PREVIOUS_TEXT)
+        global_name = self.globals_model.itemFromIndex(
+            item.index().sibling(item.index().row(), self.GLOBALS_COL_NAME)
+        ).text()
+        if new_scan != previous_scan:
+            self.change_global_scan(global_name, previous_scan, new_scan)
+
     def on_globals_model_expansion_changed(self, item):
-        index = item.index()
         new_expansion = item.text()
         previous_expansion = item.data(self.GLOBALS_ROLE_PREVIOUS_TEXT)
-        name_index = index.sibling(index.row(), self.GLOBALS_COL_NAME)
-        name_item = self.globals_model.itemFromIndex(name_index)
-        global_name = name_item.text()
-        # Don't want icon changing to recurse - which happens even if it is
-        # the same icon. So disconnect the signal temporarily:
+        global_name = self.globals_model.itemFromIndex(
+            item.index().sibling(item.index().row(), self.GLOBALS_COL_NAME)
+        ).text()
         with self.globals_model_item_changed_disconnected:
-            if new_expansion == 'outer':
+            scan_enabled_item = self.get_global_item_by_name(
+                global_name, self.GLOBALS_COL_SCAN_ENABLED
+            )
+            scan_enabled = scan_enabled_item.checkState() == QtCore.Qt.Checked
+            if not scan_enabled:
+                item.setData('', self.GLOBALS_ROLE_SORT_DATA)
+                item.setToolTip('Enable Scan? to set an expansion mode.')
+                item.setData(None, QtCore.Qt.DecorationRole)
+            elif new_expansion == 'outer':
                 item.setIcon(QtGui.QIcon(':qtutils/custom/outer'))
-                item.setToolTip('This global will be interpreted as a list of values, and will ' +
-                                'be outer producted with other lists to form a larger parameter space.')
+                item.setToolTip(
+                    'This global will be interpreted as a list of values, and will be '
+                    'outer producted with other lists to form a larger parameter space.'
+                )
             elif new_expansion:
                 item.setIcon(QtGui.QIcon(':qtutils/custom/zip'))
-                item.setToolTip('This global will be interpreted as a list of values, and will ' +
-                                'be iterated over in lock-step with other globals in the ' +
-                                '\'%s\' zip group.' % new_expansion)
+                item.setToolTip(
+                    'This global will be interpreted as a list of values, and will be '
+                    "iterated over in lock-step with other globals in the '%s' zip group."
+                    % new_expansion
+                )
             else:
                 item.setData(None, QtCore.Qt.DecorationRole)
-                item.setToolTip('This global will be interpreted as a single value and passed to compilation as-is.')
-        # Ensure the value actually changed, rather than something else about
-        # the item:
+                item.setToolTip(
+                    'This global will be interpreted as a single value and passed to '
+                    'compilation as-is.'
+                )
         if new_expansion != previous_expansion:
             self.change_global_expansion(global_name, previous_expansion, new_expansion)
 
@@ -982,104 +1070,201 @@ class GroupTab(object):
         selected_indexes = self.ui.tableView_globals.selectedIndexes()
         selected_items = (self.globals_model.itemFromIndex(index) for index in selected_indexes)
         name_items = [item for item in selected_items if item.column() == self.GLOBALS_COL_NAME]
-        # If multiple selected, show 'delete n groups?' message. Otherwise,
-        # pass confirm=True to self.delete_global so it can show the regular
-        # message.
-        confirm_multiple = (len(name_items) > 1)
-        if confirm_multiple:
-            if not question_dialog("Delete %d globals?" % len(name_items)):
-                return
+        confirm_multiple = len(name_items) > 1
+        if confirm_multiple and not question_dialog("Delete %d globals?" % len(name_items)):
+            return
         for item in name_items:
-            global_name = item.text()
-            self.delete_global(global_name, confirm=not confirm_multiple)
+            self.delete_global(item.text(), confirm=not confirm_multiple)
 
     def on_globals_set_selected_bools_triggered(self, state):
         selected_indexes = self.ui.tableView_globals.selectedIndexes()
         selected_items = [self.globals_model.itemFromIndex(index) for index in selected_indexes]
-        value_items = [item for item in selected_items if item.column() == self.GLOBALS_COL_VALUE]
-        units_items = [item for item in selected_items if item.column() == self.GLOBALS_COL_UNITS]
-        for value_item, units_item in zip(value_items, units_items):
-            if units_item.data(self.GLOBALS_ROLE_IS_BOOL):
-                value_item.setText(state)
+        name_items = [item for item in selected_items if item.column() == self.GLOBALS_COL_NAME]
+        for name_item in name_items:
+            self.get_active_value_item(name_item.text()).setText(state)
 
     def close(self):
-        # It is up to the main runmanager class to drop references to this
-        # instance before or after calling this method, so that after the
-        # tabWidget no longer owns our widgets, both the widgets and the
-        # instance will be garbage collected.
-        index = self.tabWidget.indexOf(self.ui)
-        self.tabWidget.removeTab(index)
+        self.tabWidget.removeTab(self.tabWidget.indexOf(self.ui))
 
     def get_global_item_by_name(self, global_name, column, previous_name=None):
-        """Returns an item from the row representing a global in the globals model.
-        Which item is returned is set by the column argument."""
         possible_name_items = self.globals_model.findItems(global_name, column=self.GLOBALS_COL_NAME)
         if previous_name is not None:
-            # Filter by previous name, useful for telling rows apart when a
-            # rename is in progress and two rows may temporarily contain the
-            # same name (though the rename code with throw an error and revert
-            # it).
-            possible_name_items = [item for item in possible_name_items
-                                   if item.data(self.GLOBALS_ROLE_PREVIOUS_TEXT) == previous_name]
+            possible_name_items = [
+                item
+                for item in possible_name_items
+                if item.data(self.GLOBALS_ROLE_PREVIOUS_TEXT) == previous_name
+            ]
         elif global_name != self.GLOBALS_DUMMY_ROW_TEXT:
-            # Don't return the dummy item unless they asked for it explicitly
-            # - if a new global is being created, its name might be
-            # simultaneously present in its own row and the dummy row too.
-            possible_name_items = [item for item in possible_name_items
-                                   if not item.data(self.GLOBALS_ROLE_IS_DUMMY_ROW)]
+            possible_name_items = [
+                item
+                for item in possible_name_items
+                if not item.data(self.GLOBALS_ROLE_IS_DUMMY_ROW)
+            ]
         if len(possible_name_items) > 1:
             raise LookupError('Multiple items found')
-        elif not possible_name_items:
+        if not possible_name_items:
             raise LookupError('No item found')
         name_item = possible_name_items[0]
-        name_index = name_item.index()
-        # Found the name item, get the sibling item for the column requested:
-        item_index = name_index.sibling(name_index.row(), column)
-        item = self.globals_model.itemFromIndex(item_index)
-        return item
+        return self.globals_model.itemFromIndex(
+            name_item.index().sibling(name_item.index().row(), column)
+        )
+
+    def ensure_editable_globals_file(self):
+        self.globals_file = app.ensure_editable_globals_file(self.globals_file, parent=self.ui)
+        return self.globals_file
+
+    def get_active_value_item(self, global_name):
+        scan_enabled_item = self.get_global_item_by_name(
+            global_name, self.GLOBALS_COL_SCAN_ENABLED
+        )
+        target_column = (
+            self.GLOBALS_COL_SCAN
+            if scan_enabled_item.checkState() == QtCore.Qt.Checked
+            else self.GLOBALS_COL_DEFAULT
+        )
+        return self.get_global_item_by_name(global_name, target_column)
+
+    def _update_boolean_state(self, global_name):
+        active_item = self.get_active_value_item(global_name)
+        units_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_UNITS)
+        value = active_item.text()
+        if value == 'True':
+            units_item.setData(True, self.GLOBALS_ROLE_IS_BOOL)
+            units_item.setText('Bool')
+            units_item.setData('!1', self.GLOBALS_ROLE_SORT_DATA)
+            units_item.setEditable(False)
+            units_item.setCheckState(QtCore.Qt.Checked)
+            units_item.setBackground(QtGui.QBrush(QtGui.QColor('#63F731')))
+        elif value == 'False':
+            units_item.setData(True, self.GLOBALS_ROLE_IS_BOOL)
+            units_item.setText('Bool')
+            units_item.setData('!0', self.GLOBALS_ROLE_SORT_DATA)
+            units_item.setEditable(False)
+            units_item.setCheckState(QtCore.Qt.Unchecked)
+            units_item.setBackground(QtGui.QBrush(QtGui.QColor('#608060')))
+        else:
+            was_bool = units_item.data(self.GLOBALS_ROLE_IS_BOOL)
+            units_item.setData(False, self.GLOBALS_ROLE_IS_BOOL)
+            units_item.setEditable(True)
+            units_item.setData(None, QtCore.Qt.CheckStateRole)
+            units_item.setData(None, QtCore.Qt.BackgroundRole)
+            if was_bool and units_item.text() == 'Bool':
+                units_item.setText('')
+
+    def update_scan_controls(self, global_name):
+        scan_enabled_item = self.get_global_item_by_name(
+            global_name, self.GLOBALS_COL_SCAN_ENABLED
+        )
+        default_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_DEFAULT)
+        scan_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_SCAN)
+        expansion_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_EXPANSION)
+        scan_enabled = scan_enabled_item.checkState() == QtCore.Qt.Checked
+        default_tooltip = 'Used for standard shots and when Scan? is unchecked.'
+        scan_tooltip = (
+            'Expression used when Scan? is checked.'
+            if scan_enabled
+            else 'Editable, but used only when Scan? is checked.'
+        )
+        with self.globals_model_item_changed_disconnected:
+            scan_enabled_item.setData(scan_enabled, self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE)
+            scan_enabled_item.setData(scan_enabled, self.GLOBALS_ROLE_SORT_DATA)
+            scan_item.setEditable(True)
+            if scan_enabled:
+                expansion_item.setEditable(True)
+                expansion_item.setToolTip(expansion_item.toolTip() or 'Evaluating...')
+                expansion_item.setData(expansion_item.text(), self.GLOBALS_ROLE_SORT_DATA)
+            else:
+                expansion_item.setEditable(False)
+                expansion_item.setText('')
+                expansion_item.setData('', self.GLOBALS_ROLE_PREVIOUS_TEXT)
+                expansion_item.setData('', self.GLOBALS_ROLE_SORT_DATA)
+                expansion_item.setData(None, QtCore.Qt.DecorationRole)
+                expansion_item.setToolTip('Enable Scan? to set an expansion mode.')
+            self.update_expression_item_metadata(default_item, default_tooltip)
+            self.update_expression_item_metadata(scan_item, scan_tooltip)
+        active_item = scan_item if scan_enabled else default_item
+        active_tooltip = scan_tooltip if scan_enabled else default_tooltip
+        if not active_item.text().strip():
+            self.update_expression_backgrounds(global_name, error=True)
+            self.update_expression_item_metadata(
+                active_item,
+                active_tooltip + ' Expression is empty.',
+                QtGui.QIcon(':qtutils/fugue/exclamation'),
+            )
+        else:
+            self.update_expression_backgrounds(global_name)
+
+    def update_expression_backgrounds(self, global_name, error=False):
+        default_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_DEFAULT)
+        scan_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_SCAN)
+        active_item = self.get_active_value_item(global_name)
+        inactive_item = default_item if active_item is scan_item else scan_item
+        with self.globals_model_item_changed_disconnected:
+            inactive_item.setData(None, QtCore.Qt.BackgroundRole)
+            active_item.setBackground(
+                QtGui.QBrush(QtGui.QColor(self.color_error if error else self.color_active))
+            )
+
+    def update_expression_item_metadata(self, item, base_tooltip, icon=None):
+        tooltip = tooltip_with_hidden_unicode_warning(base_tooltip, item.text())
+        if item.toolTip() != tooltip:
+            item.setToolTip(tooltip)
+        if icon is not None:
+            item.setIcon(icon)
+        elif hidden_unicode_issues(item.text()):
+            item.setIcon(QtGui.QIcon(':qtutils/fugue/exclamation-red'))
+        elif not item.icon().isNull():
+            item.setData(None, QtCore.Qt.DecorationRole)
 
     def do_model_sort(self):
         header = self.ui.tableView_globals.horizontalHeader()
-        sort_column = header.sortIndicatorSection()
-        sort_order = header.sortIndicatorOrder()
-        self.ui.tableView_globals.sortByColumn(sort_column, sort_order)
+        self.ui.tableView_globals.sortByColumn(
+            header.sortIndicatorSection(), header.sortIndicatorOrder()
+        )
 
     def new_global(self, global_name):
         logger.info('%s:%s - new global: %s', self.globals_file, self.group_name, global_name)
-        item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_NAME,
-                                            previous_name=self.GLOBALS_DUMMY_ROW_TEXT)
+        item = self.get_global_item_by_name(
+            global_name, self.GLOBALS_COL_NAME, previous_name=self.GLOBALS_DUMMY_ROW_TEXT
+        )
         try:
+            self.ensure_editable_globals_file()
             runmanager.new_global(self.globals_file, self.group_name, global_name)
         except Exception as e:
             error_dialog(str(e))
         else:
-            # Insert the newly created global into the model:
             global_row = self.make_global_row(global_name)
-            last_index = self.globals_model.rowCount()
-            # Insert it as the row before the last (dummy) row:
-            self.globals_model.insertRow(last_index - 1, global_row)
+            self.globals_model.insertRow(self.globals_model.rowCount() - 1, global_row)
+            self.update_scan_controls(global_name)
+            self._update_boolean_state(global_name)
             self.do_model_sort()
-            # Go into edit mode on the 'value' item:
-            value_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_VALUE,
-                                                      previous_name=global_name)
-            value_item_index = value_item.index()
-            self.ui.tableView_globals.setCurrentIndex(value_item_index)
-            self.ui.tableView_globals.edit(value_item_index)
+            default_item = self.get_global_item_by_name(
+                global_name, self.GLOBALS_COL_DEFAULT, previous_name=global_name
+            )
+            self.ui.tableView_globals.setCurrentIndex(default_item.index())
+            self.ui.tableView_globals.edit(default_item.index())
             self.globals_changed()
         finally:
-            # Set the dummy row's text back ready for another group to be created:
             item.setText(self.GLOBALS_DUMMY_ROW_TEXT)
 
     def rename_global(self, previous_global_name, new_global_name):
-        logger.info('%s:%s - rename global: %s -> %s',
-                    self.globals_file, self.group_name, previous_global_name, new_global_name)
-        item = self.get_global_item_by_name(new_global_name, self.GLOBALS_COL_NAME,
-                                            previous_name=previous_global_name)
+        logger.info(
+            '%s:%s - rename global: %s -> %s',
+            self.globals_file,
+            self.group_name,
+            previous_global_name,
+            new_global_name,
+        )
+        item = self.get_global_item_by_name(
+            new_global_name, self.GLOBALS_COL_NAME, previous_name=previous_global_name
+        )
         try:
-            runmanager.rename_global(self.globals_file, self.group_name, previous_global_name, new_global_name)
+            self.ensure_editable_globals_file()
+            runmanager.rename_global(
+                self.globals_file, self.group_name, previous_global_name, new_global_name
+            )
         except Exception as e:
             error_dialog(str(e))
-            # Set the item text back to the old name, since the rename failed:
             item.setText(previous_global_name)
         else:
             item.setData(new_global_name, self.GLOBALS_ROLE_PREVIOUS_TEXT)
@@ -1087,233 +1272,276 @@ class GroupTab(object):
             self.do_model_sort()
             item.setToolTip(new_global_name)
             self.globals_changed()
-            value_item = self.get_global_item_by_name(new_global_name, self.GLOBALS_COL_VALUE)
-            value = value_item.text()
-            if not value and self.ui.tableView_globals.state() != QtWidgets.QAbstractItemView.EditingState:
-                # Go into editing the value item automatically if not already in edit mode:
-                value_item_index = value_item.index()
-                self.ui.tableView_globals.setCurrentIndex(value_item_index)
-                self.ui.tableView_globals.edit(value_item_index)
+            default_item = self.get_global_item_by_name(new_global_name, self.GLOBALS_COL_DEFAULT)
+            if (
+                not default_item.text()
+                and self.ui.tableView_globals.state() != QtWidgets.QAbstractItemView.EditingState
+            ):
+                self.ui.tableView_globals.setCurrentIndex(default_item.index())
+                self.ui.tableView_globals.edit(default_item.index())
             else:
-                # If this changed the sort order, ensure the item is still visible:
                 scroll_view_to_row_if_current(self.ui.tableView_globals, item)
 
-    def change_global_value(self, global_name, previous_value, new_value, interactive=True):
-        logger.info('%s:%s - change global value: %s = %s -> %s' %
-                    (self.globals_file, self.group_name, global_name, previous_value, new_value))
-        item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_VALUE)
+    def change_global_default(self, global_name, previous_default, new_default, interactive=True):
+        logger.info(
+            '%s:%s - change global default: %s = %s -> %s',
+            self.globals_file,
+            self.group_name,
+            global_name,
+            previous_default,
+            new_default,
+        )
+        item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_DEFAULT)
         if not interactive:
-            # Value was not set interactively by the user, it is up to us to set it:
             with self.globals_model_item_changed_disconnected:
-                item.setText(new_value)
+                item.setText(new_default)
         previous_background = item.background()
         previous_icon = item.icon()
-        item.setData(new_value, self.GLOBALS_ROLE_PREVIOUS_TEXT)
-        item.setData(new_value, self.GLOBALS_ROLE_SORT_DATA)
-        item.setData(None, QtCore.Qt.BackgroundRole)
+        item.setData(new_default, self.GLOBALS_ROLE_PREVIOUS_TEXT)
+        item.setData(new_default, self.GLOBALS_ROLE_SORT_DATA)
         item.setIcon(QtGui.QIcon(':qtutils/fugue/hourglass'))
-        args = global_name, previous_value, new_value, item, previous_background, previous_icon
+        args = global_name, previous_default, new_default, item, previous_background, previous_icon
         if interactive:
-            QtCore.QTimer.singleShot(1, lambda: self.complete_change_global_value(*args))
+            QtCore.QTimer.singleShot(1, lambda: self.complete_change_global_default(*args))
         else:
-            self.complete_change_global_value(*args, interactive=False)
+            self.complete_change_global_default(*args, interactive=False)
 
-    def complete_change_global_value(self, global_name, previous_value, new_value, item, previous_background, previous_icon, interactive=True):
+    def complete_change_global_default(
+        self,
+        global_name,
+        previous_default,
+        new_default,
+        item,
+        previous_background,
+        previous_icon,
+        interactive=True,
+    ):
         try:
-            runmanager.set_value(self.globals_file, self.group_name, global_name, new_value)
+            self.ensure_editable_globals_file()
+            runmanager.set_value(self.globals_file, self.group_name, global_name, new_default)
         except Exception as e:
             if interactive:
                 error_dialog(str(e))
-            # Set the item text back to the old name, since the change failed:
             with self.globals_model_item_changed_disconnected:
-                item.setText(previous_value)
-                item.setData(previous_value, self.GLOBALS_ROLE_PREVIOUS_TEXT)
-                item.setData(previous_value, self.GLOBALS_ROLE_SORT_DATA)
+                item.setText(previous_default)
+                item.setData(previous_default, self.GLOBALS_ROLE_PREVIOUS_TEXT)
+                item.setData(previous_default, self.GLOBALS_ROLE_SORT_DATA)
                 item.setData(previous_background, QtCore.Qt.BackgroundRole)
                 item.setIcon(previous_icon)
             if not interactive:
                 raise
         else:
-            self.check_for_boolean_values(item)
             self.do_model_sort()
-            item.setToolTip('Evaluating...')
+            self.update_expression_item_metadata(item, 'Evaluating...')
+            self._update_boolean_state(global_name)
             self.globals_changed()
             if not interactive:
                 return
             units_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_UNITS)
-            units = units_item.text()
-            if not units and self.ui.tableView_globals.state() != QtWidgets.QAbstractItemView.EditingState:
-                # Go into editing the units item automatically if not already in edit mode:
-                units_item_index = units_item.index()
-                self.ui.tableView_globals.setCurrentIndex(units_item_index)
-                self.ui.tableView_globals.edit(units_item_index)
+            if (
+                not units_item.text()
+                and self.ui.tableView_globals.state() != QtWidgets.QAbstractItemView.EditingState
+            ):
+                self.ui.tableView_globals.setCurrentIndex(units_item.index())
+                self.ui.tableView_globals.edit(units_item.index())
             else:
-                # If this changed the sort order, ensure the item is still visible:
                 scroll_view_to_row_if_current(self.ui.tableView_globals, item)
 
     def change_global_units(self, global_name, previous_units, new_units):
-        logger.info('%s:%s - change units: %s = %s -> %s' %
-                    (self.globals_file, self.group_name, global_name, previous_units, new_units))
+        logger.info(
+            '%s:%s - change units: %s = %s -> %s',
+            self.globals_file,
+            self.group_name,
+            global_name,
+            previous_units,
+            new_units,
+        )
         item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_UNITS)
         try:
+            self.ensure_editable_globals_file()
             runmanager.set_units(self.globals_file, self.group_name, global_name, new_units)
         except Exception as e:
             error_dialog(str(e))
-            # Set the item text back to the old units, since the change failed:
             item.setText(previous_units)
         else:
             item.setData(new_units, self.GLOBALS_ROLE_PREVIOUS_TEXT)
             item.setData(new_units, self.GLOBALS_ROLE_SORT_DATA)
             self.do_model_sort()
-            # If this changed the sort order, ensure the item is still visible:
+            scroll_view_to_row_if_current(self.ui.tableView_globals, item)
+
+    def change_global_scan_enabled(self, global_name, previous_state, new_state):
+        logger.info(
+            '%s:%s - change global scan enabled: %s = %s -> %s',
+            self.globals_file,
+            self.group_name,
+            global_name,
+            previous_state,
+            new_state,
+        )
+        item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_SCAN_ENABLED)
+        try:
+            self.ensure_editable_globals_file()
+            runmanager.set_scan_enabled(
+                self.globals_file, self.group_name, global_name, new_state
+            )
+        except Exception as e:
+            error_dialog(str(e))
+            with self.globals_model_item_changed_disconnected:
+                item.setCheckState(QtCore.Qt.Checked if previous_state else QtCore.Qt.Unchecked)
+                item.setData(previous_state, self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE)
+                item.setData(previous_state, self.GLOBALS_ROLE_SORT_DATA)
+            self.update_scan_controls(global_name)
+        else:
+            item.setData(new_state, self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE)
+            item.setData(new_state, self.GLOBALS_ROLE_SORT_DATA)
+            if new_state:
+                expansion_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_EXPANSION)
+                if not expansion_item.text():
+                    with self.globals_model_item_changed_disconnected:
+                        expansion_item.setText('outer')
+                        expansion_item.setData('outer', self.GLOBALS_ROLE_PREVIOUS_TEXT)
+                        expansion_item.setData('outer', self.GLOBALS_ROLE_SORT_DATA)
+            self.update_scan_controls(global_name)
+            self._update_boolean_state(global_name)
+            if new_state:
+                self.on_globals_model_expansion_changed(
+                    self.get_global_item_by_name(global_name, self.GLOBALS_COL_EXPANSION)
+                )
+            self.do_model_sort()
+            self.globals_changed()
+            focus_item = self.get_active_value_item(global_name)
+            if (
+                new_state
+                and not focus_item.text()
+                and self.ui.tableView_globals.state() != QtWidgets.QAbstractItemView.EditingState
+            ):
+                self.ui.tableView_globals.setCurrentIndex(focus_item.index())
+                self.ui.tableView_globals.edit(focus_item.index())
+            else:
+                scroll_view_to_row_if_current(self.ui.tableView_globals, item)
+
+    def change_global_scan(self, global_name, previous_scan, new_scan):
+        logger.info(
+            '%s:%s - change global scan: %s = %s -> %s',
+            self.globals_file,
+            self.group_name,
+            global_name,
+            previous_scan,
+            new_scan,
+        )
+        item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_SCAN)
+        try:
+            self.ensure_editable_globals_file()
+            runmanager.set_scan(self.globals_file, self.group_name, global_name, new_scan)
+        except Exception as e:
+            error_dialog(str(e))
+            item.setText(previous_scan)
+        else:
+            item.setData(new_scan, self.GLOBALS_ROLE_PREVIOUS_TEXT)
+            item.setData(new_scan, self.GLOBALS_ROLE_SORT_DATA)
+            self.do_model_sort()
+            self.update_expression_item_metadata(item, 'Evaluating...')
+            self._update_boolean_state(global_name)
+            self.globals_changed()
             scroll_view_to_row_if_current(self.ui.tableView_globals, item)
 
     def change_global_expansion(self, global_name, previous_expansion, new_expansion):
-        logger.info('%s:%s - change expansion: %s = %s -> %s' %
-                    (self.globals_file, self.group_name, global_name, previous_expansion, new_expansion))
+        logger.info(
+            '%s:%s - change expansion: %s = %s -> %s',
+            self.globals_file,
+            self.group_name,
+            global_name,
+            previous_expansion,
+            new_expansion,
+        )
         item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_EXPANSION)
         try:
-            runmanager.set_expansion(self.globals_file, self.group_name, global_name, new_expansion)
+            self.ensure_editable_globals_file()
+            runmanager.set_expansion(
+                self.globals_file, self.group_name, global_name, new_expansion
+            )
         except Exception as e:
             error_dialog(str(e))
-            # Set the item text back to the old units, since the change failed:
             item.setText(previous_expansion)
         else:
             item.setData(new_expansion, self.GLOBALS_ROLE_PREVIOUS_TEXT)
             item.setData(new_expansion, self.GLOBALS_ROLE_SORT_DATA)
             self.do_model_sort()
             self.globals_changed()
-            # If this changed the sort order, ensure the item is still visible:
             scroll_view_to_row_if_current(self.ui.tableView_globals, item)
 
-    def check_for_boolean_values(self, item):
-        """Checks if the value is 'True' or 'False'. If either, makes the
-        units cell checkable, uneditable, and coloured to indicate the state.
-        The units cell can then be clicked to toggle the value."""
-        index = item.index()
-        value = item.text()
-        name_index = index.sibling(index.row(), self.GLOBALS_COL_NAME)
-        units_index = index.sibling(index.row(), self.GLOBALS_COL_UNITS)
-        name_item = self.globals_model.itemFromIndex(name_index)
-        units_item = self.globals_model.itemFromIndex(units_index)
-        global_name = name_item.text()
-        logger.debug('%s:%s - check for boolean values: %s' %
-                     (self.globals_file, self.group_name, global_name))
-        if value == 'True':
-            units_item.setData(True, self.GLOBALS_ROLE_IS_BOOL)
-            units_item.setText('Bool')
-            units_item.setData('!1', self.GLOBALS_ROLE_SORT_DATA)
-            units_item.setEditable(False)
-            units_item.setCheckState(QtCore.Qt.Checked)
-            units_item.setBackground(QtGui.QBrush(QtGui.QColor(self.COLOR_BOOL_ON)))
-        elif value == 'False':
-            units_item.setData(True, self.GLOBALS_ROLE_IS_BOOL)
-            units_item.setText('Bool')
-            units_item.setData('!0', self.GLOBALS_ROLE_SORT_DATA)
-            units_item.setEditable(False)
-            units_item.setCheckState(QtCore.Qt.Unchecked)
-            units_item.setBackground(QtGui.QBrush(QtGui.QColor(self.COLOR_BOOL_OFF)))
-        else:
-            was_bool = units_item.data(self.GLOBALS_ROLE_IS_BOOL)
-            units_item.setData(False, self.GLOBALS_ROLE_IS_BOOL)
-            units_item.setEditable(True)
-            # Checkbox still visible unless we do the following:
-            units_item.setData(None, QtCore.Qt.CheckStateRole)
-            units_item.setData(None, QtCore.Qt.BackgroundRole)
-            if was_bool:
-                # If the item was a bool and now isn't, clear the
-                # units and go into editing so the user can enter a
-                # new units string:
-                units_item.setText('')
-                self.ui.tableView_globals.setCurrentIndex(units_item.index())
-                self.ui.tableView_globals.edit(units_item.index())
-
     def globals_changed(self):
-        """Called whenever something about a global has changed. call
-        app.globals_changed to inform the main application that it needs to
-        parse globals again. self.update_parse_indication will be called by
-        the main app when parsing is done, and will set the colours and
-        tooltips appropriately"""
-        # Tell the main app about it:
         app.globals_changed()
 
     def delete_global(self, global_name, confirm=True):
-        logger.info('%s:%s - delete global: %s' %
-                    (self.globals_file, self.group_name, global_name))
-        if confirm:
-            if not question_dialog("Delete the global '%s'?" % global_name):
-                return
+        logger.info('%s:%s - delete global: %s', self.globals_file, self.group_name, global_name)
+        if confirm and not question_dialog("Delete the global '%s'?" % global_name):
+            return
+        self.ensure_editable_globals_file()
         runmanager.delete_global(self.globals_file, self.group_name, global_name)
-        # Find the entry for this global in self.globals_model and remove it:
-        name_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_NAME)
-        self.globals_model.removeRow(name_item.row())
+        self.globals_model.removeRow(
+            self.get_global_item_by_name(global_name, self.GLOBALS_COL_NAME).row()
+        )
         self.globals_changed()
 
     def update_parse_indication(self, active_groups, sequence_globals, evaled_globals):
-        # Check that we are an active group:
         if self.group_name in active_groups and active_groups[self.group_name] == self.globals_file:
             self.tab_contains_errors = False
-            # for global_name, value in evaled_globals[self.group_name].items():
             for i in range(self.globals_model.rowCount()):
                 name_item = self.globals_model.item(i, self.GLOBALS_COL_NAME)
                 if name_item.data(self.GLOBALS_ROLE_IS_DUMMY_ROW):
                     continue
-                value_item = self.globals_model.item(i, self.GLOBALS_COL_VALUE)
+                default_item = self.globals_model.item(i, self.GLOBALS_COL_DEFAULT)
+                scan_enabled_item = self.globals_model.item(i, self.GLOBALS_COL_SCAN_ENABLED)
+                scan_item = self.globals_model.item(i, self.GLOBALS_COL_SCAN)
                 expansion_item = self.globals_model.item(i, self.GLOBALS_COL_EXPANSION)
-                # value_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_VALUE)
-                # expansion_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_EXPANSION)
                 global_name = name_item.text()
                 value = evaled_globals[self.group_name][global_name]
+                active_item = (
+                    scan_item
+                    if scan_enabled_item.checkState() == QtCore.Qt.Checked
+                    else default_item
+                )
+                inactive_item = default_item if active_item is scan_item else scan_item
 
-                ignore, ignore, expansion = sequence_globals[self.group_name][global_name]
-                # Temporarily disconnect the item_changed signal on the model
-                # so that we can set the expansion type without triggering
-                # another preparse - the parsing has already been done with
-                # the new expansion type.
+                _, _, expansion = sequence_globals[self.group_name][global_name]
                 with self.globals_model_item_changed_disconnected:
                     if expansion_item.data(self.GLOBALS_ROLE_PREVIOUS_TEXT) != expansion:
-                        # logger.info('expansion previous text set')
                         expansion_item.setData(expansion, self.GLOBALS_ROLE_PREVIOUS_TEXT)
                     if expansion_item.data(self.GLOBALS_ROLE_SORT_DATA) != expansion:
-                        # logger.info('sort data role set')
                         expansion_item.setData(expansion, self.GLOBALS_ROLE_SORT_DATA)
-                # The next line will now trigger item_changed, but it will not
-                # be detected as an actual change to the expansion type,
-                # because previous_text will match text. So it will not look
-                # like a change and will not trigger preparsing. However It is
-                # still important that other triggers be processed, such as
-                # setting the icon in the expansion item, so that will still
-                # occur in the callback.
                 expansion_item.setText(expansion)
+                inactive_base_tooltip = (
+                    'Used for standard shots and when Scan? is unchecked.'
+                    if active_item is scan_item
+                    else 'Used only when Scan? is checked.'
+                )
+                self.update_expression_item_metadata(inactive_item, inactive_base_tooltip)
                 if isinstance(value, Exception):
-                    value_item.setBackground(QtGui.QBrush(QtGui.QColor(self.COLOR_ERROR)))
-                    value_item.setIcon(QtGui.QIcon(':qtutils/fugue/exclamation'))
-                    tooltip = '%s: %s' % (value.__class__.__name__, str(value))
+                    self.update_expression_backgrounds(global_name, error=True)
+                    self.update_expression_item_metadata(
+                        active_item,
+                        '%s: %s' % (value.__class__.__name__, str(value)),
+                        QtGui.QIcon(':qtutils/fugue/exclamation'),
+                    )
                     self.tab_contains_errors = True
                 else:
-                    if value_item.background().color().name().lower() != self.COLOR_OK.lower():
-                        value_item.setBackground(QtGui.QBrush(QtGui.QColor(self.COLOR_OK)))
-                    if not value_item.icon().isNull():
-                        # logger.info('clearing icon')
-                        value_item.setData(None, QtCore.Qt.DecorationRole)
-                    tooltip = repr(value)
-                if value_item.toolTip() != tooltip:
-                    # logger.info('tooltip_changed')
-                    value_item.setToolTip(tooltip)
-            if self.tab_contains_errors:
-                self.set_tab_icon(':qtutils/fugue/exclamation')
-            else:
-                self.set_tab_icon(None)
+                    self.update_expression_backgrounds(global_name)
+                    self.update_expression_item_metadata(active_item, repr(value))
+                self._update_boolean_state(global_name)
+            self.set_tab_icon(':qtutils/fugue/exclamation' if self.tab_contains_errors else None)
         else:
-            # Clear everything:
             self.set_tab_icon(None)
             for row in range(self.globals_model.rowCount()):
-                item = self.globals_model.item(row, self.GLOBALS_COL_VALUE)
-                if item.data(self.GLOBALS_ROLE_IS_DUMMY_ROW):
+                default_item = self.globals_model.item(row, self.GLOBALS_COL_DEFAULT)
+                if default_item.data(self.GLOBALS_ROLE_IS_DUMMY_ROW):
                     continue
-                item.setData(None, QtCore.Qt.DecorationRole)
-                item.setToolTip('Group inactive')
-                item.setData(None, QtCore.Qt.BackgroundRole)
+                scan_item = self.globals_model.item(row, self.GLOBALS_COL_SCAN)
+                for item in (default_item, scan_item):
+                    self.update_expression_item_metadata(item, 'Group inactive')
+                self.update_expression_backgrounds(
+                    self.globals_model.item(row, self.GLOBALS_COL_NAME).text()
+                )
 
 
 class RunmanagerMainWindow(QtWidgets.QMainWindow):
@@ -2145,7 +2373,7 @@ class RunManager(object):
         globals_file = QtWidgets.QFileDialog.getOpenFileName(self.ui,
                                                          'Select globals file',
                                                          self.last_opened_globals_folder,
-                                                         "HDF5 files (*.h5)")
+                                                         "Globals files (*.toml *.h5 *.hdf5)")
         if type(globals_file) is tuple:
             globals_file, _ = globals_file
 
@@ -2166,13 +2394,15 @@ class RunManager(object):
         globals_file = QtWidgets.QFileDialog.getSaveFileName(self.ui,
                                                          'Create new globals file',
                                                          self.last_opened_globals_folder,
-                                                         "HDF5 files (*.h5)")
+                                                         "TOML files (*.toml)")
         if type(globals_file) is tuple:
             globals_file, _ = globals_file
 
         if not globals_file:
             # User cancelled
             return
+        if not globals_file.lower().endswith('.toml'):
+            globals_file += '.toml'
         # Convert to standard platform specific path, otherwise Qt likes
         # forward slashes:
         globals_file = os.path.abspath(globals_file)
@@ -2186,7 +2416,7 @@ class RunManager(object):
         globals_file = QtWidgets.QFileDialog.getOpenFileName(self.ui,
                                                          'Select globals file to compare',
                                                          self.last_opened_globals_folder,
-                                                         "HDF5 files (*.h5)")
+                                                         "Globals files (*.toml *.h5 *.hdf5)")
         if type(globals_file) is tuple:
             globals_file, _ = globals_file
 
@@ -2710,11 +2940,61 @@ class RunManager(object):
                     active_groups[group_name] = globals_file
         return active_groups
 
+    def replace_globals_file_path(self, old_path, new_path):
+        if old_path == new_path:
+            return new_path
+        matching_items = self.groups_model.findItems(old_path, column=self.GROUPS_COL_NAME)
+        if not matching_items:
+            return new_path
+        if self.groups_model.findItems(new_path, column=self.GROUPS_COL_NAME):
+            raise RuntimeError("A globals file named %s is already open." % new_path)
+        file_name_item = matching_items[0]
+        with self.groups_model_item_changed_disconnected:
+            file_name_item.setText(new_path)
+            file_name_item.setToolTip(new_path)
+            file_name_item.setData(new_path, self.GROUPS_ROLE_SORT_DATA)
+        updated_groups = {}
+        for (globals_file, group_name), group_tab in self.currently_open_groups.items():
+            if globals_file == old_path:
+                group_tab.set_file_and_group_name(new_path, group_name)
+                updated_groups[new_path, group_name] = group_tab
+            else:
+                updated_groups[globals_file, group_name] = group_tab
+        self.currently_open_groups = updated_groups
+        self.do_model_sort()
+        return new_path
+
+    def ensure_editable_globals_file(self, globals_file, parent=None):
+        if not runmanager.globals_file_requires_conversion(globals_file):
+            return globals_file
+        suggested_path = runmanager.default_toml_globals_file(globals_file)
+        destination = QtWidgets.QFileDialog.getSaveFileName(
+            parent or self.ui,
+            'Convert globals file to TOML for editing',
+            suggested_path,
+            "TOML files (*.toml)",
+        )
+        if type(destination) is tuple:
+            destination, _ = destination
+        if not destination:
+            raise RuntimeError('Conversion to TOML cancelled.')
+        if not destination.lower().endswith('.toml'):
+            destination += '.toml'
+        destination = os.path.abspath(destination)
+        if destination != globals_file and self.groups_model.findItems(destination, column=self.GROUPS_COL_NAME):
+            raise RuntimeError("A globals file named %s is already open." % destination)
+        runmanager.convert_globals_file(globals_file, destination)
+        self.last_opened_globals_folder = os.path.dirname(destination)
+        return self.replace_globals_file_path(globals_file, destination)
+
     def open_globals_file(self, globals_file):
         # Do nothing if this file is already open:
         if self.groups_model.findItems(globals_file, column=self.GROUPS_COL_NAME):
-            return
+            return globals_file
 
+        # Legacy HDF5 globals and shot files remain readable from the file
+        # selector. Conversion to TOML is deferred until the user attempts an
+        # edit operation.
         # Get the groups:
         groups = runmanager.get_grouplist(globals_file)
         # Add the parent row:
@@ -2781,6 +3061,7 @@ class RunManager(object):
         self.do_model_sort()
         # If this changed the sort order, ensure the file item is visible:
         scroll_view_to_row_if_current(self.ui.treeView_groups, file_name_item)
+        return globals_file
 
     def make_group_row(self, group_name):
         """Returns a new row representing one group in the groups tab, ready to be
@@ -2847,15 +3128,19 @@ class RunManager(object):
         if delete_source_group and source_globals_file == dest_globals_file:
             return
         try:
+            if delete_source_group:
+                source_globals_file = self.ensure_editable_globals_file(source_globals_file)
+            if dest_globals_file is None:
+                dest_globals_file = source_globals_file
+            dest_globals_file = self.ensure_editable_globals_file(dest_globals_file)
+            if source_globals_file == dest_globals_file and delete_source_group:
+                source_globals_file = dest_globals_file
             dest_group_name = runmanager.copy_group(source_globals_file, source_group_name, dest_globals_file, delete_source_group)
         except Exception as e:
             error_dialog(str(e))
         else:
             # Insert the newly created globals group into the model, as a
             # child row of the new globals file.
-            if dest_globals_file is None:
-                dest_globals_file = source_globals_file
-
             # find the new groups parent row by filepath
             for index in range(self.groups_model.rowCount()):
                 if self.groups_model.item(index, self.GROUPS_COL_NAME).text() == dest_globals_file:
@@ -2885,6 +3170,7 @@ class RunManager(object):
         item = self.get_group_item_by_name(globals_file, group_name, self.GROUPS_COL_NAME,
                                            previous_name=self.GROUPS_DUMMY_ROW_TEXT)
         try:
+            globals_file = self.ensure_editable_globals_file(globals_file)
             runmanager.new_group(globals_file, group_name)
         except Exception as e:
             error_dialog(str(e))
@@ -2930,6 +3216,7 @@ class RunManager(object):
         item = self.get_group_item_by_name(globals_file, new_group_name, self.GROUPS_COL_NAME,
                                            previous_name=previous_group_name)
         try:
+            globals_file = self.ensure_editable_globals_file(globals_file)
             runmanager.rename_group(globals_file, previous_group_name, new_group_name)
         except Exception as e:
             error_dialog(str(e))
@@ -2963,6 +3250,7 @@ class RunManager(object):
         group_tab = self.currently_open_groups.get((globals_file, group_name))
         if group_tab is not None:
             self.close_group(globals_file, group_name)
+        globals_file = self.ensure_editable_globals_file(globals_file)
         runmanager.delete_group(globals_file, group_name)
         # Find the entry for this group in self.groups_model and remove it:
         name_item = self.get_group_item_by_name(globals_file, group_name, self.GROUPS_COL_NAME)
@@ -3129,11 +3417,13 @@ class RunManager(object):
                 self.output_box.output('\n')
             self.output_box.output('Warning: %s\n' % message, red=True)
 
+        opened_globals_files = {}
         for globals_file in runmanager_config.get('h5_files_open', []):
             if os.path.exists(globals_file):
                 try:
-                    self.open_globals_file(globals_file)
-                    self.last_opened_globals_folder = os.path.dirname(globals_file)
+                    opened_globals_file = self.open_globals_file(globals_file)
+                    opened_globals_files[globals_file] = opened_globals_file
+                    self.last_opened_globals_folder = os.path.dirname(opened_globals_file)
                 except Exception:
                     raise_exception_in_thread(sys.exc_info())
                     continue
@@ -3141,6 +3431,7 @@ class RunManager(object):
                 self.output_box.output('\nWarning: globals file %s no longer exists\n' % globals_file, red=True)
 
         for globals_file, group_name in runmanager_config.get('active_groups', []):
+            globals_file = opened_globals_files.get(globals_file, globals_file)
             try:
                 group_active_item = self.get_group_item_by_name(globals_file, group_name, self.GROUPS_COL_ACTIVE)
                 group_active_item.setCheckState(QtCore.Qt.Checked)
@@ -3148,6 +3439,7 @@ class RunManager(object):
                 warning("previously active group '%s' in %s no longer exists" % (group_name, globals_file))
 
         for globals_file, group_name in runmanager_config.get('groups_open', []):
+            globals_file = opened_globals_files.get(globals_file, globals_file)
             # First check if it exists:
             try:
                 self.get_group_item_by_name(globals_file, group_name, self.GROUPS_COL_NAME)
@@ -3564,7 +3856,9 @@ class RemoteServer(ZMQServer):
                                         multiple active groups: %s and %s"""
                                     msg = msg % (global_name, group_name, other_name)
                                     raise RuntimeError(dedent(msg))
-                        previous_value, _, _ = sequence_globals[group_name][global_name]
+                        previous_value = runmanager.get_value(
+                            globals_file, group_name, global_name
+                        )
 
                         # Append expression-final comments in the previous expression to
                         # the new one:
@@ -3582,12 +3876,13 @@ class RemoteServer(ZMQServer):
                             ]
                         except KeyError:
                             # Group is not open. Change the global value on disk:
+                            globals_file = app.ensure_editable_globals_file(globals_file)
                             runmanager.set_value(
                                 globals_file, group_name, global_name, new_value
                             )
                         else:
                             # Group is open. Change the global value via the GUI:
-                            group_tab.change_global_value(
+                            group_tab.change_global_default(
                                 global_name,
                                 previous_value,
                                 new_value,
