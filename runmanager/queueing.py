@@ -28,6 +28,9 @@ from qtutils.qt.QtCore import pyqtSignal as Signal
 
 from labscript_utils.qtwidgets.shotqueue import FILEPATH_COLUMN, ShotQueueWidget
 
+EMPTY_QUEUE_NOTHING = 'nothing'
+EMPTY_QUEUE_DEFAULT_LABSCRIPT = 'default_labscript'
+
 
 class RunmanagerQueueWidget(ShotQueueWidget):
     """Shot queue widget configured for runmanager-owned compiled shots."""
@@ -125,8 +128,21 @@ class QueueController(object):
     """Thread-safe filepath queue."""
 
     def __init__(self):
+        self.empty_queue_policy = EMPTY_QUEUE_NOTHING
+        self.default_labscript_file = ''
+        self.last_sent_to_blacs = None
         self._items = []
         self._lock = threading.RLock()
+
+    def set_empty_queue_policy(self, value):
+        if value not in (EMPTY_QUEUE_NOTHING, EMPTY_QUEUE_DEFAULT_LABSCRIPT):
+            raise ValueError('Invalid empty queue policy: %s' % value)
+        with self._lock:
+            self.empty_queue_policy = value
+
+    def set_default_labscript_file(self, value):
+        with self._lock:
+            self.default_labscript_file = os.path.abspath(value) if value else ''
 
     def enqueue(self, paths):
         paths = [os.path.abspath(str(path)) for path in paths]
@@ -172,17 +188,45 @@ class QueueController(object):
         with self._lock:
             return list(self._items)
 
+    def set_last_sent_to_blacs(self, value):
+        with self._lock:
+            self.last_sent_to_blacs = str(value) if value else None
+
     def export_state(self):
         with self._lock:
-            return {'items': list(self._items)}
+            return {
+                'empty_queue_policy': self.empty_queue_policy,
+                'default_labscript_file': self.default_labscript_file,
+                'items': list(self._items),
+            }
 
     def restore_state(self, state):
         with self._lock:
+            empty_queue_policy = state.get(
+                'empty_queue_policy', EMPTY_QUEUE_NOTHING
+            )
+            if empty_queue_policy not in (
+                EMPTY_QUEUE_NOTHING,
+                EMPTY_QUEUE_DEFAULT_LABSCRIPT,
+            ):
+                empty_queue_policy = EMPTY_QUEUE_NOTHING
+            self.empty_queue_policy = empty_queue_policy
+            default_labscript_file = state.get('default_labscript_file', '')
+            self.default_labscript_file = (
+                os.path.abspath(default_labscript_file)
+                if default_labscript_file
+                else ''
+            )
             self._items = [os.path.abspath(str(path)) for path in state.get('items', [])]
 
     def get_queue_state(self):
         with self._lock:
-            return {'n_items': len(self._items)}
+            return {
+                'empty_queue_policy': self.empty_queue_policy,
+                'default_labscript_file': self.default_labscript_file,
+                'last_sent_to_blacs': self.last_sent_to_blacs,
+                'n_items': len(self._items),
+            }
 
     def pop_next(self):
         with self._lock:
@@ -211,6 +255,15 @@ class QueueManager(QtCore.QObject):
 
     def enqueue(self, paths):
         return self._request('enqueue', list(paths))
+
+    def set_last_sent_to_blacs(self, value):
+        return self._request('set_last_sent_to_blacs', value)
+
+    def set_empty_queue_policy(self, value):
+        return self._request('set_empty_queue_policy', value)
+
+    def set_default_labscript_file(self, value):
+        return self._request('set_default_labscript_file', value)
 
     def delete_rows(self, rows):
         return self._request('delete_rows', list(rows))
@@ -258,6 +311,18 @@ class QueueManager(QtCore.QObject):
                 changed = False
                 if command == 'enqueue':
                     self.controller.enqueue(*args)
+                    changed = True
+                    result = None
+                elif command == 'set_empty_queue_policy':
+                    self.controller.set_empty_queue_policy(*args)
+                    changed = True
+                    result = None
+                elif command == 'set_default_labscript_file':
+                    self.controller.set_default_labscript_file(*args)
+                    changed = True
+                    result = None
+                elif command == 'set_last_sent_to_blacs':
+                    self.controller.set_last_sent_to_blacs(*args)
                     changed = True
                     result = None
                 elif command == 'delete_rows':

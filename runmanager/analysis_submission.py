@@ -260,7 +260,7 @@ class AnalysisSubmission(object):
                 else:
                     raise ValueError('Invalid signal: %s' % str(signal))
 
-                self._mainloop_logger.info('Processed signal: %s' % str(signal))
+                self._mainloop_logger.debug('Processed signal: %s' % str(signal))
             except Exception:
                 raise_exception_in_thread(sys.exc_info())
                 self._mainloop_logger.exception('Exception in mainloop, continuing')
@@ -291,7 +291,7 @@ class AnalysisSubmission(object):
         success = True
         while self._waiting_for_submission and success:
             path = self._waiting_for_submission[0]
-            self._mainloop_logger.info('Submitting run file %s.\n' % os.path.basename(path))
+            self._mainloop_logger.debug('Submitting run file %s.\n' % os.path.basename(path))
             data = {'filepath': labscript_utils.shared_drive.path_to_agnostic(path)}
             self.server_online = 'checking'
             try:

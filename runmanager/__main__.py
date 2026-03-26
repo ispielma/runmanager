@@ -57,6 +57,7 @@ from labscript_utils.labconfig import (
     save_appconfig,
     load_appconfig,
 )
+from labscript_utils.file_utils import next_available_indexed_filepath
 from labscript_utils.setup_logging import setup_logging
 import labscript_utils.shared_drive as shared_drive
 from labscript_utils import dedent
@@ -64,7 +65,12 @@ from zprocess import raise_exception_in_thread
 import runmanager
 import runmanager.remote
 from runmanager.analysis_submission import AnalysisSubmission
-from runmanager.queueing import QueueManager, RunmanagerQueueWidget
+from runmanager.queueing import (
+    EMPTY_QUEUE_DEFAULT_LABSCRIPT,
+    EMPTY_QUEUE_NOTHING,
+    QueueManager,
+    RunmanagerQueueWidget,
+)
 
 from qtutils import (
     inmain,
@@ -1680,6 +1686,8 @@ class RunManager(object):
 
         # Start the loop that allows compilations to be queued up:
         self.compile_queue = queue.Queue()
+        self.compiler_lock = threading.Lock()
+        self._next_default_shot_index = {}
         self.compile_queue_thread = threading.Thread(target=self.compile_loop)
         self.compile_queue_thread.daemon = True
         self.compile_queue_thread.start()
@@ -1833,6 +1841,16 @@ class RunManager(object):
         )
         self.verticalLayout_queue_tab = QtWidgets.QVBoxLayout(self.tab_queue)
         self.verticalLayout_queue_tab.setObjectName('verticalLayout_queue_tab')
+        controls_layout = QtWidgets.QHBoxLayout()
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.addWidget(QtWidgets.QLabel('When queue is empty', self.tab_queue))
+        self.queue_empty_policy_combo = QtWidgets.QComboBox(self.tab_queue)
+        self.queue_empty_policy_combo.addItem('Send nothing', EMPTY_QUEUE_NOTHING)
+        self.queue_empty_policy_combo.addItem(
+            'Send default shot', EMPTY_QUEUE_DEFAULT_LABSCRIPT
+        )
+        controls_layout.addWidget(self.queue_empty_policy_combo)
+        controls_layout.addStretch(1)
         self.queue_widget = RunmanagerQueueWidget(self.tab_queue)
         self.queue_widget.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
@@ -1843,11 +1861,22 @@ class RunManager(object):
         )
         self.queue_status_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         self.queue_status_label.setWordWrap(True)
+        self.queue_last_sent_label = QtWidgets.QLabel(self.tab_queue)
+        self.queue_last_sent_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
+        )
+        self.queue_last_sent_label.setAlignment(
+            QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
+        )
+        self.queue_last_sent_label.setWordWrap(True)
+        self.verticalLayout_queue_tab.addLayout(controls_layout)
         self.verticalLayout_queue_tab.addWidget(self.queue_widget)
         self.verticalLayout_queue_tab.addWidget(self.queue_status_label)
+        self.verticalLayout_queue_tab.addWidget(self.queue_last_sent_label)
         self.ui.tabWidget.insertTab(0, self.tab_queue, 'Queue')
         queue_tab_index = self.ui.tabWidget.indexOf(self.tab_queue)
         self.ui.tabWidget.tabBar().setMovable(False, index=queue_tab_index)
+        self.ui.tabWidget.setCurrentWidget(self.tab_queue)
         self.refresh_queue_tab()
 
     def connect_signals(self):
@@ -1863,10 +1892,19 @@ class RunManager(object):
 
         # labscript file and folder selection stuff:
         self.ui.toolButton_select_labscript_file.clicked.connect(self.on_select_labscript_file_clicked)
+        self.ui.toolButton_select_default_labscript_file.clicked.connect(
+            self.on_select_default_labscript_file_clicked
+        )
         self.ui.toolButton_select_shot_output_folder.clicked.connect(self.on_select_shot_output_folder_clicked)
         self.ui.toolButton_edit_labscript_file.clicked.connect(self.on_edit_labscript_file_clicked)
+        self.ui.toolButton_edit_default_labscript_file.clicked.connect(
+            self.on_edit_default_labscript_file_clicked
+        )
         self.ui.toolButton_reset_shot_output_folder.clicked.connect(self.on_reset_shot_output_folder_clicked)
         self.ui.lineEdit_labscript_file.textChanged.connect(self.on_labscript_file_text_changed)
+        self.ui.lineEdit_default_labscript_file.textChanged.connect(
+            self.on_default_labscript_file_text_changed
+        )
         self.ui.lineEdit_shot_output_folder.textChanged.connect(self.on_shot_output_folder_text_changed)
 
         # Control buttons; engage, abort, restart subprocess:
@@ -1915,6 +1953,9 @@ class RunManager(object):
             self.groups_model.itemChanged, self.on_groups_model_item_changed)
 
         self.queue_manager.queueChanged.connect(self.refresh_queue_tab)
+        self.queue_empty_policy_combo.currentIndexChanged.connect(
+            self.on_queue_empty_policy_changed
+        )
         self.queue_widget.deleteRowsRequested.connect(self.on_queue_delete_rows_requested)
         self.queue_widget.clearQueueRequested.connect(self.on_queue_clear_requested)
         self.queue_widget.moveRequested.connect(self.on_queue_move_requested)
@@ -1941,6 +1982,7 @@ class RunManager(object):
         self.analysis_submission.shutdown()
         self.queue_manager.shutdown()
         self.to_child.put(['quit', None])
+        self.output_box.shutdown()
         return True
 
     def close_current_tab(self):
@@ -1967,13 +2009,36 @@ class RunManager(object):
         self.queue_manager.move(direction, rows)
         self.refresh_queue_tab()
 
+    def on_queue_empty_policy_changed(self, index):
+        empty_queue_policy = self.queue_empty_policy_combo.itemData(index)
+        if empty_queue_policy is None:
+            return
+        self.queue_manager.set_empty_queue_policy(empty_queue_policy)
+        self.refresh_queue_tab()
+
     @inmain_decorator()
     def refresh_queue_tab(self):
         self.queue_widget.set_queue_paths(self.queue_manager.get_queue_paths())
         state = self.queue_manager.get_queue_state()
+        empty_queue_policy = state['empty_queue_policy']
+        if empty_queue_policy == EMPTY_QUEUE_DEFAULT_LABSCRIPT:
+            empty_queue_text = 'send default shot'
+        else:
+            empty_queue_text = 'send nothing'
         self.queue_status_label.setText(
-            'Queued: {n_items}    Mode: eager compile'.format(**state)
+            'Queued: {n_items}    Mode: eager compile    Empty: {empty_queue_text}'.format(
+                empty_queue_text=empty_queue_text, **state
+            )
         )
+        last_sent_to_blacs = state['last_sent_to_blacs']
+        if last_sent_to_blacs:
+            self.queue_last_sent_label.setText(
+                'Last sent to BLACS: %s' % last_sent_to_blacs
+            )
+            self.queue_last_sent_label.setToolTip(last_sent_to_blacs)
+        else:
+            self.queue_last_sent_label.setText('Last sent to BLACS: nothing')
+            self.queue_last_sent_label.setToolTip('')
 
     def on_output_popout_button_clicked(self):
         if self.output_box_is_popped_out:
@@ -1988,49 +2053,56 @@ class RunManager(object):
             self.output_box_window.show()
         self.output_box_is_popped_out = not self.output_box_is_popped_out
 
-    def on_select_labscript_file_clicked(self, checked):
-        labscript_file = QtWidgets.QFileDialog.getOpenFileName(self.ui,
-                                                           'Select labscript file',
-                                                           self.last_opened_labscript_folder,
-                                                           "Python files (*.py)")
+    def select_labscript_file(self, title):
+        labscript_file = QtWidgets.QFileDialog.getOpenFileName(
+            self.ui, title, self.last_opened_labscript_folder, "Python files (*.py)"
+        )
         if type(labscript_file) is tuple:
             labscript_file, _ = labscript_file
 
         if not labscript_file:
-            # User cancelled selection
-            return
-        # Convert to standard platform specific path, otherwise Qt likes forward slashes:
+            return None
         labscript_file = os.path.abspath(labscript_file)
         if not os.path.isfile(labscript_file):
             error_dialog("No such file %s." % labscript_file)
-            return
-        # Save the containing folder for use next time we open the dialog box:
+            return None
         self.last_opened_labscript_folder = os.path.dirname(labscript_file)
-        # Write the file to the lineEdit:
+        return labscript_file
+
+    def on_select_labscript_file_clicked(self, checked):
+        labscript_file = self.select_labscript_file('Select labscript file')
+        if not labscript_file:
+            return
         self.ui.lineEdit_labscript_file.setText(labscript_file)
 
-    def on_edit_labscript_file_clicked(self, checked):
-        # get path to text editor
+    def on_select_default_labscript_file_clicked(self, checked):
+        labscript_file = self.select_labscript_file('Select default-shot labscript file')
+        if not labscript_file:
+            return
+        self.ui.lineEdit_default_labscript_file.setText(labscript_file)
+
+    def edit_labscript_file(self, labscript_file):
         editor_path = self.exp_config.get('programs', 'text_editor')
         editor_args = self.exp_config.get('programs', 'text_editor_arguments')
-        # Get the current labscript file:
-        current_labscript_file = self.ui.lineEdit_labscript_file.text()
-        # Ignore if no file selected
-        if not current_labscript_file:
+        if not labscript_file:
             return
         if not editor_path:
             error_dialog("No editor specified in the labconfig.")
         if '{file}' in editor_args:
-            # Split the args on spaces into a list, replacing {file} with the labscript file
-            editor_args = [arg if arg != '{file}' else current_labscript_file for arg in editor_args.split()]
+            editor_args = [arg if arg != '{file}' else labscript_file for arg in editor_args.split()]
         else:
-            # Otherwise if {file} isn't already in there, append it to the other args:
-            editor_args = [current_labscript_file] + editor_args.split()
+            editor_args = [labscript_file] + editor_args.split()
         try:
             subprocess.Popen([editor_path] + editor_args)
         except Exception as e:
             error_dialog("Unable to launch text editor specified in %s. Error was: %s" %
                          (self.exp_config.config_path, str(e)))
+
+    def on_edit_labscript_file_clicked(self, checked):
+        self.edit_labscript_file(self.ui.lineEdit_labscript_file.text())
+
+    def on_edit_default_labscript_file_clicked(self, checked):
+        self.edit_labscript_file(self.ui.lineEdit_default_labscript_file.text())
 
     def on_select_shot_output_folder_clicked(self, checked):
         shot_output_folder = QtWidgets.QFileDialog.getExistingDirectory(self.ui,
@@ -2069,6 +2141,12 @@ class RunManager(object):
         self.ui.lineEdit_labscript_file.setToolTip(text)
         # Check if the output folder needs to be updated:
         self.check_output_folder_update()
+
+    def on_default_labscript_file_text_changed(self, text):
+        self.ui.toolButton_edit_default_labscript_file.setEnabled(bool(text))
+        self.ui.lineEdit_default_labscript_file.setToolTip(text)
+        self.queue_manager.set_default_labscript_file(text)
+        self.refresh_queue_tab()
 
     def on_shot_output_folder_text_changed(self, text):
         # Blank out the 'reset default output folder' button if the user is
@@ -3590,6 +3668,15 @@ class RunManager(object):
         queue_state = runmanager_config.get('queue_state')
         if isinstance(queue_state, dict):
             self.queue_manager.restore_state(queue_state)
+            restored_queue_state = self.queue_manager.get_queue_state()
+            self.ui.lineEdit_default_labscript_file.setText(
+                restored_queue_state['default_labscript_file']
+            )
+            index = self.queue_empty_policy_combo.findData(
+                restored_queue_state['empty_queue_policy']
+            )
+            if index != -1:
+                self.queue_empty_policy_combo.setCurrentIndex(index)
 
         self.analysis_submission.restore_configuration_data(
             runmanager_config.get('analysis_submission')
@@ -3620,9 +3707,7 @@ class RunManager(object):
                             self.output_box.output('Ready.\n\n')
                             break
                         else:
-                            self.to_child.put(['compile', [labscript_file, run_file]])
-                            signal, success = self.from_child.get()
-                            assert signal == 'done'
+                            success = self.compile_run_file(labscript_file, run_file)
                             if not success:
                                 self.compilation_aborted.set()
                                 continue
@@ -3646,6 +3731,13 @@ class RunManager(object):
                 exc_info = sys.exc_info()
                 raise_exception_in_thread(exc_info)
                 continue
+
+    def compile_run_file(self, labscript_file, run_file):
+        with self.compiler_lock:
+            self.to_child.put(['compile', [labscript_file, run_file]])
+            signal, success = self.from_child.get()
+        assert signal == 'done'
+        return success
 
     def parse_globals(self, active_groups, raise_exceptions=True, expand_globals=True, expansion_order = None, return_dimensions = False):
         sequence_globals = runmanager.get_globals(active_groups)
@@ -3911,8 +4003,64 @@ class RunManager(object):
     def queue_request_next(self):
         run_file = self.queue_manager.pop_next()
         if run_file is None:
-            return None
-        return shared_drive.path_to_agnostic(run_file)
+            queue_state = self.queue_manager.get_queue_state()
+            if queue_state['empty_queue_policy'] != EMPTY_QUEUE_DEFAULT_LABSCRIPT:
+                self.queue_manager.set_last_sent_to_blacs(None)
+                return None
+            labscript_file = queue_state['default_labscript_file']
+            if not labscript_file:
+                self.queue_manager.set_last_sent_to_blacs(None)
+                return None
+            self.queue_manager.set_last_sent_to_blacs(None)
+            if not os.path.isfile(labscript_file):
+                raise RuntimeError(
+                    'Default-shot labscript file does not exist: %s' % labscript_file
+                )
+            active_groups = inmain(self.get_active_groups, interactive=False)
+            if active_groups is None:
+                self.queue_manager.set_last_sent_to_blacs(None)
+                return None
+            sequence_globals, runglobals = runmanager.get_default_shot_globals(
+                active_groups
+            )
+            send_to_runviewer = inmain(self.ui.checkBox_view_shots.isChecked)
+            sequence_attrs, output_folder, filename_prefix = (
+                runmanager.new_sequence_details(
+                    labscript_file,
+                    config=self.exp_config,
+                    increment_sequence_index=True,
+                    default=True,
+                )
+            )
+            run_file_base = os.path.join(
+                output_folder,
+                '{}.h5'.format(filename_prefix),
+            )
+            start = self._next_default_shot_index.get(run_file_base, 0)
+            run_file, default_index = next_available_indexed_filepath(
+                run_file_base,
+                '_{index}',
+                start=start,
+            )
+            self._next_default_shot_index[run_file_base] = default_index + 1
+            runmanager.make_single_run_file(
+                run_file,
+                sequence_globals,
+                runglobals,
+                sequence_attrs,
+                default_index,
+                default_index,
+            )
+            success = self.compile_run_file(labscript_file, run_file)
+            if not success:
+                raise RuntimeError(
+                    'Compilation failed for %s' % os.path.basename(run_file)
+                )
+            if send_to_runviewer:
+                self.send_to_runviewer(run_file)
+        agnostic_path = shared_drive.path_to_agnostic(run_file)
+        self.queue_manager.set_last_sent_to_blacs(agnostic_path)
+        return agnostic_path
 
 
 class RemoteServer(ZMQServer):
