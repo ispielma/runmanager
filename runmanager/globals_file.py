@@ -55,6 +55,7 @@ def _blank_record():
         "default": "",
         "units": "",
         "scan_enabled": False,
+        "jit_enabled": False,
         "scan": "",
         "expansion": "",
     }
@@ -67,10 +68,13 @@ def _normalise_record(record):
             "default": _ensure_str(record.get("default", "")),
             "units": _ensure_str(record.get("units", "")),
             "scan_enabled": bool(record.get("scan_enabled", False)),
+            "jit_enabled": bool(record.get("jit_enabled", False)),
             "scan": _ensure_str(record.get("scan", "")),
             "expansion": _ensure_str(record.get("expansion", "")),
         }
     )
+    if normalised["scan_enabled"] and normalised["jit_enabled"]:
+        normalised["jit_enabled"] = False
     if not normalised["scan_enabled"]:
         normalised["expansion"] = ""
     elif not normalised["expansion"]:
@@ -158,6 +162,7 @@ def load_legacy_hdf5_document(filename):
                     "default": _ensure_str(value),
                     "units": _ensure_str(units.get(global_name, "")),
                     "scan_enabled": False,
+                    "jit_enabled": False,
                     "scan": "",
                     "expansion": "",
                 }
@@ -354,8 +359,15 @@ def set_field(filename, groupname, globalname, field, value):
         record[field] = bool(value)
         if not record[field]:
             record["expansion"] = ""
-        elif not record["expansion"]:
+        else:
+            record["jit_enabled"] = False
+        if record[field] and not record["expansion"]:
             record["expansion"] = "outer"
+    elif field == "jit_enabled":
+        record[field] = bool(value)
+        if record[field]:
+            record["scan_enabled"] = False
+            record["expansion"] = ""
     else:
         record[field] = value
     set_global_record(filename, groupname, globalname, record)

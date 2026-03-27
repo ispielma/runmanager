@@ -12,11 +12,11 @@
 #####################################################################
 """Runmanager-owned shot queue helpers.
 
-This module keeps queue state and the queue worker thread out of
-``runmanager.__main__``. For the initial eager-compile implementation the queue
-items are just compiled shot filepaths. BLACS requests the next filepath via
-the runmanager remote server, and completed shots are forwarded to lyse by a
-separate helper.
+This module keeps queue state and background queue/compile work out of
+``runmanager.__main__``. QueueManager owns the background compile loop used by
+Engage, and it also exposes the existing queue state used by BLACS requests.
+Queue items are stored internally as shot records, while the queue widget still
+shows only their filepaths.
 """
 
 import os
@@ -27,13 +27,16 @@ from qtutils.qt import QtCore, QtGui, QtWidgets
 from qtutils.qt.QtCore import pyqtSignal as Signal
 
 from labscript_utils.qtwidgets.shotqueue import FILEPATH_COLUMN, ShotQueueWidget
+from zprocess import raise_exception_in_thread
 
 EMPTY_QUEUE_NOTHING = 'nothing'
 EMPTY_QUEUE_DEFAULT_LABSCRIPT = 'default_labscript'
+COMPILE_MODE_EAGER = 'eager'
+COMPILE_MODE_LAZY = 'lazy'
 
 
 class RunmanagerQueueWidget(ShotQueueWidget):
-    """Shot queue widget configured for runmanager-owned compiled shots."""
+    """Shot queue widget configured for runmanager-owned shot records."""
 
     deleteRowsRequested = Signal(list)
     clearQueueRequested = Signal()
@@ -88,10 +91,18 @@ class RunmanagerQueueWidget(ShotQueueWidget):
     def set_queue_paths(self, paths):
         selected_paths = set(self.selected_paths())
         self.queue_model.removeRows(0, self.queue_model.rowCount())
-        for path in paths:
-            item = QtGui.QStandardItem(os.path.basename(path))
+        for path_info in paths:
+            if isinstance(path_info, dict):
+                path = path_info['path']
+                label = path_info.get('label', os.path.basename(path))
+                tooltip = path_info.get('tooltip', path)
+            else:
+                path = path_info
+                label = os.path.basename(path)
+                tooltip = path
+            item = QtGui.QStandardItem(label)
             item.setEditable(False)
-            item.setToolTip(path)
+            item.setToolTip(tooltip)
             item.setData(path, QtCore.Qt.UserRole)
             self.queue_model.appendRow([item])
         self._restore_selection(selected_paths)
@@ -125,14 +136,44 @@ class RunmanagerQueueWidget(ShotQueueWidget):
 
 
 class QueueController(object):
-    """Thread-safe filepath queue."""
+    """Thread-safe queue of shot records."""
 
     def __init__(self):
         self.empty_queue_policy = EMPTY_QUEUE_NOTHING
         self.default_labscript_file = ''
+        self.compile_mode = COMPILE_MODE_EAGER
         self.last_sent_to_blacs = None
         self._items = []
         self._lock = threading.RLock()
+
+    def _normalise_item(self, item):
+        if isinstance(item, str):
+            item = {'path': item, 'compile_mode': COMPILE_MODE_EAGER, 'compiled': True}
+        record = dict(item)
+        record['path'] = os.path.abspath(str(record['path']))
+        labscript_file = record.get('labscript_file', '')
+        record['labscript_file'] = (
+            os.path.abspath(str(labscript_file)) if labscript_file else ''
+        )
+        compile_mode = record.get('compile_mode', COMPILE_MODE_EAGER)
+        if compile_mode not in (COMPILE_MODE_EAGER, COMPILE_MODE_LAZY):
+            compile_mode = COMPILE_MODE_EAGER
+        record['compile_mode'] = compile_mode
+        record['compiled'] = bool(record.get('compiled', compile_mode == COMPILE_MODE_EAGER))
+        record['frozen_globals'] = {
+            str(name): str(expression)
+            for name, expression in record.get('frozen_globals', {}).items()
+        }
+        record['sequence_attrs'] = {
+            str(name): value for name, value in record.get('sequence_attrs', {}).items()
+        }
+        record['active_groups'] = {
+            str(name): os.path.abspath(str(path))
+            for name, path in record.get('active_groups', {}).items()
+        }
+        record['run_no'] = int(record.get('run_no', 0))
+        record['n_runs'] = int(record.get('n_runs', 1))
+        return record
 
     def set_empty_queue_policy(self, value):
         if value not in (EMPTY_QUEUE_NOTHING, EMPTY_QUEUE_DEFAULT_LABSCRIPT):
@@ -144,10 +185,16 @@ class QueueController(object):
         with self._lock:
             self.default_labscript_file = os.path.abspath(value) if value else ''
 
-    def enqueue(self, paths):
-        paths = [os.path.abspath(str(path)) for path in paths]
+    def set_compile_mode(self, value):
+        if value not in (COMPILE_MODE_EAGER, COMPILE_MODE_LAZY):
+            raise ValueError('Invalid compile mode: %s' % value)
         with self._lock:
-            self._items.extend(paths)
+            self.compile_mode = value
+
+    def enqueue(self, items):
+        records = [self._normalise_item(item) for item in items]
+        with self._lock:
+            self._items.extend(records)
 
     def delete_rows(self, rows):
         with self._lock:
@@ -186,7 +233,23 @@ class QueueController(object):
 
     def get_queue_paths(self):
         with self._lock:
-            return list(self._items)
+            return [item['path'] for item in self._items]
+
+    def get_queue_display_items(self):
+        with self._lock:
+            items = []
+            for item in self._items:
+                compile_mode = item.get('compile_mode', COMPILE_MODE_EAGER)
+                mode_label = 'lazy' if compile_mode == COMPILE_MODE_LAZY else 'eager'
+                path = item['path']
+                items.append(
+                    {
+                        'path': path,
+                        'label': '[%s] %s' % (mode_label, os.path.basename(path)),
+                        'tooltip': '%s\nCompile mode: %s' % (path, mode_label),
+                    }
+                )
+            return items
 
     def set_last_sent_to_blacs(self, value):
         with self._lock:
@@ -197,7 +260,8 @@ class QueueController(object):
             return {
                 'empty_queue_policy': self.empty_queue_policy,
                 'default_labscript_file': self.default_labscript_file,
-                'items': list(self._items),
+                'compile_mode': self.compile_mode,
+                'items': [dict(item) for item in self._items],
             }
 
     def restore_state(self, state):
@@ -217,13 +281,18 @@ class QueueController(object):
                 if default_labscript_file
                 else ''
             )
-            self._items = [os.path.abspath(str(path)) for path in state.get('items', [])]
+            compile_mode = state.get('compile_mode', COMPILE_MODE_EAGER)
+            if compile_mode not in (COMPILE_MODE_EAGER, COMPILE_MODE_LAZY):
+                compile_mode = COMPILE_MODE_EAGER
+            self.compile_mode = compile_mode
+            self._items = [self._normalise_item(item) for item in state.get('items', [])]
 
     def get_queue_state(self):
         with self._lock:
             return {
                 'empty_queue_policy': self.empty_queue_policy,
                 'default_labscript_file': self.default_labscript_file,
+                'compile_mode': self.compile_mode,
                 'last_sent_to_blacs': self.last_sent_to_blacs,
                 'n_items': len(self._items),
             }
@@ -240,10 +309,24 @@ class QueueManager(QtCore.QObject):
 
     queueChanged = Signal()
 
-    def __init__(self, ack_timeout=30):
+    def __init__(
+        self,
+        prepare_run_file,
+        compile_run_file,
+        send_to_runviewer,
+        output,
+        compilation_aborted,
+        set_abort_enabled,
+    ):
         QtCore.QObject.__init__(self)
         self.controller = QueueController()
         self.command_queue = queue.Queue()
+        self.prepare_run_file_callback = prepare_run_file
+        self.compile_run_file_callback = compile_run_file
+        self.send_to_runviewer_callback = send_to_runviewer
+        self.output = output
+        self.compilation_aborted = compilation_aborted
+        self.set_abort_enabled = set_abort_enabled
         self.thread = threading.Thread(target=self.mainloop)
         self.thread.daemon = True
         self.thread.start()
@@ -253,8 +336,29 @@ class QueueManager(QtCore.QObject):
         if self.thread.is_alive() and threading.current_thread() is not self.thread:
             self.thread.join(timeout=1)
 
-    def enqueue(self, paths):
-        return self._request('enqueue', list(paths))
+    def enqueue(self, items):
+        return self._request('enqueue', list(items))
+
+    def compile_shots(self, records, send_to_BLACS, send_to_runviewer):
+        self.command_queue.put(
+            (
+                'compile_shots',
+                (list(records), send_to_BLACS, send_to_runviewer),
+                None,
+            )
+        )
+
+    def compile_shot(self, item, send_to_runviewer=False):
+        return self._request('compile_shot', item, bool(send_to_runviewer))
+
+    def _compile_shot(self, item, send_to_runviewer=False):
+        if 'frozen_globals' in item:
+            self.prepare_run_file_callback(item)
+        success = self.compile_run_file_callback(item['labscript_file'], item['path'])
+        if success and send_to_runviewer:
+            self.send_to_runviewer_callback(item['path'])
+        item['compiled'] = bool(success)
+        return success
 
     def set_last_sent_to_blacs(self, value):
         return self._request('set_last_sent_to_blacs', value)
@@ -264,6 +368,9 @@ class QueueManager(QtCore.QObject):
 
     def set_default_labscript_file(self, value):
         return self._request('set_default_labscript_file', value)
+
+    def set_compile_mode(self, value):
+        return self._request('set_compile_mode', value)
 
     def delete_rows(self, rows):
         return self._request('delete_rows', list(rows))
@@ -321,6 +428,10 @@ class QueueManager(QtCore.QObject):
                     self.controller.set_default_labscript_file(*args)
                     changed = True
                     result = None
+                elif command == 'set_compile_mode':
+                    self.controller.set_compile_mode(*args)
+                    changed = True
+                    result = None
                 elif command == 'set_last_sent_to_blacs':
                     self.controller.set_last_sent_to_blacs(*args)
                     changed = True
@@ -350,6 +461,42 @@ class QueueManager(QtCore.QObject):
                     self.controller.restore_state(*args)
                     changed = True
                     result = None
+                elif command == 'compile_shot':
+                    item, send_to_runviewer = args
+                    result = self._compile_shot(
+                        item, send_to_runviewer=send_to_runviewer
+                    )
+                elif command == 'compile_shots':
+                    records, send_to_BLACS, send_to_runviewer = args
+                    try:
+                        for item in records:
+                            if self.compilation_aborted.is_set():
+                                self.output('Compilation aborted.\n\n', red=True)
+                                break
+                            compile_now = (
+                                not send_to_BLACS
+                                or item['compile_mode'] == COMPILE_MODE_EAGER
+                            )
+                            if compile_now:
+                                success = self._compile_shot(
+                                    item, send_to_runviewer=send_to_runviewer
+                                )
+                                if not success:
+                                    self.compilation_aborted.set()
+                                    continue
+                            if send_to_BLACS:
+                                self.controller.enqueue([item])
+                                self.queueChanged.emit()
+                                self.output(
+                                    'Queued shot %s in runmanager.\n'
+                                    % os.path.basename(item['path'])
+                                )
+                        else:
+                            self.output('Ready.\n\n')
+                    finally:
+                        self.set_abort_enabled(False)
+                        self.compilation_aborted.clear()
+                    result = None
                 else:
                     raise ValueError('Invalid queue command: %s' % command)
 
@@ -360,3 +507,5 @@ class QueueManager(QtCore.QObject):
             except Exception as exc:
                 if response_queue is not None:
                     response_queue.put((False, exc))
+                else:
+                    raise_exception_in_thread((type(exc), exc, exc.__traceback__))

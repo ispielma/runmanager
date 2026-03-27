@@ -218,6 +218,14 @@ def set_scan_enabled(filename, groupname, globalname, scan_enabled):
     _globals_file.set_field(filename, groupname, globalname, 'scan_enabled', scan_enabled)
 
 
+def get_jit_enabled(filename, groupname, globalname):
+    return _globals_file.get_field(filename, groupname, globalname, 'jit_enabled')
+
+
+def set_jit_enabled(filename, groupname, globalname, jit_enabled):
+    _globals_file.set_field(filename, groupname, globalname, 'jit_enabled', jit_enabled)
+
+
 def get_scan(filename, groupname, globalname):
     return _globals_file.get_field(filename, groupname, globalname, 'scan')
 
@@ -304,7 +312,7 @@ def _details_to_sequence_globals(globals_details, defaults_only=False, overrides
         sequence_globals[group_name] = {}
         for global_name, record in globals_data.items():
             if global_name in overrides:
-                expression = repr(overrides[global_name])
+                expression = overrides[global_name]
                 expansion = ''
             elif defaults_only or not record['scan_enabled']:
                 expression = record['default']
@@ -333,10 +341,24 @@ def get_default_shot_globals(groups):
     return sequence_globals, shots[0]
 
 
-def get_queue_compile_globals(groups, shot_globals_overrides):
+def get_frozen_globals(globals_details, shot):
+    frozen_globals = {}
+    for group_name, globals_data in globals_details.items():
+        for global_name, record in globals_data.items():
+            if record['jit_enabled']:
+                continue
+            if record['scan_enabled']:
+                expression = repr(shot[global_name])
+            else:
+                expression = record['default']
+            frozen_globals[global_name] = expression
+    return frozen_globals
+
+
+def get_queue_compile_globals(groups, frozen_globals):
     globals_details = get_globals_details(groups)
     sequence_globals = _details_to_sequence_globals(
-        globals_details, defaults_only=False, overrides=shot_globals_overrides
+        globals_details, defaults_only=False, overrides=frozen_globals
     )
     evaled_globals, _, _ = evaluate_globals(sequence_globals, raise_exceptions=True)
     shots = expand_globals(sequence_globals, evaled_globals)
@@ -708,6 +730,8 @@ def make_run_files(
     sequence_attrs,
     filename_prefix,
     shuffle=False,
+    return_infos=False,
+    create_files=True,
 ):
     """Does what it says. sequence_globals and shots are of the datatypes returned by
     get_globals and get_shots, one is a nested dictionary with string values, and the
@@ -728,16 +752,27 @@ def make_run_files(
     filenames the run files are given is simply the sequence_id with increasing integers
     appended."""
     basename = os.path.join(output_folder, filename_prefix)
-    nruns = len(shots)
+    indexed_shots = list(enumerate(shots))
+    nruns = len(indexed_shots)
     ndigits = int(np.ceil(np.log10(nruns)))
     if shuffle:
-        random.shuffle(shots)
-    for i, shot_globals in enumerate(shots):
-        runfilename = ('%s_%0' + str(ndigits) + 'd.h5') % (basename, i)
-        make_single_run_file(
-            runfilename, sequence_globals, shot_globals, sequence_attrs, i, nruns
-        )
-        yield runfilename
+        random.shuffle(indexed_shots)
+    for run_no, (_, shot_globals) in enumerate(indexed_shots):
+        runfilename = ('%s_%0' + str(ndigits) + 'd.h5') % (basename, run_no)
+        if create_files:
+            make_single_run_file(
+                runfilename, sequence_globals, shot_globals, sequence_attrs, run_no, nruns
+            )
+        if return_infos:
+            yield {
+                'path': runfilename,
+                'shot_globals': shot_globals,
+                'sequence_attrs': dict(sequence_attrs),
+                'run_no': run_no,
+                'n_runs': nruns,
+            }
+        else:
+            yield runfilename
 
 
 def make_single_run_file(filename, sequenceglobals, runglobals, sequence_attrs, run_no, n_runs):
