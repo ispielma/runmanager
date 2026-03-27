@@ -4210,6 +4210,27 @@ class RemoteServer(ZMQServer):
             values[global_name] = getter(globals_file, group_name, global_name)
         return values
 
+    def _get_expression_field_values(self, getter, raw=False):
+        active_groups, _, locations = self._get_active_global_locations()
+        sequence_globals = {group_name: {} for group_name in active_groups}
+        for global_name, (globals_file, group_name) in locations.items():
+            expression = getter(globals_file, group_name, global_name)
+            sequence_globals[group_name][global_name] = (expression, '', '')
+        if raw:
+            values = {}
+            for group_globals in sequence_globals.values():
+                values.update(
+                    {name: expression for name, (expression, _, _) in group_globals.items()}
+                )
+            return values
+        evaled_globals, _, _ = runmanager.evaluate_globals(
+            sequence_globals, raise_exceptions=False
+        )
+        values = {}
+        for group_globals in evaled_globals.values():
+            values.update(group_globals)
+        return values
+
     @staticmethod
     def _coerce_remote_boolean(value, name):
         if isinstance(value, bool):
@@ -4280,13 +4301,28 @@ class RemoteServer(ZMQServer):
             app.globals_changed()
 
     def handle_get_default_globals(self, raw=False):
-        return self._get_global_field_values(runmanager.get_value)
+        return self._get_expression_field_values(runmanager.get_value, raw=raw)
 
     def handle_get_globals(self, raw=False):
-        return self.handle_get_default_globals(raw=raw)
+        active_groups = inmain(app.get_active_groups, interactive=False)
+        sequence_globals = runmanager.get_globals(active_groups)
+        if raw:
+            values = {}
+            for group_globals in sequence_globals.values():
+                values.update(
+                    {name: expression for name, (expression, _, _) in group_globals.items()}
+                )
+            return values
+        evaled_globals, _, _ = runmanager.evaluate_globals(
+            sequence_globals, raise_exceptions=False
+        )
+        values = {}
+        for group_globals in evaled_globals.values():
+            values.update(group_globals)
+        return values
 
-    def handle_get_scan_globals(self):
-        return self._get_global_field_values(runmanager.get_scan)
+    def handle_get_scan_globals(self, raw=False):
+        return self._get_expression_field_values(runmanager.get_scan, raw=raw)
 
     def handle_get_scan_enabled(self):
         return self._get_global_field_values(runmanager.get_scan_enabled)

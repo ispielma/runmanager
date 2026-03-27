@@ -35,12 +35,18 @@ class Client(ZMQClient):
         return self.request('__version__')
 
     def get_default_globals(self, raw=False):
-        """Return all active globals' Default expressions."""
+        """Return all active globals' Default values.
+
+        If raw=True, return the stored Default expression strings. Otherwise return
+        the evaluated Python values."""
         return self.request('get_default_globals', raw=raw)
 
     def get_globals(self, raw=False):
-        """Alias for get_default_globals()."""
-        return self.get_default_globals(raw=raw)
+        """Return all active globals' effective values.
+
+        If raw=True, return the stored effective expression strings. Otherwise return
+        the evaluated Python values."""
+        return self.request('get_globals', raw=raw)
 
     def set_default_globals(self, globals, raw=False):
         """Set Default expressions for active globals."""
@@ -50,9 +56,12 @@ class Client(ZMQClient):
         """Alias for set_default_globals()."""
         return self.set_default_globals(globals, raw=raw)
 
-    def get_scan_globals(self):
-        """Return all active globals' Scan expressions."""
-        return self.request('get_scan_globals')
+    def get_scan_globals(self, raw=False):
+        """Return all active globals' Scan values.
+
+        If raw=True, return the stored Scan expression strings. Otherwise return the
+        evaluated Python values."""
+        return self.request('get_scan_globals', raw=raw)
 
     def set_scan_globals(self, globals, raw=False):
         """Set Scan expressions for active globals."""
