@@ -4115,32 +4115,19 @@ class RunManager(object):
             if indexed_path_base is not None
             else output_folder
         )
-        run_files = runmanager.make_run_files(
-            run_output_folder,
-            sequence_globals,
-            shots,
-            sequence_attrs,
-            filename_prefix,
-            shuffle,
-            return_infos=with_metadata,
-            create_files=not with_metadata,
-        )
         if indexed_path_base is not None:
-            if with_metadata:
-                run_files = list(run_files)
-            else:
-                run_files = list(
-                    runmanager.make_run_files(
-                        run_output_folder,
-                        sequence_globals,
-                        shots,
-                        sequence_attrs,
-                        filename_prefix,
-                        shuffle,
-                        return_infos=True,
-                        create_files=False,
-                    )
+            run_files = list(
+                runmanager.make_run_files(
+                    run_output_folder,
+                    sequence_globals,
+                    shots,
+                    sequence_attrs,
+                    filename_prefix,
+                    shuffle,
+                    return_infos=True,
+                    create_files=False,
                 )
+            )
             run_files = self.reindex_run_file_infos(
                 run_files,
                 run_output_folder,
@@ -4158,6 +4145,17 @@ class RunManager(object):
                         run_file_info['n_runs'],
                     )
                 run_files = [run_file_info['path'] for run_file_info in run_files]
+        else:
+            run_files = runmanager.make_run_files(
+                run_output_folder,
+                sequence_globals,
+                shots,
+                sequence_attrs,
+                filename_prefix,
+                shuffle,
+                return_infos=with_metadata,
+                create_files=not with_metadata,
+            )
         logger.debug(run_files)
         return labscript_file, run_files
 
