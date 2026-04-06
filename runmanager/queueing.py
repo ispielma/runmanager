@@ -204,7 +204,9 @@ class QueueController(object):
 
     def clear(self):
         with self._lock:
+            removed_paths = [item['path'] for item in self._items]
             self._items = []
+            return removed_paths
 
     def move(self, direction, rows):
         rows = sorted(set(rows))
@@ -364,6 +366,19 @@ class QueueManager(QtCore.QObject):
     def set_last_sent_from_queue(self, value):
         return self._request('set_last_sent_from_queue', value)
 
+    def _delete_queue_files(self, paths):
+        for path in paths:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                continue
+            except Exception as exc:
+                self.output(
+                    'Could not delete queued shot %s: %s\n'
+                    % (os.path.basename(path), str(exc)),
+                    red=True,
+                )
+
     def set_empty_queue_policy(self, value):
         return self._request('set_empty_queue_policy', value)
 
@@ -442,9 +457,8 @@ class QueueManager(QtCore.QObject):
                     changed = True
                     result = None
                 elif command == 'clear':
-                    self.controller.clear()
-                    changed = True
-                    result = None
+                    result = self.controller.clear()
+                    changed = bool(result)
                 elif command == 'move':
                     self.controller.move(*args)
                     changed = True
@@ -500,6 +514,9 @@ class QueueManager(QtCore.QObject):
                     result = None
                 else:
                     raise ValueError('Invalid queue command: %s' % command)
+
+                if command == 'clear' and result:
+                    self._delete_queue_files(result)
 
                 if changed:
                     self.queueChanged.emit()
