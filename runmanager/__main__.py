@@ -2063,8 +2063,6 @@ class RunManager(object):
             self.on_queue_empty_policy_changed
         )
         self.queue_widget.deleteRowsRequested.connect(self.on_queue_delete_rows_requested)
-        self.queue_widget.clearQueueRequested.connect(self.on_queue_clear_requested)
-        self.queue_widget.moveRequested.connect(self.on_queue_move_requested)
         
         # Keyboard shortcuts:
         engage_shortcut = QtWidgets.QShortcut('F5', self.ui,
@@ -2105,12 +2103,6 @@ class RunManager(object):
 
     def on_queue_delete_rows_requested(self, rows):
         self.queue_manager.delete_rows(rows)
-
-    def on_queue_clear_requested(self):
-        self.queue_manager.clear()
-
-    def on_queue_move_requested(self, direction, rows):
-        self.queue_manager.move(direction, rows)
 
     def on_queue_empty_policy_changed(self, index):
         empty_queue_policy = self.queue_empty_policy_combo.itemData(index)
