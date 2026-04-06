@@ -39,7 +39,6 @@ class RunmanagerQueueWidget(ShotQueueWidget):
     """Shot queue widget configured for runmanager-owned shot records."""
 
     deleteRowsRequested = Signal(list)
-    clearQueueRequested = Signal()
 
     def __init__(self, parent=None):
         ShotQueueWidget.__init__(
@@ -56,20 +55,13 @@ class RunmanagerQueueWidget(ShotQueueWidget):
         self.queue_view.setDragDropMode(QtWidgets.QAbstractItemView.NoDragDrop)
         self._disconnect_default_controls()
         self.add_button.hide()
-        self.delete_button.clicked.connect(self._emit_delete)
-        self.clear_button.clicked.connect(self.clearQueueRequested.emit)
         self.queue_view.deleteRequested.connect(self._emit_delete)
 
     def _disconnect_default_controls(self):
-        for button in (
-            self.add_button,
-            self.delete_button,
-            self.clear_button,
-        ):
-            try:
-                button.clicked.disconnect()
-            except TypeError:
-                pass
+        try:
+            self.add_button.clicked.disconnect()
+        except TypeError:
+            pass
         try:
             self.queue_view.deleteRequested.disconnect()
         except TypeError:
