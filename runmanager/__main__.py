@@ -96,6 +96,7 @@ process_tree.zlock_client.set_process_name('runmanager')
 
 SUBMISSION_MODE_NEW_FOLDER = 'new_folder'
 SUBMISSION_MODE_ADD_SHOTS = 'add_shots'
+SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE = 'new_folder_clear_queue'
 SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE = 'add_shots_clear_queue'
 
 
@@ -2265,6 +2266,20 @@ class RunManager(object):
         self.engage_add_shots_action.triggered.connect(
             lambda: self.on_engage_clicked(submission_mode=SUBMISSION_MODE_ADD_SHOTS)
         )
+        self.engage_replace_queue_action = self.engage_submission_menu.addAction(
+            'Replace queue with new shots'
+        )
+        self.engage_replace_queue_action.triggered.connect(
+            lambda: self.on_engage_clicked(
+                submission_mode=SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE
+            )
+        )
+        self.engage_replace_queue_action.setToolTip(
+            'Delete the remaining queued shots, then submit a replacement batch as a new shot series.'
+        )
+        self.engage_replace_queue_action.setStatusTip(
+            'Delete the remaining queued shots, then submit a replacement batch as a new shot series.'
+        )
         self.engage_add_clear_action = self.engage_submission_menu.addAction(
             'Replace queue and add shots'
         )
@@ -2284,7 +2299,7 @@ class RunManager(object):
         )
         button.setMenu(self.engage_submission_menu)
         button.setToolTip(
-            """<html><head/><body><p>Compile pending shots, submit them to BLACS if "run shots" is checked, and send them to runviewer if "view shots" is checked.</p><p>Press and hold to choose alternate queue submission modes.</p><p><span style="font-style:italic;">Replace queue and add shots</span> deletes the remaining queued shots before submitting the replacement batch. With lazy compile enabled, later compile failures are still possible when BLACS requests those shots.</p></body></html>"""
+            """<html><head/><body><p>Compile pending shots, submit them to BLACS if "run shots" is checked, and send them to runviewer if "view shots" is checked.</p><p>Press and hold to choose alternate queue submission modes.</p><p><span style="font-style:italic;">Replace queue with new shots</span> and <span style="font-style:italic;">Replace queue and add shots</span> delete the remaining queued shots before submitting the replacement batch. With lazy compile enabled, later compile failures are still possible when BLACS requests those shots.</p></body></html>"""
         )
 
     def get_queue_append_filepath(self):
@@ -2300,15 +2315,16 @@ class RunManager(object):
             return None
         return os.path.abspath(shared_drive.path_to_local(last_sent_from_queue))
 
-    def can_use_queue_append_submission_mode(self):
+    def can_use_alternate_submission_mode(self):
         return (
             self.ui.checkBox_run_shots.isChecked()
             and self.get_queue_append_filepath() is not None
         )
 
     def update_engage_submission_menu_actions(self):
-        enabled = self.can_use_queue_append_submission_mode()
+        enabled = self.can_use_alternate_submission_mode()
         self.engage_add_shots_action.setEnabled(enabled)
+        self.engage_replace_queue_action.setEnabled(enabled)
         self.engage_add_clear_action.setEnabled(enabled)
 
     def reindex_run_file_infos(
@@ -2392,6 +2408,8 @@ class RunManager(object):
             index_start = None
             if submission_mode == SUBMISSION_MODE_ADD_SHOTS:
                 indexed_path_base = queue_append_filepath
+            elif submission_mode == SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE:
+                self.queue_manager.clear()
             elif submission_mode == SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE:
                 indexed_path_base = (
                     self.get_last_sent_from_queue_filepath() or queue_append_filepath
