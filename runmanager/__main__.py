@@ -2282,6 +2282,22 @@ class RunManager(object):
             return None
         return os.path.abspath(queue_paths[-1])
 
+    def get_last_sent_to_blacs_filepath(self):
+        queue_state = self.queue_manager.get_queue_state()
+        last_sent_to_blacs = queue_state.get('last_sent_to_blacs')
+        if not last_sent_to_blacs:
+            return None
+        return os.path.abspath(shared_drive.path_to_local(last_sent_to_blacs))
+
+    def delete_queue_files(self):
+        queue_paths = self.queue_manager.get_queue_paths()
+        for path in queue_paths:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                continue
+        return queue_paths
+
     def reindex_run_file_infos(
         self, run_file_infos, output_folder, filename_prefix, indexed_path_base=None
     ):
@@ -2340,11 +2356,13 @@ class RunManager(object):
             logger.info('Making h5 files')
             globals_details = runmanager.get_globals_details(active_groups)
             indexed_path_base = None
-            if submission_mode in (
-                SUBMISSION_MODE_ADD_SHOTS,
-                SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE,
-            ):
+            if submission_mode == SUBMISSION_MODE_ADD_SHOTS:
                 indexed_path_base = self.get_queue_append_filepath()
+            elif submission_mode == SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE:
+                indexed_path_base = self.get_last_sent_to_blacs_filepath()
+                if indexed_path_base is not None:
+                    self.delete_queue_files()
+                    self.queue_manager.clear()
             labscript_file, run_files = self.make_h5_files(
                 labscript_file,
                 output_folder,
@@ -2373,11 +2391,6 @@ class RunManager(object):
                         'n_runs': run_file_info['n_runs'],
                     }
                 )
-            if (
-                submission_mode == SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE
-                and indexed_path_base is not None
-            ):
-                self.queue_manager.clear()
             self.ui.pushButton_abort.setEnabled(True)
             self.queue_manager.compile_shots(
                 queue_records, send_to_BLACS, send_to_runviewer
