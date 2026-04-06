@@ -1963,17 +1963,17 @@ class RunManager(object):
         self.queue_widget.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
         )
-        self.queue_last_removed_label = QtWidgets.QLabel(self.tab_queue)
-        self.queue_last_removed_label.setSizePolicy(
+        self.queue_last_sent_label = QtWidgets.QLabel(self.tab_queue)
+        self.queue_last_sent_label.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
         )
-        self.queue_last_removed_label.setAlignment(
+        self.queue_last_sent_label.setAlignment(
             QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
         )
-        self.queue_last_removed_label.setWordWrap(True)
+        self.queue_last_sent_label.setWordWrap(True)
         self.verticalLayout_queue_tab.addLayout(controls_layout)
         self.verticalLayout_queue_tab.addWidget(self.queue_widget)
-        self.verticalLayout_queue_tab.addWidget(self.queue_last_removed_label)
+        self.verticalLayout_queue_tab.addWidget(self.queue_last_sent_label)
         self.ui.tabWidget.insertTab(0, self.tab_queue, 'Queue')
         queue_tab_index = self.ui.tabWidget.indexOf(self.tab_queue)
         self.ui.tabWidget.tabBar().setMovable(False, index=queue_tab_index)
@@ -2128,15 +2128,15 @@ class RunManager(object):
         controller = self.queue_manager.controller
         self.queue_widget.set_queue_paths(controller.get_queue_display_items())
         state = controller.get_queue_state()
-        last_removed_from_queue = state['last_removed_from_queue']
-        if last_removed_from_queue:
-            self.queue_last_removed_label.setText(
-                'Last removed from queue: %s' % last_removed_from_queue
+        last_sent_from_queue = state['last_sent_from_queue']
+        if last_sent_from_queue:
+            self.queue_last_sent_label.setText(
+                'Last sent from queue: %s' % last_sent_from_queue
             )
-            self.queue_last_removed_label.setToolTip(last_removed_from_queue)
+            self.queue_last_sent_label.setToolTip(last_sent_from_queue)
         else:
-            self.queue_last_removed_label.setText('Last removed from queue: nothing')
-            self.queue_last_removed_label.setToolTip('')
+            self.queue_last_sent_label.setText('Last sent from queue: nothing')
+            self.queue_last_sent_label.setToolTip('')
 
     def on_output_popout_button_clicked(self):
         if self.output_box_is_popped_out:
@@ -2282,12 +2282,12 @@ class RunManager(object):
             return None
         return os.path.abspath(queue_paths[-1])
 
-    def get_last_removed_from_queue_filepath(self):
+    def get_last_sent_from_queue_filepath(self):
         queue_state = self.queue_manager.get_queue_state()
-        last_removed_from_queue = queue_state.get('last_removed_from_queue')
-        if not last_removed_from_queue:
+        last_sent_from_queue = queue_state.get('last_sent_from_queue')
+        if not last_sent_from_queue:
             return None
-        return os.path.abspath(shared_drive.path_to_local(last_removed_from_queue))
+        return os.path.abspath(shared_drive.path_to_local(last_sent_from_queue))
 
     def delete_queue_files(self):
         queue_paths = self.queue_manager.get_queue_paths()
@@ -2364,7 +2364,7 @@ class RunManager(object):
                 and queue_append_filepath is not None
             ):
                 indexed_path_base = (
-                    self.get_last_removed_from_queue_filepath() or queue_append_filepath
+                    self.get_last_sent_from_queue_filepath() or queue_append_filepath
                 )
                 if indexed_path_base is not None:
                     self.delete_queue_files()
@@ -4235,9 +4235,11 @@ class RunManager(object):
         if item is None:
             queue_state = self.queue_manager.get_queue_state()
             if queue_state['empty_queue_policy'] != EMPTY_QUEUE_DEFAULT_LABSCRIPT:
+                self.queue_manager.set_last_sent_from_queue(None)
                 return None
             labscript_file = queue_state['default_labscript_file']
             if not labscript_file:
+                self.queue_manager.set_last_sent_from_queue(None)
                 return None
             if not os.path.isfile(labscript_file):
                 raise RuntimeError(
@@ -4245,6 +4247,7 @@ class RunManager(object):
                 )
             active_groups = inmain(self.get_active_groups, interactive=False)
             if active_groups is None:
+                self.queue_manager.set_last_sent_from_queue(None)
                 return None
             sequence_globals, runglobals = runmanager.get_default_shot_globals(
                 active_groups
@@ -4293,8 +4296,10 @@ class RunManager(object):
                     item, send_to_runviewer=send_to_runviewer
                 )
                 if not success:
+                    self.queue_manager.set_last_sent_from_queue(None)
                     return None
         agnostic_path = shared_drive.path_to_agnostic(run_file)
+        self.queue_manager.set_last_sent_from_queue(agnostic_path)
         return agnostic_path
 
 
