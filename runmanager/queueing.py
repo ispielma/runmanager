@@ -40,7 +40,6 @@ class RunmanagerQueueWidget(ShotQueueWidget):
 
     deleteRowsRequested = Signal(list)
     clearQueueRequested = Signal()
-    moveRequested = Signal(str, list)
 
     def __init__(self, parent=None):
         ShotQueueWidget.__init__(
@@ -55,14 +54,15 @@ class RunmanagerQueueWidget(ShotQueueWidget):
         self.queue_view.setDragEnabled(False)
         self.queue_view.setDropIndicatorShown(False)
         self.queue_view.setDragDropMode(QtWidgets.QAbstractItemView.NoDragDrop)
+        self.queue_view.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOn)
         self._disconnect_default_controls()
         self.add_button.hide()
+        self.move_top_button.hide()
+        self.move_up_button.hide()
+        self.move_down_button.hide()
+        self.move_bottom_button.hide()
         self.delete_button.clicked.connect(self._emit_delete)
         self.clear_button.clicked.connect(self.clearQueueRequested.emit)
-        self.move_top_button.clicked.connect(lambda: self._emit_move('top'))
-        self.move_up_button.clicked.connect(lambda: self._emit_move('up'))
-        self.move_down_button.clicked.connect(lambda: self._emit_move('down'))
-        self.move_bottom_button.clicked.connect(lambda: self._emit_move('bottom'))
         self.queue_view.deleteRequested.connect(self._emit_delete)
 
     def _disconnect_default_controls(self):
@@ -128,11 +128,6 @@ class RunmanagerQueueWidget(ShotQueueWidget):
         rows = self.selected_rows()
         if rows:
             self.deleteRowsRequested.emit(rows)
-
-    def _emit_move(self, direction):
-        rows = self.selected_rows()
-        if rows:
-            self.moveRequested.emit(direction, rows)
 
 
 class QueueController(object):
