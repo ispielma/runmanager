@@ -94,6 +94,10 @@ process_tree = ProcessTree.instance()
 # Set a meaningful name for zprocess.locking's client id:
 process_tree.zlock_client.set_process_name('runmanager')
 
+SUBMISSION_MODE_NEW_FOLDER = 'new_folder'
+SUBMISSION_MODE_ADD_SHOTS = 'add_shots'
+SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE = 'add_shots_clear_queue'
+
 
 def log_if_global(g, g_list, message):
     """logs a message if the global name "g" is in "g_list"
@@ -2005,6 +2009,7 @@ class RunManager(object):
         self.ui.lineEdit_shot_output_folder.textChanged.connect(self.on_shot_output_folder_text_changed)
 
         # Control buttons; engage, abort, restart subprocess:
+        self.setup_engage_submission_menu()
         self.ui.pushButton_engage.clicked.connect(self.on_engage_clicked)
         self.ui.pushButton_abort.clicked.connect(self.on_abort_clicked)
         self.ui.pushButton_restart_subprocess.clicked.connect(self.on_restart_subprocess_clicked)
@@ -2252,7 +2257,54 @@ class RunManager(object):
         self.ui.label_non_default_folder.setVisible(self.non_default_folder)
         self.ui.lineEdit_shot_output_folder.setToolTip(text)
 
-    def on_engage_clicked(self):
+    def setup_engage_submission_menu(self):
+        button = self.ui.pushButton_engage
+        button.setPopupMode(QtWidgets.QToolButton.DelayedPopup)
+        engage_menu = QtWidgets.QMenu(button)
+        add_shots_action = engage_menu.addAction('Add shots')
+        add_shots_action.triggered.connect(
+            lambda: self.on_engage_clicked(submission_mode=SUBMISSION_MODE_ADD_SHOTS)
+        )
+        add_clear_action = engage_menu.addAction('Add shots and empty queue')
+        add_clear_action.triggered.connect(
+            lambda: self.on_engage_clicked(
+                submission_mode=SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE
+            )
+        )
+        button.setMenu(engage_menu)
+        button.setToolTip(
+            """<html><head/><body><p>Compile pending shots, submit them to BLACS if "run shots" is checked, and send them to runviewer if "view shots" is checked.</p><p>Press and hold to choose alternate queue submission modes.</p></body></html>"""
+        )
+
+    def get_queue_append_filepath(self):
+        queue_paths = self.queue_manager.get_queue_paths()
+        if not queue_paths:
+            return None
+        return os.path.abspath(queue_paths[-1])
+
+    def reindex_run_file_infos(
+        self, run_file_infos, output_folder, filename_prefix, indexed_path_base=None
+    ):
+        if not run_file_infos:
+            return run_file_infos
+        if indexed_path_base is None:
+            indexed_path_base = os.path.join(output_folder, '{}.h5'.format(filename_prefix))
+        candidate_stem = os.path.splitext(os.path.basename(indexed_path_base))[0]
+        _, _, index_str = candidate_stem.rpartition('_')
+        width = len(index_str) if index_str.isdigit() else 1
+        suffix_format = '_{index:0%dd}' % width
+        next_index = 0
+        for run_file_info in run_file_infos:
+            run_file, next_index = next_available_indexed_filepath(
+                indexed_path_base,
+                suffix_format,
+                start=next_index,
+            )
+            run_file_info['path'] = run_file
+            next_index += 1
+        return run_file_infos
+
+    def on_engage_clicked(self, checked=False, submission_mode=SUBMISSION_MODE_NEW_FOLDER):
         logger.info('Engage')
         try:
             send_to_BLACS = self.ui.checkBox_run_shots.isChecked()
@@ -2287,6 +2339,12 @@ class RunManager(object):
                 raise Exception('Error parsing globals:\n%s\nCompilation aborted.' % str(e))
             logger.info('Making h5 files')
             globals_details = runmanager.get_globals_details(active_groups)
+            indexed_path_base = None
+            if submission_mode in (
+                SUBMISSION_MODE_ADD_SHOTS,
+                SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE,
+            ):
+                indexed_path_base = self.get_queue_append_filepath()
             labscript_file, run_files = self.make_h5_files(
                 labscript_file,
                 output_folder,
@@ -2294,6 +2352,7 @@ class RunManager(object):
                 shots,
                 shuffle,
                 with_metadata=True,
+                indexed_path_base=indexed_path_base,
             )
             compile_mode = self.queue_compile_mode_combo.currentData()
             queue_records = []
@@ -2314,6 +2373,11 @@ class RunManager(object):
                         'n_runs': run_file_info['n_runs'],
                     }
                 )
+            if (
+                submission_mode == SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE
+                and indexed_path_base is not None
+            ):
+                self.queue_manager.clear()
             self.ui.pushButton_abort.setEnabled(True)
             self.queue_manager.compile_shots(
                 queue_records, send_to_BLACS, send_to_runviewer
@@ -4015,6 +4079,7 @@ class RunManager(object):
         shots,
         shuffle,
         with_metadata=False,
+        indexed_path_base=None,
     ):
         sequence_attrs, default_output_dir, filename_prefix = runmanager.new_sequence_details(
             labscript_file, config=self.exp_config, increment_sequence_index=True
@@ -4026,8 +4091,13 @@ class RunManager(object):
             # from the UI may be out of date since we only update it once a second.
             output_folder = default_output_dir
         self.check_output_folder_update()
+        run_output_folder = (
+            os.path.dirname(os.path.abspath(indexed_path_base))
+            if indexed_path_base is not None
+            else output_folder
+        )
         run_files = runmanager.make_run_files(
-            output_folder,
+            run_output_folder,
             sequence_globals,
             shots,
             sequence_attrs,
@@ -4036,6 +4106,39 @@ class RunManager(object):
             return_infos=with_metadata,
             create_files=not with_metadata,
         )
+        if indexed_path_base is not None:
+            if with_metadata:
+                run_files = list(run_files)
+            else:
+                run_files = list(
+                    runmanager.make_run_files(
+                        run_output_folder,
+                        sequence_globals,
+                        shots,
+                        sequence_attrs,
+                        filename_prefix,
+                        shuffle,
+                        return_infos=True,
+                        create_files=False,
+                    )
+                )
+            run_files = self.reindex_run_file_infos(
+                run_files,
+                run_output_folder,
+                filename_prefix,
+                indexed_path_base=indexed_path_base,
+            )
+            if not with_metadata:
+                for run_file_info in run_files:
+                    runmanager.make_single_run_file(
+                        run_file_info['path'],
+                        sequence_globals,
+                        run_file_info['shot_globals'],
+                        run_file_info['sequence_attrs'],
+                        run_file_info['run_no'],
+                        run_file_info['n_runs'],
+                    )
+                run_files = [run_file_info['path'] for run_file_info in run_files]
         logger.debug(run_files)
         return labscript_file, run_files
 
