@@ -33,6 +33,7 @@ EMPTY_QUEUE_NOTHING = 'nothing'
 EMPTY_QUEUE_DEFAULT_LABSCRIPT = 'default_labscript'
 COMPILE_MODE_EAGER = 'eager'
 COMPILE_MODE_LAZY = 'lazy'
+MODE_COLUMN = 1
 
 
 class RunmanagerQueueWidget(ShotQueueWidget):
@@ -48,6 +49,16 @@ class RunmanagerQueueWidget(ShotQueueWidget):
             file_dialog_filter='Shot files (*.h5 *.hdf5)',
             allow_duplicates=True,
             column_title='Shot file',
+        )
+        self.queue_model.setColumnCount(2)
+        self.queue_model.setHorizontalHeaderItem(FILEPATH_COLUMN, QtGui.QStandardItem('Shot file'))
+        self.queue_model.setHorizontalHeaderItem(MODE_COLUMN, QtGui.QStandardItem('Mode'))
+        self.queue_view.header().setStretchLastSection(False)
+        self.queue_view.header().setSectionResizeMode(
+            FILEPATH_COLUMN, QtWidgets.QHeaderView.Stretch
+        )
+        self.queue_view.header().setSectionResizeMode(
+            MODE_COLUMN, QtWidgets.QHeaderView.ResizeToContents
         )
         self.queue_view.setAcceptDrops(False)
         self.queue_view.setDragEnabled(False)
@@ -79,15 +90,21 @@ class RunmanagerQueueWidget(ShotQueueWidget):
                 path = path_info['path']
                 label = path_info.get('label', os.path.basename(path))
                 tooltip = path_info.get('tooltip', path)
+                mode = path_info.get('mode', '')
             else:
                 path = path_info
                 label = os.path.basename(path)
                 tooltip = path
+                mode = ''
             item = QtGui.QStandardItem(label)
             item.setEditable(False)
             item.setToolTip(tooltip)
             item.setData(path, QtCore.Qt.UserRole)
-            self.queue_model.appendRow([item])
+            mode_item = QtGui.QStandardItem(mode)
+            mode_item.setEditable(False)
+            mode_item.setTextAlignment(QtCore.Qt.AlignCenter)
+            mode_item.setToolTip('Compile mode: %s' % mode if mode else '')
+            self.queue_model.appendRow([item, mode_item])
         self._restore_selection(selected_paths)
 
     def selected_paths(self):
@@ -220,13 +237,14 @@ class QueueController(object):
             items = []
             for item in self._items:
                 compile_mode = item.get('compile_mode', COMPILE_MODE_EAGER)
-                mode_label = 'lazy' if compile_mode == COMPILE_MODE_LAZY else 'eager'
+                mode_label = 'JIT' if compile_mode == COMPILE_MODE_LAZY else 'compiled'
                 path = item['path']
                 items.append(
                     {
                         'path': path,
-                        'label': '[%s] %s' % (mode_label, os.path.basename(path)),
-                        'tooltip': '%s\nCompile mode: %s' % (path, mode_label),
+                        'label': os.path.basename(path),
+                        'mode': mode_label,
+                        'tooltip': path,
                     }
                 )
             return items
