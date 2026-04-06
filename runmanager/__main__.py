@@ -2306,7 +2306,12 @@ class RunManager(object):
         self.engage_add_clear_action.setEnabled(enabled)
 
     def reindex_run_file_infos(
-        self, run_file_infos, output_folder, filename_prefix, indexed_path_base=None
+        self,
+        run_file_infos,
+        output_folder,
+        filename_prefix,
+        indexed_path_base=None,
+        index_start=None,
     ):
         if not run_file_infos:
             return run_file_infos
@@ -2316,7 +2321,7 @@ class RunManager(object):
         _, _, index_str = candidate_stem.rpartition('_')
         width = len(index_str) if index_str.isdigit() else 1
         suffix_format = '_{index:0%dd}' % width
-        next_index = 0
+        next_index = index_start
         for run_file_info in run_file_infos:
             run_file, next_index = next_available_indexed_filepath(
                 indexed_path_base,
@@ -2378,12 +2383,14 @@ class RunManager(object):
             logger.info('Making h5 files')
             globals_details = runmanager.get_globals_details(active_groups)
             indexed_path_base = None
+            index_start = None
             if submission_mode == SUBMISSION_MODE_ADD_SHOTS:
                 indexed_path_base = queue_append_filepath
             elif submission_mode == SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE:
                 indexed_path_base = (
                     self.get_last_sent_from_queue_filepath() or queue_append_filepath
                 )
+                index_start = 0
                 self.queue_manager.clear()
             labscript_file, run_files = self.make_h5_files(
                 labscript_file,
@@ -2393,6 +2400,7 @@ class RunManager(object):
                 shuffle,
                 with_metadata=True,
                 indexed_path_base=indexed_path_base,
+                index_start=index_start,
             )
             compile_mode = self.queue_compile_mode_combo.currentData()
             queue_records = []
@@ -4115,6 +4123,7 @@ class RunManager(object):
         shuffle,
         with_metadata=False,
         indexed_path_base=None,
+        index_start=None,
     ):
         sequence_attrs, default_output_dir, filename_prefix = runmanager.new_sequence_details(
             labscript_file, config=self.exp_config, increment_sequence_index=True
@@ -4149,6 +4158,7 @@ class RunManager(object):
                 run_output_folder,
                 filename_prefix,
                 indexed_path_base=indexed_path_base,
+                index_start=index_start,
             )
             if not with_metadata:
                 for run_file_info in run_files:
