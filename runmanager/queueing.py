@@ -33,7 +33,6 @@ EMPTY_QUEUE_NOTHING = 'nothing'
 EMPTY_QUEUE_DEFAULT_LABSCRIPT = 'default_labscript'
 COMPILE_MODE_EAGER = 'eager'
 COMPILE_MODE_LAZY = 'lazy'
-MODE_COLUMN = 1
 
 
 class RunmanagerQueueWidget(ShotQueueWidget):
@@ -48,17 +47,7 @@ class RunmanagerQueueWidget(ShotQueueWidget):
             accepted_extensions=('.h5', '.hdf5'),
             file_dialog_filter='Shot files (*.h5 *.hdf5)',
             allow_duplicates=True,
-            column_title='Shot file',
-        )
-        self.queue_model.setColumnCount(2)
-        self.queue_model.setHorizontalHeaderItem(FILEPATH_COLUMN, QtGui.QStandardItem('Shot file'))
-        self.queue_model.setHorizontalHeaderItem(MODE_COLUMN, QtGui.QStandardItem('Mode'))
-        self.queue_view.header().setStretchLastSection(False)
-        self.queue_view.header().setSectionResizeMode(
-            FILEPATH_COLUMN, QtWidgets.QHeaderView.Stretch
-        )
-        self.queue_view.header().setSectionResizeMode(
-            MODE_COLUMN, QtWidgets.QHeaderView.ResizeToContents
+            column_titles=['Shot file', 'Mode'],
         )
         self.queue_view.setAcceptDrops(False)
         self.queue_view.setDragEnabled(False)
@@ -84,27 +73,27 @@ class RunmanagerQueueWidget(ShotQueueWidget):
 
     def set_queue_paths(self, paths):
         selected_paths = set(self.selected_paths())
-        self.queue_model.removeRows(0, self.queue_model.rowCount())
+        row_infos = []
         for path_info in paths:
             if isinstance(path_info, dict):
-                path = path_info['path']
-                label = path_info.get('label', os.path.basename(path))
-                tooltip = path_info.get('tooltip', path)
                 mode = path_info.get('mode', '')
+                row_infos.append(
+                    {
+                        'path': path_info['path'],
+                        'label': path_info.get('label', os.path.basename(path_info['path'])),
+                        'tooltip': path_info.get('tooltip', path_info['path']),
+                        'columns': [
+                            {
+                                'text': mode,
+                                'tooltip': 'Compile mode: %s' % mode if mode else '',
+                                'alignment': QtCore.Qt.AlignCenter,
+                            }
+                        ],
+                    }
+                )
             else:
-                path = path_info
-                label = os.path.basename(path)
-                tooltip = path
-                mode = ''
-            item = QtGui.QStandardItem(label)
-            item.setEditable(False)
-            item.setToolTip(tooltip)
-            item.setData(path, QtCore.Qt.UserRole)
-            mode_item = QtGui.QStandardItem(mode)
-            mode_item.setEditable(False)
-            mode_item.setTextAlignment(QtCore.Qt.AlignCenter)
-            mode_item.setToolTip('Compile mode: %s' % mode if mode else '')
-            self.queue_model.appendRow([item, mode_item])
+                row_infos.append(path_info)
+        self.set_row_infos(row_infos)
         self._restore_selection(selected_paths)
 
     def selected_paths(self):
