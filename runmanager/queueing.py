@@ -50,6 +50,11 @@ class RunmanagerQueueWidget(ShotQueueWidget):
             column_titles=['Mode', 'Shot file'],
             path_column=1,
         )
+        mode_width = max(
+            self.fontMetrics().horizontalAdvance('Mode'),
+            self.fontMetrics().horizontalAdvance('compiled'),
+        ) + 24
+        self.queue_view.header().resizeSection(0, mode_width)
         self.queue_view.setAcceptDrops(False)
         self.queue_view.setDragEnabled(False)
         self.queue_view.setDropIndicatorShown(False)
