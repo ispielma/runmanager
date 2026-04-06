@@ -23,6 +23,7 @@ import traceback
 import datetime
 import errno
 import json
+import re
 import tokenize
 import io
 import warnings
@@ -217,6 +218,14 @@ def set_scan_enabled(filename, groupname, globalname, scan_enabled):
     _globals_file.set_field(filename, groupname, globalname, 'scan_enabled', scan_enabled)
 
 
+def get_jit_enabled(filename, groupname, globalname):
+    return _globals_file.get_field(filename, groupname, globalname, 'jit_enabled')
+
+
+def set_jit_enabled(filename, groupname, globalname, jit_enabled):
+    _globals_file.set_field(filename, groupname, globalname, 'jit_enabled', jit_enabled)
+
+
 def get_scan(filename, groupname, globalname):
     return _globals_file.get_field(filename, groupname, globalname, 'scan')
 
@@ -252,6 +261,13 @@ def default_toml_globals_file(filename):
 
 def convert_globals_file(filename, dest_filename):
     return _globals_file.convert_to_toml(filename, dest_filename)
+
+
+def guess_expansion_type(value):
+    if isinstance(value, np.ndarray) or isinstance(value, list):
+        return u'outer'
+    else:
+        return u''
 
 
 def iterator_to_tuple(iterator, max_length=1000000):
@@ -296,7 +312,7 @@ def _details_to_sequence_globals(globals_details, defaults_only=False, overrides
         sequence_globals[group_name] = {}
         for global_name, record in globals_data.items():
             if global_name in overrides:
-                expression = repr(overrides[global_name])
+                expression = overrides[global_name]
                 expansion = ''
             elif defaults_only or not record['scan_enabled']:
                 expression = record['default']
@@ -325,10 +341,24 @@ def get_default_shot_globals(groups):
     return sequence_globals, shots[0]
 
 
-def get_queue_compile_globals(groups, shot_globals_overrides):
+def get_frozen_globals(globals_details, shot):
+    frozen_globals = {}
+    for group_name, globals_data in globals_details.items():
+        for global_name, record in globals_data.items():
+            if record['jit_enabled']:
+                continue
+            if record['scan_enabled']:
+                expression = repr(shot[global_name])
+            else:
+                expression = record['default']
+            frozen_globals[global_name] = expression
+    return frozen_globals
+
+
+def get_queue_compile_globals(groups, frozen_globals):
     globals_details = get_globals_details(groups)
     sequence_globals = _details_to_sequence_globals(
-        globals_details, defaults_only=False, overrides=shot_globals_overrides
+        globals_details, defaults_only=False, overrides=frozen_globals
     )
     evaled_globals, _, _ = evaluate_globals(sequence_globals, raise_exceptions=True)
     shots = expand_globals(sequence_globals, evaled_globals)
@@ -602,7 +632,45 @@ def next_sequence_index(shot_basedir, dt, increment=True):
         return sequence_index
 
 
-def new_sequence_details(script_path, config=None, increment_sequence_index=True):
+def get_output_folder_format(config, default=False):
+    """Return the configured output folder format, or the built-in fallback.
+
+    If default=True, then the sequence-index placeholder is replaced with the literal
+    directory name ``default``. This is used for default-shot JIT submissions while
+    preserving the rest of the configured date/path structure."""
+    try:
+        subdir_format = config.get('runmanager', 'output_folder_format')
+    except (LabConfig.NoOptionError, LabConfig.NoSectionError):
+        subdir_format = os.path.join('%Y', '%m', '%d', '{sequence_index:05d}')
+    if default:
+        subdir_format = re.sub(
+            r'\{sequence_index(?::[^}]*)?\}',
+            'default',
+            subdir_format,
+        )
+    return subdir_format
+
+
+def get_filename_prefix_format(config, default=False):
+    """Return the configured filename prefix format, or the built-in fallback.
+
+    If default=True, then the sequence-index placeholder is replaced with the literal
+    text ``default``. This keeps default-shot filenames aligned with the configured
+    prefix structure without using the numeric sequence index in the visible name."""
+    try:
+        filename_prefix_format = config.get('runmanager', 'filename_prefix_format')
+    except (LabConfig.NoOptionError, LabConfig.NoSectionError):
+        filename_prefix_format = '{sequence_timestamp}_{script_basename}'
+    if default:
+        filename_prefix_format = re.sub(
+            r'\{sequence_index(?::[^}]*)?\}',
+            'default',
+            filename_prefix_format,
+        )
+    return filename_prefix_format
+
+
+def new_sequence_details(script_path, config=None, increment_sequence_index=True, default=False):
     """Generate the details for a new sequence: the toplevel attrs sequence_date,
     sequence_index, sequence_id; and the the output directory and filename prefix for
     the shot files, according to labconfig settings. If increment_sequence_index=True,
@@ -633,10 +701,7 @@ def new_sequence_details(script_path, config=None, increment_sequence_index=True
     }
 
     # Compute the output directory based on labconfig settings:
-    try:
-        subdir_format = config.get('runmanager', 'output_folder_format')
-    except (LabConfig.NoOptionError, LabConfig.NoSectionError):
-        subdir_format = os.path.join('%Y', '%m', '%d', '{sequence_index:05d}')
+    subdir_format = get_output_folder_format(config, default=default)
 
     # Format the output directory according to the current timestamp, sequence index and
     # sequence_timestamp, if present in the format string:
@@ -646,11 +711,7 @@ def new_sequence_details(script_path, config=None, increment_sequence_index=True
     shot_output_dir = os.path.join(shot_basedir, subdir)
 
     # Compute the shot filename prefix according to labconfig settings:
-    try:
-        filename_prefix_format = config.get('runmanager', 'filename_prefix_format')
-    except (LabConfig.NoOptionError, LabConfig.NoSectionError):
-        # Default, for backward compatibility:
-        filename_prefix_format = '{sequence_timestamp}_{script_basename}'
+    filename_prefix_format = get_filename_prefix_format(config, default=default)
     # Format the filename prefix according to the current timestamp, sequence index,
     # sequence_timestamp, and script_basename, if present in the format string:
     filename_prefix = now.strftime(filename_prefix_format).format(
@@ -669,6 +730,8 @@ def make_run_files(
     sequence_attrs,
     filename_prefix,
     shuffle=False,
+    return_infos=False,
+    create_files=True,
 ):
     """Does what it says. sequence_globals and shots are of the datatypes returned by
     get_globals and get_shots, one is a nested dictionary with string values, and the
@@ -689,16 +752,27 @@ def make_run_files(
     filenames the run files are given is simply the sequence_id with increasing integers
     appended."""
     basename = os.path.join(output_folder, filename_prefix)
-    nruns = len(shots)
+    indexed_shots = list(enumerate(shots))
+    nruns = len(indexed_shots)
     ndigits = int(np.ceil(np.log10(nruns)))
     if shuffle:
-        random.shuffle(shots)
-    for i, shot_globals in enumerate(shots):
-        runfilename = ('%s_%0' + str(ndigits) + 'd.h5') % (basename, i)
-        make_single_run_file(
-            runfilename, sequence_globals, shot_globals, sequence_attrs, i, nruns
-        )
-        yield runfilename
+        random.shuffle(indexed_shots)
+    for run_no, (_, shot_globals) in enumerate(indexed_shots):
+        runfilename = ('%s_%0' + str(ndigits) + 'd.h5') % (basename, run_no)
+        if create_files:
+            make_single_run_file(
+                runfilename, sequence_globals, shot_globals, sequence_attrs, run_no, nruns
+            )
+        if return_infos:
+            yield {
+                'path': runfilename,
+                'shot_globals': shot_globals,
+                'sequence_attrs': dict(sequence_attrs),
+                'run_no': run_no,
+                'n_runs': nruns,
+            }
+        else:
+            yield runfilename
 
 
 def make_single_run_file(filename, sequenceglobals, runglobals, sequence_attrs, run_no, n_runs):

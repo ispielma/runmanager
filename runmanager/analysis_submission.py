@@ -10,11 +10,7 @@
 # the project for the full license.                                 #
 #                                                                   #
 #####################################################################
-"""Lyse submission widget and retry loop for runmanager.
-
-If ``servers.lyse`` is omitted from labconfig, submissions default to
-``localhost``.
-"""
+"""Lyse submission widget and retry loop for runmanager."""
 
 import logging
 import os
@@ -24,6 +20,9 @@ import threading
 import time
 from pathlib import Path
 
+import labscript_utils.shared_drive
+from labscript_utils.ls_zprocess import zmq_get
+from labscript_utils.qtwidgets.elide_label import elide_label
 from qtutils import UiLoader, inmain_decorator
 from qtutils.qt import QtGui
 from qtutils.qt.QtCore import Qt, QSize
@@ -31,10 +30,6 @@ from qtutils.qt import QtWidgets
 from qtutils.qt.QtWidgets import QSizePolicy
 from zprocess import TimeoutError, raise_exception_in_thread
 from zprocess.security import AuthenticationFailure
-
-from labscript_utils.ls_zprocess import zmq_get
-import labscript_utils.shared_drive
-from labscript_utils.qtwidgets.elide_label import elide_label
 
 
 runmanager_dir = Path(__file__).absolute().parent
@@ -56,16 +51,11 @@ class AnalysisSubmission(object):
         self.inqueue = queue.Queue()
         self.runmanager = runmanager
         self.port = self.runmanager.exp_config.getint('ports', 'lyse')
-        self.host = self.runmanager.exp_config.get(
-            'servers', 'lyse', fallback='localhost'
-        )
+        self.host = self.runmanager.exp_config.get('servers', 'lyse', fallback='localhost')
 
-        self.widget = UiLoader().load(
-            os.path.join(runmanager_dir, 'analysis_submission.ui')
-        )
-        set_icon_label_pixmap(
-            self.widget.send_to_server_icon, art_dir / 'lyse_22x22.png'
-        )
+        self.widget = UiLoader().load(os.path.join(runmanager_dir, 'analysis_submission.ui'))
+        set_icon_label_pixmap(self.widget.send_to_server_icon, art_dir / 'lyse_22x22.png')
+
         if parent_layout is not None:
             if isinstance(parent_layout, QtWidgets.QGridLayout):
                 self._attach_to_grid_layout(parent_layout)
@@ -74,6 +64,7 @@ class AnalysisSubmission(object):
                     parent_layout.insertWidget(parent_layout.count(), self.widget)
                 except AttributeError:
                     parent_layout.addWidget(self.widget)
+
         self.widget.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
         elide_label(
             self.widget.resend_shots_label,
@@ -124,9 +115,7 @@ class AnalysisSubmission(object):
 
     def restore_configuration_data(self, data):
         data = data or {}
-        self._apply_send_to_server(
-            data.get('send_to_server', False), clear_waiting=False
-        )
+        self._apply_send_to_server(data.get('send_to_server', False), clear_waiting=False)
 
     def _set_send_to_server(self, value):
         self.send_to_server = value
@@ -251,6 +240,7 @@ class AnalysisSubmission(object):
                         signal = 'check/retry'
                     else:
                         continue
+
                 if signal == 'check/retry':
                     self.check_connectivity()
                     if self.server_online == 'online':
@@ -270,7 +260,7 @@ class AnalysisSubmission(object):
                 else:
                     raise ValueError('Invalid signal: %s' % str(signal))
 
-                self._mainloop_logger.info('Processed signal: %s' % str(signal))
+                self._mainloop_logger.debug('Processed signal: %s' % str(signal))
             except Exception:
                 raise_exception_in_thread(sys.exc_info())
                 self._mainloop_logger.exception('Exception in mainloop, continuing')
@@ -301,7 +291,7 @@ class AnalysisSubmission(object):
         success = True
         while self._waiting_for_submission and success:
             path = self._waiting_for_submission[0]
-            self._mainloop_logger.info('Submitting run file %s.\n' % os.path.basename(path))
+            self._mainloop_logger.debug('Submitting run file %s.\n' % os.path.basename(path))
             data = {'filepath': labscript_utils.shared_drive.path_to_agnostic(path)}
             self.server_online = 'checking'
             try:

@@ -1,13 +1,36 @@
+#####################################################################
+#                                                                   #
+# /globals_file.py                                                  #
+#                                                                   #
+# Copyright 2026, Ian Spielman                                      #
+#                                                                   #
+# This file is part of the program runmanager, in the labscript     #
+# suite (see http://labscriptsuite.org), and is licensed under the  #
+# Simplified BSD License. See the license.txt file in the root of   #
+# the project for the full license.                                 #
+#                                                                   #
+#####################################################################
+
+"""Storage helpers for runmanager globals files.
+
+This module keeps the globals-file schema and CRUD operations in one place.
+Canonical editable globals files are TOML-backed. Legacy HDF5 globals files
+remain readable as migration inputs and can be converted to TOML when the user
+wants to edit them.
+"""
+
 import copy
-import json
 import os
 
+import labscript_utils.h5_lock
 import h5py
 
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover
     import tomli as tomllib
+
+import tomli_w
 
 
 CANONICAL_FORMAT = "runmanager_globals"
@@ -32,6 +55,7 @@ def _blank_record():
         "default": "",
         "units": "",
         "scan_enabled": False,
+        "jit_enabled": False,
         "scan": "",
         "expansion": "",
     }
@@ -44,10 +68,13 @@ def _normalise_record(record):
             "default": _ensure_str(record.get("default", "")),
             "units": _ensure_str(record.get("units", "")),
             "scan_enabled": bool(record.get("scan_enabled", False)),
+            "jit_enabled": bool(record.get("jit_enabled", False)),
             "scan": _ensure_str(record.get("scan", "")),
             "expansion": _ensure_str(record.get("expansion", "")),
         }
     )
+    if normalised["scan_enabled"] and normalised["jit_enabled"]:
+        normalised["jit_enabled"] = False
     if not normalised["scan_enabled"]:
         normalised["expansion"] = ""
     elif not normalised["expansion"]:
@@ -76,14 +103,6 @@ def _normalise_document(data):
                 _normalise_record(record)
             )
     return document
-
-
-def _toml_key(value):
-    return json.dumps(str(value))
-
-
-def _toml_string(value):
-    return json.dumps(str(value))
 
 
 def detect_backend(filename):
@@ -133,7 +152,7 @@ def load_legacy_hdf5_document(filename):
         except KeyError as exc:
             raise GlobalsFileError("%s does not contain a /globals group." % filename) from exc
         for group_name in globals_root:
-            group = globals_root[group_name]
+            group = f["globals"][group_name]
             units_group = group.get("units")
             values = dict(group.attrs)
             units = dict(units_group.attrs) if units_group is not None else {}
@@ -143,6 +162,7 @@ def load_legacy_hdf5_document(filename):
                     "default": _ensure_str(value),
                     "units": _ensure_str(units.get(global_name, "")),
                     "scan_enabled": False,
+                    "jit_enabled": False,
                     "scan": "",
                     "expansion": "",
                 }
@@ -155,31 +175,11 @@ def save_document(filename, document):
             "Legacy HDF5 globals files are import-only. Save to a .toml globals file instead."
         )
     document = _normalise_document(document)
-    lines = [
-        'format = "runmanager_globals"',
-        "version = 1",
-        "",
-    ]
-    for group_name, group_data in document["groups"].items():
-        lines.append("[groups.%s]" % _toml_key(group_name))
-        lines.append("")
-        for global_name, record in group_data["globals"].items():
-            lines.append(
-                "[groups.%s.globals.%s]" % (_toml_key(group_name), _toml_key(global_name))
-            )
-            lines.append("default = %s" % _toml_string(record["default"]))
-            lines.append("units = %s" % _toml_string(record["units"]))
-            lines.append(
-                "scan_enabled = %s" % ("true" if record["scan_enabled"] else "false")
-            )
-            lines.append("scan = %s" % _toml_string(record["scan"]))
-            lines.append("expansion = %s" % _toml_string(record["expansion"]))
-            lines.append("")
     directory = os.path.dirname(filename)
     if directory:
         os.makedirs(directory, exist_ok=True)
-    with open(filename, "w", encoding="utf-8", newline="\n") as f:
-        f.write("\n".join(lines))
+    with open(filename, "wb") as f:
+        tomli_w.dump(document, f)
 
 
 def new_globals_file(filename):
@@ -359,11 +359,15 @@ def set_field(filename, groupname, globalname, field, value):
         record[field] = bool(value)
         if not record[field]:
             record["expansion"] = ""
-        elif not record["expansion"]:
-            # Scan membership is explicit. When a global is marked as scanned,
-            # default to a simple outer-product scan unless the user has
-            # already chosen a zip/outer mode.
+        else:
+            record["jit_enabled"] = False
+        if record[field] and not record["expansion"]:
             record["expansion"] = "outer"
+    elif field == "jit_enabled":
+        record[field] = bool(value)
+        if record[field]:
+            record["scan_enabled"] = False
+            record["expansion"] = ""
     else:
         record[field] = value
     set_global_record(filename, groupname, globalname, record)

@@ -10,80 +10,37 @@
 # the project for the full license.                                 #
 #                                                                   #
 #####################################################################
-"""Queue controller and queue tab helpers for runmanager."""
+"""Runmanager-owned shot queue helpers.
 
-import copy
+This module keeps queue state and background queue/compile work out of
+``runmanager.__main__``. QueueManager owns the background compile loop used by
+Engage, and it also exposes the existing queue state used by BLACS requests.
+Queue items are stored internally as shot records, while the queue widget still
+shows only their filepaths.
+"""
+
 import os
+import queue
 import threading
-import uuid
-from dataclasses import dataclass
 
 from qtutils.qt import QtCore, QtGui, QtWidgets
 from qtutils.qt.QtCore import pyqtSignal as Signal
 
 from labscript_utils.qtwidgets.shotqueue import FILEPATH_COLUMN, ShotQueueWidget
+from zprocess import raise_exception_in_thread
 
+EMPTY_QUEUE_NOTHING = 'nothing'
+EMPTY_QUEUE_DEFAULT_LABSCRIPT = 'default_labscript'
+COMPILE_MODE_EAGER = 'eager'
+COMPILE_MODE_LAZY = 'lazy'
 
-COMPILE_MODE_PRECOMPILE = 'precompile'
-COMPILE_MODE_ON_REQUEST = 'compile_on_request'
-
-EMPTY_QUEUE_STOP = 'stop'
-EMPTY_QUEUE_REPEAT_LAST = 'repeat_last'
-EMPTY_QUEUE_REPEAT_STANDARD = 'repeat_standard'
-
-SOURCE_KIND_QUEUE = 'queue'
-SOURCE_KIND_REPEAT_LAST = 'repeat_last'
-SOURCE_KIND_REPEAT_STANDARD = 'repeat_standard'
-
-STATUS_QUEUED = 'queued'
-STATUS_PRECOMPILING = 'precompiling'
-STATUS_READY = 'ready'
-STATUS_ERROR = 'error'
-
-
-@dataclass
-class QueueShotDescriptor:
-    shot_id: str
-    label: str
-    labscript_file: str
-    output_folder: str
-    run_file: str
-    active_groups: dict
-    sequence_attrs: dict
-    run_no: int
-    n_runs: int
-    sequence_globals_frozen: dict
-    shot_globals_frozen: dict
-    shot_globals_overrides: dict
-    send_to_runviewer: bool = False
-    source_kind: str = SOURCE_KIND_QUEUE
-    status: str = STATUS_QUEUED
-    compiled_path: str = None
-    compile_error: str = None
-
-    def clone(self, **overrides):
-        data = copy.deepcopy(self.__dict__)
-        data.update(overrides)
-        if 'shot_id' not in overrides:
-            data['shot_id'] = uuid.uuid4().hex
-        return QueueShotDescriptor(**data)
-
-    def summary(self):
-        return {
-            'id': self.shot_id,
-            'label': self.label,
-            'source_kind': self.source_kind,
-            'status': self.status,
-            'compiled_path': self.compiled_path,
-            'compile_error': self.compile_error,
-            'run_file': self.run_file,
-        }
 
 class RunmanagerQueueWidget(ShotQueueWidget):
-    """Shared queue widget adapted for logical runmanager queue items."""
+    """Shot queue widget configured for runmanager-owned shot records."""
 
     deleteRowsRequested = Signal(list)
     clearQueueRequested = Signal()
+    moveRequested = Signal(str, list)
 
     def __init__(self, parent=None):
         ShotQueueWidget.__init__(
@@ -92,20 +49,36 @@ class RunmanagerQueueWidget(ShotQueueWidget):
             accepted_extensions=('.h5', '.hdf5'),
             file_dialog_filter='Shot files (*.h5 *.hdf5)',
             allow_duplicates=True,
-            column_title='Queued shot',
-            controls=(),
+            column_title='Shot file',
         )
         self.queue_view.setAcceptDrops(False)
         self.queue_view.setDragEnabled(False)
         self.queue_view.setDropIndicatorShown(False)
         self.queue_view.setDragDropMode(QtWidgets.QAbstractItemView.NoDragDrop)
-        self.queue_view.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
-
         self._disconnect_default_controls()
+        self.add_button.hide()
+        self.delete_button.clicked.connect(self._emit_delete)
+        self.clear_button.clicked.connect(self.clearQueueRequested.emit)
+        self.move_top_button.clicked.connect(lambda: self._emit_move('top'))
+        self.move_up_button.clicked.connect(lambda: self._emit_move('up'))
+        self.move_down_button.clicked.connect(lambda: self._emit_move('down'))
+        self.move_bottom_button.clicked.connect(lambda: self._emit_move('bottom'))
         self.queue_view.deleteRequested.connect(self._emit_delete)
-        self.queue_view.customContextMenuRequested.connect(self._show_context_menu)
 
     def _disconnect_default_controls(self):
+        for button in (
+            self.add_button,
+            self.delete_button,
+            self.clear_button,
+            self.move_top_button,
+            self.move_up_button,
+            self.move_down_button,
+            self.move_bottom_button,
+        ):
+            try:
+                button.clicked.disconnect()
+            except TypeError:
+                pass
         try:
             self.queue_view.deleteRequested.disconnect()
         except TypeError:
@@ -115,270 +88,424 @@ class RunmanagerQueueWidget(ShotQueueWidget):
         except TypeError:
             pass
 
-    def selected_item_ids(self):
-        item_ids = []
+    def set_queue_paths(self, paths):
+        selected_paths = set(self.selected_paths())
+        self.queue_model.removeRows(0, self.queue_model.rowCount())
+        for path_info in paths:
+            if isinstance(path_info, dict):
+                path = path_info['path']
+                label = path_info.get('label', os.path.basename(path))
+                tooltip = path_info.get('tooltip', path)
+            else:
+                path = path_info
+                label = os.path.basename(path)
+                tooltip = path
+            item = QtGui.QStandardItem(label)
+            item.setEditable(False)
+            item.setToolTip(tooltip)
+            item.setData(path, QtCore.Qt.UserRole)
+            self.queue_model.appendRow([item])
+        self._restore_selection(selected_paths)
+
+    def selected_paths(self):
+        paths = []
         for row in self.selected_rows():
             item = self.queue_model.item(row, FILEPATH_COLUMN)
-            item_ids.append(item.data(QtCore.Qt.UserRole))
-        return item_ids
+            paths.append(item.data(QtCore.Qt.UserRole))
+        return paths
 
-    def set_queue_items(self, items):
-        selected_ids = set(self.selected_item_ids())
-        self.queue_model.removeRows(0, self.queue_model.rowCount())
-        for item_data in items:
-            item = QtGui.QStandardItem(item_data['display_text'])
-            item.setToolTip(item_data['tooltip'])
-            item.setEditable(False)
-            item.setData(item_data['id'], QtCore.Qt.UserRole)
-            self.queue_model.appendRow([item])
-        self._restore_selection(selected_ids)
+    def _restore_selection(self, selected_paths):
+        if not selected_paths:
+            return
+        rows = []
+        for row in range(self.queue_model.rowCount()):
+            item = self.queue_model.item(row, FILEPATH_COLUMN)
+            if item.data(QtCore.Qt.UserRole) in selected_paths:
+                rows.append(row)
+        self._select_rows(rows)
 
     def _emit_delete(self):
         rows = self.selected_rows()
         if rows:
             self.deleteRowsRequested.emit(rows)
 
-    def _show_context_menu(self, pos):
-        index = self.queue_view.indexAt(pos)
-        if index.isValid() and not self.queue_view.selectionModel().isSelected(index):
-            self._select_rows([index.row()])
-
-        has_selection = bool(self.selected_rows())
-        row_count = self.queue_model.rowCount()
-        if not has_selection and not row_count:
-            return
-
-        menu = QtWidgets.QMenu(self.queue_view)
-        delete_action = None
-        clear_action = None
-        if has_selection:
-            delete_action = menu.addAction('Delete selected')
-        if row_count:
-            clear_action = menu.addAction('Clear queue')
-
-        action = menu.exec_(self.queue_view.viewport().mapToGlobal(pos))
-        if action is delete_action:
-            self._emit_delete()
-        elif action is clear_action:
-            self.clearQueueRequested.emit()
-
-    def _restore_selection(self, item_ids):
-        if not item_ids:
-            return
-        rows = []
-        for row in range(self.queue_model.rowCount()):
-            item = self.queue_model.item(row, FILEPATH_COLUMN)
-            if item.data(QtCore.Qt.UserRole) in item_ids:
-                rows.append(row)
-        self._select_rows(rows)
+    def _emit_move(self, direction):
+        rows = self.selected_rows()
+        if rows:
+            self.moveRequested.emit(direction, rows)
 
 
 class QueueController(object):
-    def __init__(self, on_items_discarded=None):
-        self.on_items_discarded = on_items_discarded
-        self.compile_mode = COMPILE_MODE_PRECOMPILE
-        self.empty_queue_policy = EMPTY_QUEUE_STOP
-        self.standard_labscript_file = ''
+    """Thread-safe queue of shot records."""
+
+    def __init__(self):
+        self.empty_queue_policy = EMPTY_QUEUE_NOTHING
+        self.default_labscript_file = ''
+        self.compile_mode = COMPILE_MODE_EAGER
+        self.last_sent_to_blacs = None
         self._items = []
-        self._sent = {}
-        self._last_queue_descriptor = None
         self._lock = threading.RLock()
 
-    def set_compile_mode(self, value):
-        if value not in (COMPILE_MODE_PRECOMPILE, COMPILE_MODE_ON_REQUEST):
-            raise ValueError('Invalid compile mode: %s' % value)
-        with self._lock:
-            self.compile_mode = value
+    def _normalise_item(self, item):
+        if isinstance(item, str):
+            item = {'path': item, 'compile_mode': COMPILE_MODE_EAGER, 'compiled': True}
+        record = dict(item)
+        record['path'] = os.path.abspath(str(record['path']))
+        labscript_file = record.get('labscript_file', '')
+        record['labscript_file'] = (
+            os.path.abspath(str(labscript_file)) if labscript_file else ''
+        )
+        compile_mode = record.get('compile_mode', COMPILE_MODE_EAGER)
+        if compile_mode not in (COMPILE_MODE_EAGER, COMPILE_MODE_LAZY):
+            compile_mode = COMPILE_MODE_EAGER
+        record['compile_mode'] = compile_mode
+        record['compiled'] = bool(record.get('compiled', compile_mode == COMPILE_MODE_EAGER))
+        record['frozen_globals'] = {
+            str(name): str(expression)
+            for name, expression in record.get('frozen_globals', {}).items()
+        }
+        record['sequence_attrs'] = {
+            str(name): value for name, value in record.get('sequence_attrs', {}).items()
+        }
+        record['active_groups'] = {
+            str(name): os.path.abspath(str(path))
+            for name, path in record.get('active_groups', {}).items()
+        }
+        record['run_no'] = int(record.get('run_no', 0))
+        record['n_runs'] = int(record.get('n_runs', 1))
+        return record
 
     def set_empty_queue_policy(self, value):
-        if value not in (
-            EMPTY_QUEUE_STOP,
-            EMPTY_QUEUE_REPEAT_LAST,
-            EMPTY_QUEUE_REPEAT_STANDARD,
-        ):
+        if value not in (EMPTY_QUEUE_NOTHING, EMPTY_QUEUE_DEFAULT_LABSCRIPT):
             raise ValueError('Invalid empty queue policy: %s' % value)
         with self._lock:
             self.empty_queue_policy = value
 
-    def set_standard_labscript_file(self, value):
+    def set_default_labscript_file(self, value):
         with self._lock:
-            self.standard_labscript_file = os.path.abspath(value) if value else ''
+            self.default_labscript_file = os.path.abspath(value) if value else ''
 
-    def enqueue(self, descriptors):
-        descriptors = [copy.deepcopy(descriptor) for descriptor in descriptors]
+    def set_compile_mode(self, value):
+        if value not in (COMPILE_MODE_EAGER, COMPILE_MODE_LAZY):
+            raise ValueError('Invalid compile mode: %s' % value)
         with self._lock:
-            self._items.extend(descriptors)
-            self._refresh_last_queue_descriptor_locked()
-            return [descriptor.shot_id for descriptor in descriptors]
+            self.compile_mode = value
 
-    def get_descriptor_for_precompile(self, shot_id):
+    def enqueue(self, items):
+        records = [self._normalise_item(item) for item in items]
         with self._lock:
-            for descriptor in self._items:
-                if descriptor.shot_id == shot_id:
-                    descriptor.status = STATUS_PRECOMPILING
-                    descriptor.compile_error = None
-                    return copy.deepcopy(descriptor)
-        return None
-
-    def finish_precompile(self, shot_id, compiled_path=None, error=None):
-        with self._lock:
-            for descriptor in self._items:
-                if descriptor.shot_id == shot_id:
-                    if error is None:
-                        descriptor.compiled_path = compiled_path
-                        descriptor.status = STATUS_READY
-                        descriptor.compile_error = None
-                    else:
-                        descriptor.status = STATUS_ERROR
-                        descriptor.compile_error = error
-                    return True
-        return False
-
-    def get_next_descriptor(self, repeat_standard_factory):
-        with self._lock:
-            if self._items:
-                descriptor = copy.deepcopy(self._items[0])
-            elif self.empty_queue_policy == EMPTY_QUEUE_STOP:
-                return None
-            elif self.empty_queue_policy == EMPTY_QUEUE_REPEAT_LAST:
-                if self._last_queue_descriptor is None:
-                    return None
-                descriptor = self._last_queue_descriptor.clone(
-                    shot_id=uuid.uuid4().hex,
-                    source_kind=SOURCE_KIND_REPEAT_LAST,
-                    status=STATUS_QUEUED,
-                    compiled_path=None,
-                    compile_error=None,
-                )
-            elif self.empty_queue_policy == EMPTY_QUEUE_REPEAT_STANDARD:
-                descriptor = repeat_standard_factory()
-            else:
-                raise AssertionError('Unhandled empty queue policy: %s' % self.empty_queue_policy)
-            return copy.deepcopy(descriptor)
-
-    def mark_descriptor_sent(self, descriptor):
-        with self._lock:
-            sent_descriptor = None
-            for index, queued_descriptor in enumerate(self._items):
-                if queued_descriptor.shot_id == descriptor.shot_id:
-                    sent_descriptor = self._items.pop(index)
-                    break
-            if sent_descriptor is None:
-                sent_descriptor = copy.deepcopy(descriptor)
-            sent_descriptor.status = descriptor.status
-            sent_descriptor.compiled_path = descriptor.compiled_path
-            sent_descriptor.compile_error = descriptor.compile_error
-            self._sent[sent_descriptor.run_file] = copy.deepcopy(sent_descriptor)
-            self._refresh_last_queue_descriptor_locked(clear_if_empty=False)
-
-    def add_sent_descriptor(self, run_file, start=False):
-        with self._lock:
-            descriptor = self._sent.pop(run_file, None)
-            if descriptor is None:
-                return False
-            if descriptor.compiled_path:
-                descriptor.status = STATUS_READY
-                descriptor.compile_error = None
-            else:
-                descriptor.status = STATUS_QUEUED
-            if start:
-                self._items.insert(0, descriptor)
-            else:
-                self._items.append(descriptor)
-            self._refresh_last_queue_descriptor_locked(clear_if_empty=False)
-            return True
-
-    def note_compile_error(self, shot_id, error):
-        with self._lock:
-            for descriptor in self._items:
-                if descriptor.shot_id == shot_id:
-                    descriptor.status = STATUS_ERROR
-                    descriptor.compile_error = error
-                    return True
-        return False
+            self._items.extend(records)
 
     def delete_rows(self, rows):
-        removed = []
         with self._lock:
             for row in sorted(set(rows), reverse=True):
                 if 0 <= row < len(self._items):
-                    removed.append(self._items.pop(row))
-            self._refresh_last_queue_descriptor_locked(clear_if_empty=True)
-        self._discard_items(removed)
+                    del self._items[row]
 
     def clear(self):
-        removed = []
         with self._lock:
-            removed = self._items
             self._items = []
-            self._sent = {}
-            self._last_queue_descriptor = None
-        self._discard_items(removed)
 
-    def get_queue_items(self):
+    def move(self, direction, rows):
+        rows = sorted(set(rows))
+        if not rows:
+            return
         with self._lock:
-            return [descriptor.summary() for descriptor in self._items]
+            items = self._items
+            if direction == 'up':
+                for row in rows:
+                    if row > 0 and row - 1 not in rows:
+                        items[row - 1], items[row] = items[row], items[row - 1]
+            elif direction == 'down':
+                for row in reversed(rows):
+                    if row < len(items) - 1 and row + 1 not in rows:
+                        items[row + 1], items[row] = items[row], items[row + 1]
+            elif direction == 'top':
+                selected = [items[row] for row in rows]
+                remaining = [item for index, item in enumerate(items) if index not in rows]
+                self._items = selected + remaining
+            elif direction == 'bottom':
+                selected = [items[row] for row in rows]
+                remaining = [item for index, item in enumerate(items) if index not in rows]
+                self._items = remaining + selected
+            else:
+                raise ValueError('Invalid move direction: %s' % direction)
 
-    def get_descriptors(self):
+    def get_queue_paths(self):
         with self._lock:
-            return [copy.deepcopy(descriptor) for descriptor in self._items]
+            return [item['path'] for item in self._items]
+
+    def get_queue_display_items(self):
+        with self._lock:
+            items = []
+            for item in self._items:
+                compile_mode = item.get('compile_mode', COMPILE_MODE_EAGER)
+                mode_label = 'lazy' if compile_mode == COMPILE_MODE_LAZY else 'eager'
+                path = item['path']
+                items.append(
+                    {
+                        'path': path,
+                        'label': '[%s] %s' % (mode_label, os.path.basename(path)),
+                        'tooltip': '%s\nCompile mode: %s' % (path, mode_label),
+                    }
+                )
+            return items
+
+    def set_last_sent_to_blacs(self, value):
+        with self._lock:
+            self.last_sent_to_blacs = str(value) if value else None
 
     def export_state(self):
         with self._lock:
-            items = []
-            for descriptor in self._items:
-                data = copy.deepcopy(descriptor.__dict__)
-                data['status'] = STATUS_QUEUED
-                data.pop('compiled_path', None)
-                data.pop('compile_error', None)
-                items.append(data)
             return {
-                'compile_mode': self.compile_mode,
                 'empty_queue_policy': self.empty_queue_policy,
-                'standard_labscript_file': self.standard_labscript_file,
-                'items': items,
+                'default_labscript_file': self.default_labscript_file,
+                'compile_mode': self.compile_mode,
+                'items': [dict(item) for item in self._items],
             }
 
     def restore_state(self, state):
-        removed = []
         with self._lock:
-            removed = self._items
-            self.compile_mode = state.get('compile_mode', COMPILE_MODE_PRECOMPILE)
-            self.empty_queue_policy = state.get(
-                'empty_queue_policy', EMPTY_QUEUE_STOP
+            empty_queue_policy = state.get(
+                'empty_queue_policy', EMPTY_QUEUE_NOTHING
             )
-            self.standard_labscript_file = state.get('standard_labscript_file', '')
-            self._items = []
-            self._sent = {}
-            for descriptor_data in state.get('items', []):
-                data = copy.deepcopy(descriptor_data)
-                data['compiled_path'] = None
-                data['compile_error'] = None
-                data['status'] = STATUS_QUEUED
-                self._items.append(QueueShotDescriptor(**data))
-            self._refresh_last_queue_descriptor_locked(clear_if_empty=True)
-        self._discard_items(removed)
+            if empty_queue_policy not in (
+                EMPTY_QUEUE_NOTHING,
+                EMPTY_QUEUE_DEFAULT_LABSCRIPT,
+            ):
+                empty_queue_policy = EMPTY_QUEUE_NOTHING
+            self.empty_queue_policy = empty_queue_policy
+            default_labscript_file = state.get('default_labscript_file', '')
+            self.default_labscript_file = (
+                os.path.abspath(default_labscript_file)
+                if default_labscript_file
+                else ''
+            )
+            compile_mode = state.get('compile_mode', COMPILE_MODE_EAGER)
+            if compile_mode not in (COMPILE_MODE_EAGER, COMPILE_MODE_LAZY):
+                compile_mode = COMPILE_MODE_EAGER
+            self.compile_mode = compile_mode
+            self._items = [self._normalise_item(item) for item in state.get('items', [])]
 
     def get_queue_state(self):
         with self._lock:
             return {
-                'compile_mode': self.compile_mode,
                 'empty_queue_policy': self.empty_queue_policy,
-                'standard_labscript_file': self.standard_labscript_file,
+                'default_labscript_file': self.default_labscript_file,
+                'compile_mode': self.compile_mode,
+                'last_sent_to_blacs': self.last_sent_to_blacs,
                 'n_items': len(self._items),
-                'items': [descriptor.summary() for descriptor in self._items],
             }
 
-    def _refresh_last_queue_descriptor_locked(self, clear_if_empty=False):
-        queue_descriptors = [
-            descriptor for descriptor in self._items if descriptor.source_kind == SOURCE_KIND_QUEUE
-        ]
-        if queue_descriptors:
-            self._last_queue_descriptor = copy.deepcopy(queue_descriptors[-1])
-        elif clear_if_empty:
-            self._last_queue_descriptor = None
+    def pop_next(self):
+        with self._lock:
+            if not self._items:
+                return None
+            return self._items.pop(0)
 
-    def _discard_items(self, descriptors):
-        if self.on_items_discarded is None or not descriptors:
-            return
-        self.on_items_discarded(copy.deepcopy(descriptors))
+
+class QueueManager(QtCore.QObject):
+    """Queue worker thread and synchronous wrappers for runmanager."""
+
+    queueChanged = Signal()
+
+    def __init__(
+        self,
+        prepare_run_file,
+        compile_run_file,
+        send_to_runviewer,
+        output,
+        compilation_aborted,
+        set_abort_enabled,
+    ):
+        QtCore.QObject.__init__(self)
+        self.controller = QueueController()
+        self.command_queue = queue.Queue()
+        self.prepare_run_file_callback = prepare_run_file
+        self.compile_run_file_callback = compile_run_file
+        self.send_to_runviewer_callback = send_to_runviewer
+        self.output = output
+        self.compilation_aborted = compilation_aborted
+        self.set_abort_enabled = set_abort_enabled
+        self.thread = threading.Thread(target=self.mainloop)
+        self.thread.daemon = True
+        self.thread.start()
+
+    def shutdown(self):
+        self.command_queue.put(('close', (), None))
+        if self.thread.is_alive() and threading.current_thread() is not self.thread:
+            self.thread.join(timeout=1)
+
+    def enqueue(self, items):
+        return self._request('enqueue', list(items))
+
+    def compile_shots(self, records, send_to_BLACS, send_to_runviewer):
+        self.command_queue.put(
+            (
+                'compile_shots',
+                (list(records), send_to_BLACS, send_to_runviewer),
+                None,
+            )
+        )
+
+    def compile_shot(self, item, send_to_runviewer=False):
+        return self._request('compile_shot', item, bool(send_to_runviewer))
+
+    def _compile_shot(self, item, send_to_runviewer=False):
+        if 'frozen_globals' in item:
+            self.prepare_run_file_callback(item)
+        success = self.compile_run_file_callback(item['labscript_file'], item['path'])
+        if success and send_to_runviewer:
+            self.send_to_runviewer_callback(item['path'])
+        item['compiled'] = bool(success)
+        return success
+
+    def set_last_sent_to_blacs(self, value):
+        return self._request('set_last_sent_to_blacs', value)
+
+    def set_empty_queue_policy(self, value):
+        return self._request('set_empty_queue_policy', value)
+
+    def set_default_labscript_file(self, value):
+        return self._request('set_default_labscript_file', value)
+
+    def set_compile_mode(self, value):
+        return self._request('set_compile_mode', value)
+
+    def delete_rows(self, rows):
+        return self._request('delete_rows', list(rows))
+
+    def clear(self):
+        return self._request('clear')
+
+    def move(self, direction, rows):
+        return self._request('move', direction, list(rows))
+
+    def pop_next(self):
+        return self._request('pop_next')
+
+    def get_queue_paths(self):
+        return self._request('get_queue_paths')
+
+    def get_queue_state(self):
+        return self._request('get_queue_state')
+
+    def export_state(self):
+        return self._request('export_state')
+
+    def restore_state(self, state):
+        self.command_queue.put(('restore_state', (dict(state or {}),), None))
+
+    def _request(self, command, *args):
+        response_queue = queue.Queue()
+        self.command_queue.put((command, args, response_queue))
+        success, data = response_queue.get()
+        if success:
+            return data
+        raise data
+
+    def mainloop(self):
+        while True:
+            try:
+                try:
+                    command, args, response_queue = self.command_queue.get(timeout=1)
+                except queue.Empty:
+                    continue
+
+                if command == 'close':
+                    return
+
+                changed = False
+                if command == 'enqueue':
+                    self.controller.enqueue(*args)
+                    changed = True
+                    result = None
+                elif command == 'set_empty_queue_policy':
+                    self.controller.set_empty_queue_policy(*args)
+                    changed = True
+                    result = None
+                elif command == 'set_default_labscript_file':
+                    self.controller.set_default_labscript_file(*args)
+                    changed = True
+                    result = None
+                elif command == 'set_compile_mode':
+                    self.controller.set_compile_mode(*args)
+                    changed = True
+                    result = None
+                elif command == 'set_last_sent_to_blacs':
+                    self.controller.set_last_sent_to_blacs(*args)
+                    changed = True
+                    result = None
+                elif command == 'delete_rows':
+                    self.controller.delete_rows(*args)
+                    changed = True
+                    result = None
+                elif command == 'clear':
+                    self.controller.clear()
+                    changed = True
+                    result = None
+                elif command == 'move':
+                    self.controller.move(*args)
+                    changed = True
+                    result = None
+                elif command == 'pop_next':
+                    result = self.controller.pop_next()
+                    changed = result is not None
+                elif command == 'get_queue_paths':
+                    result = self.controller.get_queue_paths()
+                elif command == 'get_queue_state':
+                    result = self.controller.get_queue_state()
+                elif command == 'export_state':
+                    result = self.controller.export_state()
+                elif command == 'restore_state':
+                    self.controller.restore_state(*args)
+                    changed = True
+                    result = None
+                elif command == 'compile_shot':
+                    item, send_to_runviewer = args
+                    result = self._compile_shot(
+                        item, send_to_runviewer=send_to_runviewer
+                    )
+                elif command == 'compile_shots':
+                    records, send_to_BLACS, send_to_runviewer = args
+                    try:
+                        for item in records:
+                            if self.compilation_aborted.is_set():
+                                self.output('Compilation aborted.\n\n', red=True)
+                                break
+                            compile_now = (
+                                not send_to_BLACS
+                                or item['compile_mode'] == COMPILE_MODE_EAGER
+                            )
+                            if compile_now:
+                                success = self._compile_shot(
+                                    item, send_to_runviewer=send_to_runviewer
+                                )
+                                if not success:
+                                    self.compilation_aborted.set()
+                                    continue
+                            if send_to_BLACS:
+                                self.controller.enqueue([item])
+                                self.queueChanged.emit()
+                                self.output(
+                                    'Queued shot %s in runmanager.\n'
+                                    % os.path.basename(item['path'])
+                                )
+                        else:
+                            self.output('Ready.\n\n')
+                    finally:
+                        self.set_abort_enabled(False)
+                        self.compilation_aborted.clear()
+                    result = None
+                else:
+                    raise ValueError('Invalid queue command: %s' % command)
+
+                if changed:
+                    self.queueChanged.emit()
+                if response_queue is not None:
+                    response_queue.put((True, result))
+            except Exception as exc:
+                if response_queue is not None:
+                    response_queue.put((False, exc))
+                else:
+                    raise_exception_in_thread((type(exc), exc, exc.__traceback__))

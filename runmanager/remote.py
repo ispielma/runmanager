@@ -34,20 +34,54 @@ class Client(ZMQClient):
         """Return the version of runmanager the server is running in"""
         return self.request('__version__')
 
+    def get_default_globals(self, raw=False):
+        """Return all active globals' Default values.
+
+        If raw=True, return the stored Default expression strings. Otherwise return
+        the evaluated Python values."""
+        return self.request('get_default_globals', raw=raw)
+
     def get_globals(self, raw=False):
-        """Return all active globals as a dict of the form: {'<global_name>': value}. If
-        raw=True, then the global values are returned as their string representations,
-        as stored in the runmanager GUI and globals HDF5 file, otherwise they are
-        evaluated as python objects and then returned."""
+        """Return all active globals' effective values.
+
+        If raw=True, return the stored effective expression strings. Otherwise return
+        the evaluated Python values."""
         return self.request('get_globals', raw=raw)
 
+    def set_default_globals(self, globals, raw=False):
+        """Set Default expressions for active globals."""
+        return self.request('set_default_globals', globals, raw=raw)
+
     def set_globals(self, globals, raw=False):
-        """For a dict of the form {'<global_name>': value}, set the given globals to the
-        given values. If raw=True, then global values will be treated as the string
-        representations of Python objects rather than the objects themselves, and
-        written directly to the HDF5 file and runmanager GUI without calling repr() on
-        them first."""
-        return self.request('set_globals', globals, raw=raw)
+        """Alias for set_default_globals()."""
+        return self.set_default_globals(globals, raw=raw)
+
+    def get_scan_globals(self, raw=False):
+        """Return all active globals' Scan values.
+
+        If raw=True, return the stored Scan expression strings. Otherwise return the
+        evaluated Python values."""
+        return self.request('get_scan_globals', raw=raw)
+
+    def set_scan_globals(self, globals, raw=False):
+        """Set Scan expressions for active globals."""
+        return self.request('set_scan_globals', globals, raw=raw)
+
+    def get_scan_enabled(self):
+        """Return all active globals' Scan? state."""
+        return self.request('get_scan_enabled')
+
+    def set_scan_enabled(self, globals):
+        """Set Scan? state for active globals."""
+        return self.request('set_scan_enabled', globals)
+
+    def get_jit_enabled(self):
+        """Return all active globals' JIT? state."""
+        return self.request('get_jit_enabled')
+
+    def set_jit_enabled(self, globals):
+        """Set JIT? state for active globals."""
+        return self.request('set_jit_enabled', globals)
 
     def engage(self):
         """Trigger shot compilation/submission"""
@@ -114,32 +148,8 @@ class Client(ZMQClient):
         return self.request('reset_shot_output_folder')
 
     def queue_request_next(self):
-        """Compile if needed and return the next queued shot for BLACS."""
+        """Reserve and return the next queued shot for BLACS."""
         return self.request('queue_request_next')
-
-    def queue_add_shot(self, agnostic_path, start=False):
-        """Add a shot back into the runmanager queue.
-
-        By default the shot is appended to the end of the queue. If
-        ``start=True`` it is inserted at the front.
-        """
-        return self.request('queue_add_shot', agnostic_path, start=start)
-
-    def queue_get_state(self):
-        """Return queue settings and summary state."""
-        return self.request('queue_get_state')
-
-    def queue_get_items(self):
-        """Return queued item summaries."""
-        return self.request('queue_get_items')
-
-    def queue_clear(self):
-        """Clear the runmanager-owned queue."""
-        return self.request('queue_clear')
-
-    def queue_delete(self, rows):
-        """Delete queued rows by index."""
-        return self.request('queue_delete', rows)
 
     def notify_shot_complete(self, filepath):
         """Notify runmanager that a shot completed and should be analysed."""
@@ -150,10 +160,16 @@ _default_client = Client()
 
 say_hello = _default_client.say_hello
 get_version = _default_client.get_version
+get_default_globals = _default_client.get_default_globals
 get_globals = _default_client.get_globals
-# get_globals_full = _default_client.get_globals_full
+set_default_globals = _default_client.set_default_globals
 set_globals = _default_client.set_globals
-# set_globals_full = _default_client.set_globals_full
+get_scan_globals = _default_client.get_scan_globals
+set_scan_globals = _default_client.set_scan_globals
+get_scan_enabled = _default_client.get_scan_enabled
+set_scan_enabled = _default_client.set_scan_enabled
+get_jit_enabled = _default_client.get_jit_enabled
+set_jit_enabled = _default_client.set_jit_enabled
 engage = _default_client.engage
 abort = _default_client.abort
 get_run_shots = _default_client.get_run_shots
@@ -171,19 +187,14 @@ error_in_globals = _default_client.error_in_globals
 is_output_folder_default = _default_client.is_output_folder_default
 reset_shot_output_folder = _default_client.reset_shot_output_folder
 queue_request_next = _default_client.queue_request_next
-queue_add_shot = _default_client.queue_add_shot
-queue_get_state = _default_client.queue_get_state
-queue_get_items = _default_client.queue_get_items
-queue_clear = _default_client.queue_clear
-queue_delete = _default_client.queue_delete
 notify_shot_complete = _default_client.notify_shot_complete
 
 if __name__ == '__main__':
     # Test
     import time
 
-    current = get_globals()
+    current = get_default_globals()
     print("get globals:", current)
-    print("set globals", set_globals({'test': current['test'] + 1}))
-    assert get_globals()['test'] == current['test'] + 1
+    print("set globals", set_default_globals({'test': current['test']}, raw=True))
+    assert get_default_globals()['test'] == current['test']
     engage()

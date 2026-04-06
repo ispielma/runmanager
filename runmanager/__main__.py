@@ -23,7 +23,7 @@ import desktop_app
 desktop_app.set_process_appid('runmanager')
 
 # Splash screen
-from labscript_utils.splash import Splash, get_qapplication, run_qapplication
+from labscript_utils.splash import Splash
 splash = Splash(os.path.join(os.path.dirname(__file__), 'runmanager.svg'))
 splash.show()
 
@@ -35,10 +35,9 @@ import threading
 import ast
 import pprint
 import traceback
-from pathlib import Path
-import copy
-import uuid
+import signal
 import unicodedata
+from pathlib import Path
 
 splash.update_text('importing matplotlib')
 # Evaluation of globals happens in a thread with the pylab module imported.
@@ -55,40 +54,24 @@ splash.update_text('importing labscript suite modules')
 from labscript_utils.ls_zprocess import zmq_get, ProcessTree, ZMQServer
 from labscript_utils.labconfig import (
     LabConfig,
-    launch_from_config,
     save_appconfig,
     load_appconfig,
 )
+from labscript_utils.file_utils import next_available_indexed_filepath
 from labscript_utils.setup_logging import setup_logging
 import labscript_utils.shared_drive as shared_drive
 from labscript_utils import dedent
-import labscript_utils.h5_lock
-from labscript_utils.qtwidgets.appconfig import (
-    AppConfigActions,
-    error_dialog as show_error_dialog,
-    question_dialog as ask_question_dialog,
-    select_directory,
-    select_open_file,
-    select_save_file,
-)
-from labscript_utils.splash import FirstPaintMainWindow
-import h5py
 from zprocess import raise_exception_in_thread
 import runmanager
 import runmanager.remote
 from runmanager.analysis_submission import AnalysisSubmission
 from runmanager.queueing import (
-    COMPILE_MODE_ON_REQUEST,
-    COMPILE_MODE_PRECOMPILE,
-    EMPTY_QUEUE_REPEAT_LAST,
-    EMPTY_QUEUE_REPEAT_STANDARD,
-    EMPTY_QUEUE_STOP,
-    QueueController,
-    QueueShotDescriptor,
+    COMPILE_MODE_EAGER,
+    COMPILE_MODE_LAZY,
+    EMPTY_QUEUE_DEFAULT_LABSCRIPT,
+    EMPTY_QUEUE_NOTHING,
+    QueueManager,
     RunmanagerQueueWidget,
-    SOURCE_KIND_QUEUE,
-    SOURCE_KIND_REPEAT_LAST,
-    SOURCE_KIND_REPEAT_STANDARD,
 )
 
 from qtutils import (
@@ -105,7 +88,6 @@ import qtutils.icons
 GLOBAL_MONOSPACE_FONT = "Consolas" if os.name == 'nt' else "Ubuntu Mono"
 
 runmanager_dir = Path(__file__).absolute().parent
-art_dir = runmanager_dir.parent.parent / 'labscript-suite' / 'art'
 
 process_tree = ProcessTree.instance()
 
@@ -142,16 +124,6 @@ def composite_colors(r0, g0, b0, a0, r1, g1, b1, a1):
     g = (a1 * g1 + (1 - a1) * a0 * g0) / a
     b = (a1 * b1 + (1 - a1) * a0 * b0) / a
     return [int(round(x)) for x in (r, g, b, 255 * a)]
-
-
-def set_icon_label_pixmap(label, icon_path, size=16):
-    icon = QtGui.QIcon(str(icon_path))
-    if icon.isNull():
-        label.clear()
-        return
-    label.setPixmap(icon.pixmap(size, size))
-    label.setMinimumSize(size, size)
-    label.setMaximumSize(size + 4, size + 4)
 
 
 def _relative_luminance(color):
@@ -210,6 +182,19 @@ def tooltip_with_hidden_unicode_warning(base_tooltip, text):
     if base_tooltip:
         return base_tooltip + '\n' + warning
     return warning
+
+
+@inmain_decorator()
+def error_dialog(message):
+    QtWidgets.QMessageBox.warning(app.ui, 'runmanager', message)
+
+
+@inmain_decorator()
+def question_dialog(message):
+    reply = QtWidgets.QMessageBox.question(app.ui, 'runmanager', message,
+                                       QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
+    return (reply == QtWidgets.QMessageBox.Yes)
+
 
 @contextlib.contextmanager
 def nested(*contextmanagers):
@@ -594,6 +579,14 @@ class AlternatingColorModel(QtGui.QStandardItemModel):
                 bg_color = self.normal_color
         else:
             bg_color = normal_brush.color()
+            if alternate:
+                # Modify alternate rows:
+                r, g, b, a = normal_rgb
+                alt_r = min(max(r + self.delta_r, 0), 255)
+                alt_g = min(max(g + self.delta_g, 0), 255)
+                alt_b = min(max(b + self.delta_b, 0), 255)
+                alt_a = min(max(a + self.delta_a, 0), 255)
+                bg_color = QtGui.QColor(alt_r, alt_g, alt_b, alt_a)
 
         # If parent is a TableView, we handle selection highlighting as part of the
         # background colours:
@@ -732,68 +725,64 @@ class ItemDelegate(QtWidgets.QStyledItemDelegate):
 
 class GroupTab(object):
     GLOBALS_COL_SCAN_ENABLED = 0
-    GLOBALS_COL_NAME = 1
-    GLOBALS_COL_DEFAULT = 2
-    GLOBALS_COL_SCAN = 3
-    GLOBALS_COL_UNITS = 4
-    GLOBALS_COL_EXPANSION = 5
+    GLOBALS_COL_JIT_ENABLED = 1
+    GLOBALS_COL_NAME = 2
+    GLOBALS_COL_DEFAULT = 3
+    GLOBALS_COL_SCAN = 4
+    GLOBALS_COL_UNITS = 5
+    GLOBALS_COL_EXPANSION = 6
 
     GLOBALS_ROLE_IS_DUMMY_ROW = QtCore.Qt.UserRole + 1
     GLOBALS_ROLE_SORT_DATA = QtCore.Qt.UserRole + 2
     GLOBALS_ROLE_PREVIOUS_TEXT = QtCore.Qt.UserRole + 3
     GLOBALS_ROLE_PREVIOUS_CHECKSTATE = QtCore.Qt.UserRole + 4
+    GLOBALS_ROLE_IS_BOOL = QtCore.Qt.UserRole + 5
 
     GLOBALS_DUMMY_ROW_TEXT = '<Click to add global>'
 
     def __init__(self, tabWidget, globals_file, group_name):
-
         self.tabWidget = tabWidget
 
         loader = UiLoader()
         loader.registerCustomWidget(TableView)
         self.ui = loader.load(os.path.join(runmanager_dir, 'group.ui'))
         self.ui.gridLayout.setColumnStretch(1, 1)
-
-        # Add the ui to the parent tabWidget:
         self.tabWidget.addTab(self.ui, group_name, closable=True)
 
         self.color_error, self.color_active = expression_cell_colors()
-
         self.set_file_and_group_name(globals_file, group_name)
 
         self.globals_model = AlternatingColorModel(view=self.ui.tableView_globals)
         self.globals_model.setHorizontalHeaderLabels(
-            ['Scan?', 'Name', 'Default', 'Scan', 'Units', 'Expansion']
+            ['Scan?', 'JIT?', 'Name', 'Default', 'Scan', 'Units', 'Expansion']
         )
         self.globals_model.setSortRole(self.GLOBALS_ROLE_SORT_DATA)
-
         self.ui.tableView_globals.setModel(self.globals_model)
         self.ui.tableView_globals.setSelectionBehavior(QtWidgets.QTableView.SelectRows)
         self.ui.tableView_globals.setSelectionMode(QtWidgets.QTableView.ExtendedSelection)
         self.ui.tableView_globals.setSortingEnabled(True)
-        # Make it so the user can just start typing on an item to edit:
-        self.ui.tableView_globals.setEditTriggers(QtWidgets.QTableView.AnyKeyPressed |
-                                                  QtWidgets.QTableView.EditKeyPressed)
+        self.ui.tableView_globals.setEditTriggers(
+            QtWidgets.QTableView.AnyKeyPressed | QtWidgets.QTableView.EditKeyPressed
+        )
         self.ui.tableView_globals.horizontalHeader().setStretchLastSection(False)
-        # Stretch the default column to fill available space:
         self.ui.tableView_globals.horizontalHeader().setSectionResizeMode(
             self.GLOBALS_COL_DEFAULT, QtWidgets.QHeaderView.Stretch
         )
-        # Setup stuff for a custom context menu:
         self.ui.tableView_globals.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
-        # Make the actions for the context menu:
         self.action_globals_delete_selected = QtWidgets.QAction(
-            QtGui.QIcon(':qtutils/fugue/minus'), 'Delete selected global(s)',  self.ui)
+            QtGui.QIcon(':qtutils/fugue/minus'), 'Delete selected global(s)', self.ui
+        )
         self.action_globals_set_selected_true = QtWidgets.QAction(
-            QtGui.QIcon(':qtutils/fugue/ui-check-box'), 'Set selected Booleans True',  self.ui)
+            QtGui.QIcon(':qtutils/fugue/ui-check-box'), 'Set selected Booleans True', self.ui
+        )
         self.action_globals_set_selected_false = QtWidgets.QAction(
-            QtGui.QIcon(':qtutils/fugue/ui-check-box-uncheck'), 'Set selected Booleans False',  self.ui)
-
+            QtGui.QIcon(':qtutils/fugue/ui-check-box-uncheck'),
+            'Set selected Booleans False',
+            self.ui,
+        )
         self.connect_signals()
 
-        # Populate the model with globals from the globals file:
         self.populate_model()
-        # Set sensible column widths:
         for col in range(self.globals_model.columnCount()):
             if col != self.GLOBALS_COL_DEFAULT:
                 self.ui.tableView_globals.resizeColumnToContents(col)
@@ -808,25 +797,28 @@ class GroupTab(object):
         if self.ui.tableView_globals.columnWidth(self.GLOBALS_COL_EXPANSION) < 100:
             self.ui.tableView_globals.setColumnWidth(self.GLOBALS_COL_EXPANSION, 100)
 
-        # Error state of tab
         self.tab_contains_errors = False
 
     def connect_signals(self):
         self.ui.tableView_globals.leftClicked.connect(self.on_tableView_globals_leftClicked)
-        self.ui.tableView_globals.customContextMenuRequested.connect(self.on_tableView_globals_context_menu_requested)
+        self.ui.tableView_globals.customContextMenuRequested.connect(
+            self.on_tableView_globals_context_menu_requested
+        )
         self.action_globals_set_selected_true.triggered.connect(
-            lambda: self.on_globals_set_selected_bools_triggered('True'))
+            lambda: self.on_globals_set_selected_bools_triggered('True')
+        )
         self.action_globals_set_selected_false.triggered.connect(
-            lambda: self.on_globals_set_selected_bools_triggered('False'))
-        self.action_globals_delete_selected.triggered.connect(self.on_globals_delete_selected_triggered)
+            lambda: self.on_globals_set_selected_bools_triggered('False')
+        )
+        self.action_globals_delete_selected.triggered.connect(
+            self.on_globals_delete_selected_triggered
+        )
         self.globals_model.itemChanged.connect(self.on_globals_model_item_changed)
-        # A context manager with which we can temporarily disconnect the above connection.
         self.globals_model_item_changed_disconnected = DisconnectContextManager(
-            self.globals_model.itemChanged, self.on_globals_model_item_changed)
+            self.globals_model.itemChanged, self.on_globals_model_item_changed
+        )
 
     def set_file_and_group_name(self, globals_file, group_name):
-        """Provided as a separate method so the main app can call it if the
-        group gets renamed"""
         self.globals_file = globals_file
         self.group_name = group_name
         self.ui.label_globals_file.setText(globals_file)
@@ -837,10 +829,7 @@ class GroupTab(object):
 
     def set_tab_icon(self, icon_string):
         index = self.tabWidget.indexOf(self.ui)
-        if icon_string is not None:
-            icon = QtGui.QIcon(icon_string)
-        else:
-            icon = QtGui.QIcon()
+        icon = QtGui.QIcon(icon_string) if icon_string is not None else QtGui.QIcon()
         if self.tabWidget.tabIcon(index).cacheKey() != icon.cacheKey():
             logger.info('setting tab icon')
             self.tabWidget.setTabIcon(index, icon)
@@ -855,15 +844,15 @@ class GroupTab(object):
                 default=details['default'],
                 units=details['units'],
                 scan_enabled=details['scan_enabled'],
+                jit_enabled=details['jit_enabled'],
                 scan=details['scan'],
                 expansion=details['expansion'],
             )
             self.globals_model.appendRow(row)
             self.update_scan_controls(name)
-            expansion_item = row[self.GLOBALS_COL_EXPANSION]
-            self.on_globals_model_expansion_changed(expansion_item)
+            self._update_boolean_state(name)
+            self.on_globals_model_expansion_changed(row[self.GLOBALS_COL_EXPANSION])
 
-        # Add the dummy item at the end:
         dummy_scan_enabled_item = QtGui.QStandardItem()
         dummy_scan_enabled_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
         dummy_scan_enabled_item.setFlags(QtCore.Qt.NoItemFlags)
@@ -874,22 +863,27 @@ class GroupTab(object):
         dummy_name_item.setToolTip('Click to add global')
         dummy_name_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
         dummy_name_item.setData(self.GLOBALS_DUMMY_ROW_TEXT, self.GLOBALS_ROLE_PREVIOUS_TEXT)
-        dummy_name_item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsEditable)  # Clears the 'selectable' flag
+        dummy_name_item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsEditable)
+
+        dummy_jit_enabled_item = QtGui.QStandardItem()
+        dummy_jit_enabled_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
+        dummy_jit_enabled_item.setFlags(QtCore.Qt.NoItemFlags)
+        dummy_jit_enabled_item.setToolTip('Click to add global')
 
         dummy_default_item = QtGui.QStandardItem()
         dummy_default_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
         dummy_default_item.setFlags(QtCore.Qt.NoItemFlags)
         dummy_default_item.setToolTip('Click to add global')
 
-        dummy_units_item = QtGui.QStandardItem()
-        dummy_units_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
-        dummy_units_item.setFlags(QtCore.Qt.NoItemFlags)
-        dummy_units_item.setToolTip('Click to add global')
-
         dummy_scan_item = QtGui.QStandardItem()
         dummy_scan_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
         dummy_scan_item.setFlags(QtCore.Qt.NoItemFlags)
         dummy_scan_item.setToolTip('Click to add global')
+
+        dummy_units_item = QtGui.QStandardItem()
+        dummy_units_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
+        dummy_units_item.setFlags(QtCore.Qt.NoItemFlags)
+        dummy_units_item.setToolTip('Click to add global')
 
         dummy_expansion_item = QtGui.QStandardItem()
         dummy_expansion_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
@@ -899,6 +893,7 @@ class GroupTab(object):
         self.globals_model.appendRow(
             [
                 dummy_scan_enabled_item,
+                dummy_jit_enabled_item,
                 dummy_name_item,
                 dummy_default_item,
                 dummy_scan_item,
@@ -906,8 +901,6 @@ class GroupTab(object):
                 dummy_expansion_item,
             ]
         )
-
-        # Sort by name:
         self.ui.tableView_globals.sortByColumn(self.GLOBALS_COL_NAME, QtCore.Qt.AscendingOrder)
 
     def make_global_row(
@@ -916,13 +909,11 @@ class GroupTab(object):
         default='',
         units='',
         scan_enabled=False,
+        jit_enabled=False,
         scan='',
         expansion='',
     ):
-        logger.debug('%s:%s - make global row: %s ' % (self.globals_file, self.group_name, name))
-        # We just set some data here, other stuff is set in
-        # self.update_parse_indication after runmanager has a chance to parse
-        # everything and get back to us about what that data should be.
+        logger.debug('%s:%s - make global row: %s ', self.globals_file, self.group_name, name)
 
         name_item = QtGui.QStandardItem(name)
         name_item.setData(name, self.GLOBALS_ROLE_SORT_DATA)
@@ -936,22 +927,25 @@ class GroupTab(object):
         default_item.setFont(QtGui.QFont(GLOBAL_MONOSPACE_FONT))
         self.update_expression_item_metadata(default_item, 'Evaluating...')
 
-        units_item = QtGui.QStandardItem(units)
-        units_item.setData(units, self.GLOBALS_ROLE_SORT_DATA)
-        units_item.setData(units, self.GLOBALS_ROLE_PREVIOUS_TEXT)
-        units_item.setToolTip('')
-
         scan_enabled_item = QtGui.QStandardItem()
         scan_enabled_item.setCheckable(True)
         scan_enabled_item.setCheckState(
             QtCore.Qt.Checked if scan_enabled else QtCore.Qt.Unchecked
         )
-        scan_enabled_item.setData(
-            scan_enabled, self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE
-        )
+        scan_enabled_item.setData(scan_enabled, self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE)
         scan_enabled_item.setData(scan_enabled, self.GLOBALS_ROLE_SORT_DATA)
         scan_enabled_item.setEditable(False)
         scan_enabled_item.setToolTip('Use the Scan expression when generating sequences.')
+
+        jit_enabled_item = QtGui.QStandardItem()
+        jit_enabled_item.setCheckable(True)
+        jit_enabled_item.setCheckState(
+            QtCore.Qt.Checked if jit_enabled else QtCore.Qt.Unchecked
+        )
+        jit_enabled_item.setData(jit_enabled, self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE)
+        jit_enabled_item.setData(jit_enabled, self.GLOBALS_ROLE_SORT_DATA)
+        jit_enabled_item.setEditable(False)
+        jit_enabled_item.setToolTip('Re-evaluate this global at compile time.')
 
         scan_item = QtGui.QStandardItem(scan)
         scan_item.setData(scan, self.GLOBALS_ROLE_SORT_DATA)
@@ -959,39 +953,45 @@ class GroupTab(object):
         scan_item.setFont(QtGui.QFont(GLOBAL_MONOSPACE_FONT))
         self.update_expression_item_metadata(scan_item, 'Used when Scan? is checked.')
 
+        units_item = QtGui.QStandardItem(units)
+        units_item.setData(units, self.GLOBALS_ROLE_SORT_DATA)
+        units_item.setData(units, self.GLOBALS_ROLE_PREVIOUS_TEXT)
+        units_item.setData(False, self.GLOBALS_ROLE_IS_BOOL)
+        units_item.setToolTip('')
+
         expansion_item = QtGui.QStandardItem(expansion)
         expansion_item.setData(expansion, self.GLOBALS_ROLE_SORT_DATA)
         expansion_item.setData(expansion, self.GLOBALS_ROLE_PREVIOUS_TEXT)
         expansion_item.setToolTip('')
 
-        row = [
+        return [
             scan_enabled_item,
+            jit_enabled_item,
             name_item,
             default_item,
             scan_item,
             units_item,
             expansion_item,
         ]
-        return row
 
     def on_tableView_globals_leftClicked(self, index):
         if qapplication.keyboardModifiers() != QtCore.Qt.NoModifier:
-            # Only handle mouseclicks with no keyboard modifiers.
             return
         item = self.globals_model.itemFromIndex(index)
-        # The 'name' item in the same row:
         name_index = index.sibling(index.row(), self.GLOBALS_COL_NAME)
         name_item = self.globals_model.itemFromIndex(name_index)
         global_name = name_item.text()
         if item.data(self.GLOBALS_ROLE_IS_DUMMY_ROW):
-            # They clicked on an 'add new global' row. Enter editing mode on
-            # the name item so they can enter a name for the new global:
             self.ui.tableView_globals.setCurrentIndex(name_index)
             self.ui.tableView_globals.edit(name_index)
-        elif item.column() != self.GLOBALS_COL_SCAN_ENABLED:
-            # Edit whatever it is:
-            if (self.ui.tableView_globals.currentIndex() != index
-                    or self.ui.tableView_globals.state() != QtWidgets.QTreeView.EditingState):
+        elif item.column() == self.GLOBALS_COL_UNITS and item.data(self.GLOBALS_ROLE_IS_BOOL):
+            active_item = self.get_active_value_item(global_name)
+            active_item.setText('False' if item.checkState() == QtCore.Qt.Checked else 'True')
+        elif item.column() not in (self.GLOBALS_COL_SCAN_ENABLED, self.GLOBALS_COL_JIT_ENABLED):
+            if (
+                self.ui.tableView_globals.currentIndex() != index
+                or self.ui.tableView_globals.state() != QtWidgets.QTreeView.EditingState
+            ):
                 self.ui.tableView_globals.setCurrentIndex(index)
                 self.ui.tableView_globals.edit(index)
 
@@ -1004,81 +1004,75 @@ class GroupTab(object):
             self.on_globals_model_units_changed(item)
         elif item.column() == self.GLOBALS_COL_SCAN_ENABLED:
             self.on_globals_model_scan_enabled_changed(item)
+        elif item.column() == self.GLOBALS_COL_JIT_ENABLED:
+            self.on_globals_model_jit_enabled_changed(item)
         elif item.column() == self.GLOBALS_COL_SCAN:
             self.on_globals_model_scan_changed(item)
         elif item.column() == self.GLOBALS_COL_EXPANSION:
             self.on_globals_model_expansion_changed(item)
 
     def on_globals_model_name_changed(self, item):
-        """Handles global renaming and creation of new globals due to the user
-        editing the <click to add global> item"""
         item_text = item.text()
         if item.data(self.GLOBALS_ROLE_IS_DUMMY_ROW):
             if item_text != self.GLOBALS_DUMMY_ROW_TEXT:
-                # The user has made a new global by editing the <click to add
-                # global> item
-                global_name = item_text
-                self.new_global(global_name)
+                self.new_global(item_text)
         else:
-            # User has renamed a global.
             new_global_name = item_text
             previous_global_name = item.data(self.GLOBALS_ROLE_PREVIOUS_TEXT)
-            # Ensure the name actually changed, rather than something else
-            # about the item:
             if new_global_name != previous_global_name:
                 self.rename_global(previous_global_name, new_global_name)
 
     def on_globals_model_default_changed(self, item):
-        index = item.index()
         new_default = item.text()
         previous_default = item.data(self.GLOBALS_ROLE_PREVIOUS_TEXT)
-        name_index = index.sibling(index.row(), self.GLOBALS_COL_NAME)
-        name_item = self.globals_model.itemFromIndex(name_index)
-        global_name = name_item.text()
-        # Ensure the value actually changed, rather than something else about
-        # the item:
+        global_name = self.globals_model.itemFromIndex(
+            item.index().sibling(item.index().row(), self.GLOBALS_COL_NAME)
+        ).text()
         if new_default != previous_default:
             self.change_global_default(global_name, previous_default, new_default)
 
     def on_globals_model_units_changed(self, item):
-        index = item.index()
         new_units = item.text()
         previous_units = item.data(self.GLOBALS_ROLE_PREVIOUS_TEXT)
-        name_index = index.sibling(index.row(), self.GLOBALS_COL_NAME)
-        name_item = self.globals_model.itemFromIndex(name_index)
-        global_name = name_item.text()
-        # Ensure the value actually changed, rather than something else about
-        # the item:
+        global_name = self.globals_model.itemFromIndex(
+            item.index().sibling(item.index().row(), self.GLOBALS_COL_NAME)
+        ).text()
         if new_units != previous_units:
             self.change_global_units(global_name, previous_units, new_units)
 
     def on_globals_model_scan_enabled_changed(self, item):
         new_state = item.checkState() == QtCore.Qt.Checked
         previous_state = item.data(self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE)
-        name_index = item.index().sibling(item.index().row(), self.GLOBALS_COL_NAME)
-        name_item = self.globals_model.itemFromIndex(name_index)
-        global_name = name_item.text()
+        global_name = self.globals_model.itemFromIndex(
+            item.index().sibling(item.index().row(), self.GLOBALS_COL_NAME)
+        ).text()
         if new_state != previous_state:
             self.change_global_scan_enabled(global_name, previous_state, new_state)
+
+    def on_globals_model_jit_enabled_changed(self, item):
+        new_state = item.checkState() == QtCore.Qt.Checked
+        previous_state = item.data(self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE)
+        global_name = self.globals_model.itemFromIndex(
+            item.index().sibling(item.index().row(), self.GLOBALS_COL_NAME)
+        ).text()
+        if new_state != previous_state:
+            self.change_global_jit_enabled(global_name, previous_state, new_state)
 
     def on_globals_model_scan_changed(self, item):
         new_scan = item.text()
         previous_scan = item.data(self.GLOBALS_ROLE_PREVIOUS_TEXT)
-        name_index = item.index().sibling(item.index().row(), self.GLOBALS_COL_NAME)
-        name_item = self.globals_model.itemFromIndex(name_index)
-        global_name = name_item.text()
+        global_name = self.globals_model.itemFromIndex(
+            item.index().sibling(item.index().row(), self.GLOBALS_COL_NAME)
+        ).text()
         if new_scan != previous_scan:
             self.change_global_scan(global_name, previous_scan, new_scan)
 
     def on_globals_model_expansion_changed(self, item):
-        index = item.index()
         new_expansion = item.text()
         previous_expansion = item.data(self.GLOBALS_ROLE_PREVIOUS_TEXT)
-        name_index = index.sibling(index.row(), self.GLOBALS_COL_NAME)
-        name_item = self.globals_model.itemFromIndex(name_index)
-        global_name = name_item.text()
-        # Don't want icon changing to recurse - which happens even if it is
-        # the same icon. So disconnect the signal temporarily:
+        global_name = self.globals_model.itemFromIndex(
+            item.index().sibling(item.index().row(), self.GLOBALS_COL_NAME)
+        ).text()
         with self.globals_model_item_changed_disconnected:
             scan_enabled_item = self.get_global_item_by_name(
                 global_name, self.GLOBALS_COL_SCAN_ENABLED
@@ -1090,18 +1084,23 @@ class GroupTab(object):
                 item.setData(None, QtCore.Qt.DecorationRole)
             elif new_expansion == 'outer':
                 item.setIcon(QtGui.QIcon(':qtutils/custom/outer'))
-                item.setToolTip('This global will be interpreted as a list of values, and will ' +
-                                'be outer producted with other lists to form a larger parameter space.')
+                item.setToolTip(
+                    'This global will be interpreted as a list of values, and will be '
+                    'outer producted with other lists to form a larger parameter space.'
+                )
             elif new_expansion:
                 item.setIcon(QtGui.QIcon(':qtutils/custom/zip'))
-                item.setToolTip('This global will be interpreted as a list of values, and will ' +
-                                'be iterated over in lock-step with other globals in the ' +
-                                '\'%s\' zip group.' % new_expansion)
+                item.setToolTip(
+                    'This global will be interpreted as a list of values, and will be '
+                    "iterated over in lock-step with other globals in the '%s' zip group."
+                    % new_expansion
+                )
             else:
                 item.setData(None, QtCore.Qt.DecorationRole)
-                item.setToolTip('This global will be interpreted as a single value and passed to compilation as-is.')
-        # Ensure the value actually changed, rather than something else about
-        # the item:
+                item.setToolTip(
+                    'This global will be interpreted as a single value and passed to '
+                    'compilation as-is.'
+                )
         if new_expansion != previous_expansion:
             self.change_global_expansion(global_name, previous_expansion, new_expansion)
 
@@ -1116,82 +1115,99 @@ class GroupTab(object):
         selected_indexes = self.ui.tableView_globals.selectedIndexes()
         selected_items = (self.globals_model.itemFromIndex(index) for index in selected_indexes)
         name_items = [item for item in selected_items if item.column() == self.GLOBALS_COL_NAME]
-        # If multiple selected, show 'delete n groups?' message. Otherwise,
-        # pass confirm=True to self.delete_global so it can show the regular
-        # message.
-        confirm_multiple = (len(name_items) > 1)
-        if confirm_multiple:
-            if not ask_question_dialog(app.ui, 'runmanager', "Delete %d globals?" % len(name_items)):
-                return
+        confirm_multiple = len(name_items) > 1
+        if confirm_multiple and not question_dialog("Delete %d globals?" % len(name_items)):
+            return
         for item in name_items:
-            global_name = item.text()
-            self.delete_global(global_name, confirm=not confirm_multiple)
+            self.delete_global(item.text(), confirm=not confirm_multiple)
 
     def on_globals_set_selected_bools_triggered(self, state):
         selected_indexes = self.ui.tableView_globals.selectedIndexes()
         selected_items = [self.globals_model.itemFromIndex(index) for index in selected_indexes]
         name_items = [item for item in selected_items if item.column() == self.GLOBALS_COL_NAME]
         for name_item in name_items:
-            global_name = name_item.text()
-            scan_enabled_item = self.get_global_item_by_name(
-                global_name, self.GLOBALS_COL_SCAN_ENABLED
-            )
-            target_column = (
-                self.GLOBALS_COL_SCAN
-                if scan_enabled_item.checkState() == QtCore.Qt.Checked
-                else self.GLOBALS_COL_DEFAULT
-            )
-            target_item = self.get_global_item_by_name(global_name, target_column)
-            target_item.setText(state)
+            self.get_active_value_item(name_item.text()).setText(state)
 
     def close(self):
-        # It is up to the main runmanager class to drop references to this
-        # instance before or after calling this method, so that after the
-        # tabWidget no longer owns our widgets, both the widgets and the
-        # instance will be garbage collected.
-        index = self.tabWidget.indexOf(self.ui)
-        self.tabWidget.removeTab(index)
+        self.tabWidget.removeTab(self.tabWidget.indexOf(self.ui))
 
     def get_global_item_by_name(self, global_name, column, previous_name=None):
-        """Returns an item from the row representing a global in the globals model.
-        Which item is returned is set by the column argument."""
         possible_name_items = self.globals_model.findItems(global_name, column=self.GLOBALS_COL_NAME)
         if previous_name is not None:
-            # Filter by previous name, useful for telling rows apart when a
-            # rename is in progress and two rows may temporarily contain the
-            # same name (though the rename code with throw an error and revert
-            # it).
-            possible_name_items = [item for item in possible_name_items
-                                   if item.data(self.GLOBALS_ROLE_PREVIOUS_TEXT) == previous_name]
+            possible_name_items = [
+                item
+                for item in possible_name_items
+                if item.data(self.GLOBALS_ROLE_PREVIOUS_TEXT) == previous_name
+            ]
         elif global_name != self.GLOBALS_DUMMY_ROW_TEXT:
-            # Don't return the dummy item unless they asked for it explicitly
-            # - if a new global is being created, its name might be
-            # simultaneously present in its own row and the dummy row too.
-            possible_name_items = [item for item in possible_name_items
-                                   if not item.data(self.GLOBALS_ROLE_IS_DUMMY_ROW)]
+            possible_name_items = [
+                item
+                for item in possible_name_items
+                if not item.data(self.GLOBALS_ROLE_IS_DUMMY_ROW)
+            ]
         if len(possible_name_items) > 1:
             raise LookupError('Multiple items found')
-        elif not possible_name_items:
+        if not possible_name_items:
             raise LookupError('No item found')
         name_item = possible_name_items[0]
-        name_index = name_item.index()
-        # Found the name item, get the sibling item for the column requested:
-        item_index = name_index.sibling(name_index.row(), column)
-        item = self.globals_model.itemFromIndex(item_index)
-        return item
+        return self.globals_model.itemFromIndex(
+            name_item.index().sibling(name_item.index().row(), column)
+        )
 
     def ensure_editable_globals_file(self):
         self.globals_file = app.ensure_editable_globals_file(self.globals_file, parent=self.ui)
         return self.globals_file
 
+    def get_active_value_item(self, global_name):
+        scan_enabled_item = self.get_global_item_by_name(
+            global_name, self.GLOBALS_COL_SCAN_ENABLED
+        )
+        target_column = (
+            self.GLOBALS_COL_SCAN
+            if scan_enabled_item.checkState() == QtCore.Qt.Checked
+            else self.GLOBALS_COL_DEFAULT
+        )
+        return self.get_global_item_by_name(global_name, target_column)
+
+    def _update_boolean_state(self, global_name):
+        active_item = self.get_active_value_item(global_name)
+        units_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_UNITS)
+        value = active_item.text()
+        if value == 'True':
+            units_item.setData(True, self.GLOBALS_ROLE_IS_BOOL)
+            units_item.setText('Bool')
+            units_item.setData('!1', self.GLOBALS_ROLE_SORT_DATA)
+            units_item.setEditable(False)
+            units_item.setCheckState(QtCore.Qt.Checked)
+            units_item.setBackground(QtGui.QBrush(QtGui.QColor('#63F731')))
+        elif value == 'False':
+            units_item.setData(True, self.GLOBALS_ROLE_IS_BOOL)
+            units_item.setText('Bool')
+            units_item.setData('!0', self.GLOBALS_ROLE_SORT_DATA)
+            units_item.setEditable(False)
+            units_item.setCheckState(QtCore.Qt.Unchecked)
+            units_item.setBackground(QtGui.QBrush(QtGui.QColor('#608060')))
+        else:
+            was_bool = units_item.data(self.GLOBALS_ROLE_IS_BOOL)
+            units_item.setData(False, self.GLOBALS_ROLE_IS_BOOL)
+            units_item.setEditable(True)
+            units_item.setData(None, QtCore.Qt.CheckStateRole)
+            units_item.setData(None, QtCore.Qt.BackgroundRole)
+            if was_bool and units_item.text() == 'Bool':
+                units_item.setText('')
+
     def update_scan_controls(self, global_name):
         scan_enabled_item = self.get_global_item_by_name(
             global_name, self.GLOBALS_COL_SCAN_ENABLED
+        )
+        jit_enabled_item = self.get_global_item_by_name(
+            global_name, self.GLOBALS_COL_JIT_ENABLED
         )
         default_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_DEFAULT)
         scan_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_SCAN)
         expansion_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_EXPANSION)
         scan_enabled = scan_enabled_item.checkState() == QtCore.Qt.Checked
+        jit_enabled = jit_enabled_item.checkState() == QtCore.Qt.Checked
         default_tooltip = 'Used for standard shots and when Scan? is unchecked.'
         scan_tooltip = (
             'Expression used when Scan? is checked.'
@@ -1201,6 +1217,12 @@ class GroupTab(object):
         with self.globals_model_item_changed_disconnected:
             scan_enabled_item.setData(scan_enabled, self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE)
             scan_enabled_item.setData(scan_enabled, self.GLOBALS_ROLE_SORT_DATA)
+            jit_enabled_item.setData(jit_enabled, self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE)
+            jit_enabled_item.setData(jit_enabled, self.GLOBALS_ROLE_SORT_DATA)
+            if scan_enabled:
+                jit_enabled_item.setToolTip('Disable Scan? to enable JIT?.')
+            else:
+                jit_enabled_item.setToolTip('Re-evaluate this global at compile time.')
             scan_item.setEditable(True)
             if scan_enabled:
                 expansion_item.setEditable(True)
@@ -1213,14 +1235,8 @@ class GroupTab(object):
                 expansion_item.setData('', self.GLOBALS_ROLE_SORT_DATA)
                 expansion_item.setData(None, QtCore.Qt.DecorationRole)
                 expansion_item.setToolTip('Enable Scan? to set an expansion mode.')
-            self.update_expression_item_metadata(
-                default_item,
-                default_tooltip,
-            )
-            self.update_expression_item_metadata(
-                scan_item,
-                scan_tooltip,
-            )
+            self.update_expression_item_metadata(default_item, default_tooltip)
+            self.update_expression_item_metadata(scan_item, scan_tooltip)
         active_item = scan_item if scan_enabled else default_item
         active_tooltip = scan_tooltip if scan_enabled else default_tooltip
         if not active_item.text().strip():
@@ -1236,19 +1252,13 @@ class GroupTab(object):
     def update_expression_backgrounds(self, global_name, error=False):
         default_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_DEFAULT)
         scan_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_SCAN)
-        scan_enabled_item = self.get_global_item_by_name(
-            global_name, self.GLOBALS_COL_SCAN_ENABLED
-        )
-        active_item = (
-            scan_item
-            if scan_enabled_item.checkState() == QtCore.Qt.Checked
-            else default_item
-        )
+        active_item = self.get_active_value_item(global_name)
         inactive_item = default_item if active_item is scan_item else scan_item
         with self.globals_model_item_changed_disconnected:
             inactive_item.setData(None, QtCore.Qt.BackgroundRole)
-            color = self.color_error if error else self.color_active
-            active_item.setBackground(QtGui.QBrush(QtGui.QColor(color)))
+            active_item.setBackground(
+                QtGui.QBrush(QtGui.QColor(self.color_error if error else self.color_active))
+            )
 
     def update_expression_item_metadata(self, item, base_tooltip, icon=None):
         tooltip = tooltip_with_hidden_unicode_warning(base_tooltip, item.text())
@@ -1263,50 +1273,53 @@ class GroupTab(object):
 
     def do_model_sort(self):
         header = self.ui.tableView_globals.horizontalHeader()
-        sort_column = header.sortIndicatorSection()
-        sort_order = header.sortIndicatorOrder()
-        self.ui.tableView_globals.sortByColumn(sort_column, sort_order)
+        self.ui.tableView_globals.sortByColumn(
+            header.sortIndicatorSection(), header.sortIndicatorOrder()
+        )
 
     def new_global(self, global_name):
         logger.info('%s:%s - new global: %s', self.globals_file, self.group_name, global_name)
-        item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_NAME,
-                                            previous_name=self.GLOBALS_DUMMY_ROW_TEXT)
+        item = self.get_global_item_by_name(
+            global_name, self.GLOBALS_COL_NAME, previous_name=self.GLOBALS_DUMMY_ROW_TEXT
+        )
         try:
             self.ensure_editable_globals_file()
             runmanager.new_global(self.globals_file, self.group_name, global_name)
         except Exception as e:
-            show_error_dialog(app.ui, 'runmanager', str(e))
+            error_dialog(str(e))
         else:
-            # Insert the newly created global into the model:
             global_row = self.make_global_row(global_name)
-            last_index = self.globals_model.rowCount()
-            # Insert it as the row before the last (dummy) row:
-            self.globals_model.insertRow(last_index - 1, global_row)
+            self.globals_model.insertRow(self.globals_model.rowCount() - 1, global_row)
             self.update_scan_controls(global_name)
+            self._update_boolean_state(global_name)
             self.do_model_sort()
-            # Go into edit mode on the 'default' item:
             default_item = self.get_global_item_by_name(
                 global_name, self.GLOBALS_COL_DEFAULT, previous_name=global_name
             )
-            default_item_index = default_item.index()
-            self.ui.tableView_globals.setCurrentIndex(default_item_index)
-            self.ui.tableView_globals.edit(default_item_index)
+            self.ui.tableView_globals.setCurrentIndex(default_item.index())
+            self.ui.tableView_globals.edit(default_item.index())
             self.globals_changed()
         finally:
-            # Set the dummy row's text back ready for another group to be created:
             item.setText(self.GLOBALS_DUMMY_ROW_TEXT)
 
     def rename_global(self, previous_global_name, new_global_name):
-        logger.info('%s:%s - rename global: %s -> %s',
-                    self.globals_file, self.group_name, previous_global_name, new_global_name)
-        item = self.get_global_item_by_name(new_global_name, self.GLOBALS_COL_NAME,
-                                            previous_name=previous_global_name)
+        logger.info(
+            '%s:%s - rename global: %s -> %s',
+            self.globals_file,
+            self.group_name,
+            previous_global_name,
+            new_global_name,
+        )
+        item = self.get_global_item_by_name(
+            new_global_name, self.GLOBALS_COL_NAME, previous_name=previous_global_name
+        )
         try:
             self.ensure_editable_globals_file()
-            runmanager.rename_global(self.globals_file, self.group_name, previous_global_name, new_global_name)
+            runmanager.rename_global(
+                self.globals_file, self.group_name, previous_global_name, new_global_name
+            )
         except Exception as e:
-            show_error_dialog(app.ui, 'runmanager', str(e))
-            # Set the item text back to the old name, since the rename failed:
+            error_dialog(str(e))
             item.setText(previous_global_name)
         else:
             item.setData(new_global_name, self.GLOBALS_ROLE_PREVIOUS_TEXT)
@@ -1315,21 +1328,26 @@ class GroupTab(object):
             item.setToolTip(new_global_name)
             self.globals_changed()
             default_item = self.get_global_item_by_name(new_global_name, self.GLOBALS_COL_DEFAULT)
-            default_value = default_item.text()
-            if not default_value and self.ui.tableView_globals.state() != QtWidgets.QAbstractItemView.EditingState:
-                default_item_index = default_item.index()
-                self.ui.tableView_globals.setCurrentIndex(default_item_index)
-                self.ui.tableView_globals.edit(default_item_index)
+            if (
+                not default_item.text()
+                and self.ui.tableView_globals.state() != QtWidgets.QAbstractItemView.EditingState
+            ):
+                self.ui.tableView_globals.setCurrentIndex(default_item.index())
+                self.ui.tableView_globals.edit(default_item.index())
             else:
-                # If this changed the sort order, ensure the item is still visible:
                 scroll_view_to_row_if_current(self.ui.tableView_globals, item)
 
     def change_global_default(self, global_name, previous_default, new_default, interactive=True):
-        logger.info('%s:%s - change global default: %s = %s -> %s' %
-                    (self.globals_file, self.group_name, global_name, previous_default, new_default))
+        logger.info(
+            '%s:%s - change global default: %s = %s -> %s',
+            self.globals_file,
+            self.group_name,
+            global_name,
+            previous_default,
+            new_default,
+        )
         item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_DEFAULT)
         if not interactive:
-            # Default was not set interactively by the user, it is up to us to set it:
             with self.globals_model_item_changed_disconnected:
                 item.setText(new_default)
         previous_background = item.background()
@@ -1358,8 +1376,7 @@ class GroupTab(object):
             runmanager.set_value(self.globals_file, self.group_name, global_name, new_default)
         except Exception as e:
             if interactive:
-                show_error_dialog(app.ui, 'runmanager', str(e))
-            # Set the item text back to the old name, since the change failed:
+                error_dialog(str(e))
             with self.globals_model_item_changed_disconnected:
                 item.setText(previous_default)
                 item.setData(previous_default, self.GLOBALS_ROLE_PREVIOUS_TEXT)
@@ -1371,39 +1388,43 @@ class GroupTab(object):
         else:
             self.do_model_sort()
             self.update_expression_item_metadata(item, 'Evaluating...')
+            self._update_boolean_state(global_name)
             self.globals_changed()
             if not interactive:
                 return
             units_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_UNITS)
-            units = units_item.text()
-            if not units and self.ui.tableView_globals.state() != QtWidgets.QAbstractItemView.EditingState:
-                # Go into editing the units item automatically if not already in edit mode:
-                units_item_index = units_item.index()
-                self.ui.tableView_globals.setCurrentIndex(units_item_index)
-                self.ui.tableView_globals.edit(units_item_index)
+            if (
+                not units_item.text()
+                and self.ui.tableView_globals.state() != QtWidgets.QAbstractItemView.EditingState
+            ):
+                self.ui.tableView_globals.setCurrentIndex(units_item.index())
+                self.ui.tableView_globals.edit(units_item.index())
             else:
-                # If this changed the sort order, ensure the item is still visible:
                 scroll_view_to_row_if_current(self.ui.tableView_globals, item)
 
     def change_global_units(self, global_name, previous_units, new_units):
-        logger.info('%s:%s - change units: %s = %s -> %s' %
-                    (self.globals_file, self.group_name, global_name, previous_units, new_units))
+        logger.info(
+            '%s:%s - change units: %s = %s -> %s',
+            self.globals_file,
+            self.group_name,
+            global_name,
+            previous_units,
+            new_units,
+        )
         item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_UNITS)
         try:
             self.ensure_editable_globals_file()
             runmanager.set_units(self.globals_file, self.group_name, global_name, new_units)
         except Exception as e:
-            show_error_dialog(app.ui, 'runmanager', str(e))
-            # Set the item text back to the old units, since the change failed:
+            error_dialog(str(e))
             item.setText(previous_units)
         else:
             item.setData(new_units, self.GLOBALS_ROLE_PREVIOUS_TEXT)
             item.setData(new_units, self.GLOBALS_ROLE_SORT_DATA)
             self.do_model_sort()
-            # If this changed the sort order, ensure the item is still visible:
             scroll_view_to_row_if_current(self.ui.tableView_globals, item)
 
-    def change_global_scan_enabled(self, global_name, previous_state, new_state):
+    def change_global_scan_enabled(self, global_name, previous_state, new_state, interactive=True):
         logger.info(
             '%s:%s - change global scan enabled: %s = %s -> %s',
             self.globals_file,
@@ -1413,112 +1434,169 @@ class GroupTab(object):
             new_state,
         )
         item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_SCAN_ENABLED)
+        jit_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_JIT_ENABLED)
         try:
             self.ensure_editable_globals_file()
-            runmanager.set_scan_enabled(self.globals_file, self.group_name, global_name, new_state)
+            runmanager.set_scan_enabled(
+                self.globals_file, self.group_name, global_name, new_state
+            )
         except Exception as e:
-            show_error_dialog(app.ui, 'runmanager', str(e))
+            if interactive:
+                error_dialog(str(e))
             with self.globals_model_item_changed_disconnected:
                 item.setCheckState(QtCore.Qt.Checked if previous_state else QtCore.Qt.Unchecked)
                 item.setData(previous_state, self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE)
                 item.setData(previous_state, self.GLOBALS_ROLE_SORT_DATA)
             self.update_scan_controls(global_name)
+            if not interactive:
+                raise
         else:
-            item.setData(new_state, self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE)
-            item.setData(new_state, self.GLOBALS_ROLE_SORT_DATA)
-            if new_state:
-                expansion_item = self.get_global_item_by_name(
-                    global_name, self.GLOBALS_COL_EXPANSION
-                )
+            with self.globals_model_item_changed_disconnected:
+                item.setCheckState(QtCore.Qt.Checked if new_state else QtCore.Qt.Unchecked)
+                item.setData(new_state, self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE)
+                item.setData(new_state, self.GLOBALS_ROLE_SORT_DATA)
+                if new_state:
+                    jit_item.setCheckState(QtCore.Qt.Unchecked)
+                    jit_item.setData(False, self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE)
+                    jit_item.setData(False, self.GLOBALS_ROLE_SORT_DATA)
+                expansion_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_EXPANSION)
                 if not expansion_item.text():
-                    with self.globals_model_item_changed_disconnected:
-                        expansion_item.setText('outer')
-                        expansion_item.setData('outer', self.GLOBALS_ROLE_PREVIOUS_TEXT)
-                        expansion_item.setData('outer', self.GLOBALS_ROLE_SORT_DATA)
+                    expansion_item.setText('outer')
+                    expansion_item.setData('outer', self.GLOBALS_ROLE_PREVIOUS_TEXT)
+                    expansion_item.setData('outer', self.GLOBALS_ROLE_SORT_DATA)
             self.update_scan_controls(global_name)
+            self._update_boolean_state(global_name)
             if new_state:
-                expansion_item = self.get_global_item_by_name(
-                    global_name, self.GLOBALS_COL_EXPANSION
+                self.on_globals_model_expansion_changed(
+                    self.get_global_item_by_name(global_name, self.GLOBALS_COL_EXPANSION)
                 )
-                self.on_globals_model_expansion_changed(expansion_item)
             self.do_model_sort()
             self.globals_changed()
-            if new_state:
-                scan_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_SCAN)
-                if (
-                    not scan_item.text()
-                    and self.ui.tableView_globals.state() != QtWidgets.QAbstractItemView.EditingState
-                ):
-                    self.ui.tableView_globals.setCurrentIndex(scan_item.index())
-                    self.ui.tableView_globals.edit(scan_item.index())
+            if not interactive:
+                return
+            focus_item = self.get_active_value_item(global_name)
+            if (
+                new_state
+                and not focus_item.text()
+                and self.ui.tableView_globals.state() != QtWidgets.QAbstractItemView.EditingState
+            ):
+                self.ui.tableView_globals.setCurrentIndex(focus_item.index())
+                self.ui.tableView_globals.edit(focus_item.index())
             else:
-                default_item = self.get_global_item_by_name(
-                    global_name, self.GLOBALS_COL_DEFAULT
-                )
-                self.ui.tableView_globals.setCurrentIndex(default_item.index())
                 scroll_view_to_row_if_current(self.ui.tableView_globals, item)
 
-    def change_global_scan(self, global_name, previous_scan, new_scan):
-        logger.info('%s:%s - change global scan: %s = %s -> %s' %
-                    (self.globals_file, self.group_name, global_name, previous_scan, new_scan))
+    def change_global_jit_enabled(self, global_name, previous_state, new_state, interactive=True):
+        logger.info(
+            '%s:%s - change global jit enabled: %s = %s -> %s',
+            self.globals_file,
+            self.group_name,
+            global_name,
+            previous_state,
+            new_state,
+        )
+        item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_JIT_ENABLED)
+        scan_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_SCAN_ENABLED)
+        try:
+            self.ensure_editable_globals_file()
+            runmanager.set_jit_enabled(
+                self.globals_file, self.group_name, global_name, new_state
+            )
+        except Exception as e:
+            if interactive:
+                error_dialog(str(e))
+            with self.globals_model_item_changed_disconnected:
+                item.setCheckState(QtCore.Qt.Checked if previous_state else QtCore.Qt.Unchecked)
+                item.setData(previous_state, self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE)
+                item.setData(previous_state, self.GLOBALS_ROLE_SORT_DATA)
+            self.update_scan_controls(global_name)
+            if not interactive:
+                raise
+        else:
+            with self.globals_model_item_changed_disconnected:
+                item.setCheckState(QtCore.Qt.Checked if new_state else QtCore.Qt.Unchecked)
+                item.setData(new_state, self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE)
+                item.setData(new_state, self.GLOBALS_ROLE_SORT_DATA)
+                if new_state:
+                    scan_item.setCheckState(QtCore.Qt.Unchecked)
+                    scan_item.setData(False, self.GLOBALS_ROLE_PREVIOUS_CHECKSTATE)
+                    scan_item.setData(False, self.GLOBALS_ROLE_SORT_DATA)
+            self.update_scan_controls(global_name)
+            self.do_model_sort()
+            self.globals_changed()
+            if not interactive:
+                return
+            scroll_view_to_row_if_current(self.ui.tableView_globals, item)
+
+    def change_global_scan(self, global_name, previous_scan, new_scan, interactive=True):
+        logger.info(
+            '%s:%s - change global scan: %s = %s -> %s',
+            self.globals_file,
+            self.group_name,
+            global_name,
+            previous_scan,
+            new_scan,
+        )
         item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_SCAN)
         try:
             self.ensure_editable_globals_file()
             runmanager.set_scan(self.globals_file, self.group_name, global_name, new_scan)
         except Exception as e:
-            show_error_dialog(app.ui, 'runmanager', str(e))
+            if interactive:
+                error_dialog(str(e))
             item.setText(previous_scan)
+            if not interactive:
+                raise
         else:
             item.setData(new_scan, self.GLOBALS_ROLE_PREVIOUS_TEXT)
             item.setData(new_scan, self.GLOBALS_ROLE_SORT_DATA)
             self.do_model_sort()
             self.update_expression_item_metadata(item, 'Evaluating...')
+            self._update_boolean_state(global_name)
             self.globals_changed()
+            if not interactive:
+                return
             scroll_view_to_row_if_current(self.ui.tableView_globals, item)
 
     def change_global_expansion(self, global_name, previous_expansion, new_expansion):
-        logger.info('%s:%s - change expansion: %s = %s -> %s' %
-                    (self.globals_file, self.group_name, global_name, previous_expansion, new_expansion))
+        logger.info(
+            '%s:%s - change expansion: %s = %s -> %s',
+            self.globals_file,
+            self.group_name,
+            global_name,
+            previous_expansion,
+            new_expansion,
+        )
         item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_EXPANSION)
         try:
             self.ensure_editable_globals_file()
-            runmanager.set_expansion(self.globals_file, self.group_name, global_name, new_expansion)
+            runmanager.set_expansion(
+                self.globals_file, self.group_name, global_name, new_expansion
+            )
         except Exception as e:
-            show_error_dialog(app.ui, 'runmanager', str(e))
-            # Set the item text back to the old units, since the change failed:
+            error_dialog(str(e))
             item.setText(previous_expansion)
         else:
             item.setData(new_expansion, self.GLOBALS_ROLE_PREVIOUS_TEXT)
             item.setData(new_expansion, self.GLOBALS_ROLE_SORT_DATA)
             self.do_model_sort()
             self.globals_changed()
-            # If this changed the sort order, ensure the item is still visible:
             scroll_view_to_row_if_current(self.ui.tableView_globals, item)
 
     def globals_changed(self):
-        """Called whenever something about a global has changed. call
-        app.globals_changed to inform the main application that it needs to
-        parse globals again. self.update_parse_indication will be called by
-        the main app when parsing is done, and will set the colours and
-        tooltips appropriately"""
-        # Tell the main app about it:
         app.globals_changed()
 
     def delete_global(self, global_name, confirm=True):
-        logger.info('%s:%s - delete global: %s' %
-                    (self.globals_file, self.group_name, global_name))
-        if confirm:
-            if not ask_question_dialog(app.ui, 'runmanager', "Delete the global '%s'?" % global_name):
-                return
+        logger.info('%s:%s - delete global: %s', self.globals_file, self.group_name, global_name)
+        if confirm and not question_dialog("Delete the global '%s'?" % global_name):
+            return
         self.ensure_editable_globals_file()
         runmanager.delete_global(self.globals_file, self.group_name, global_name)
-        # Find the entry for this global in self.globals_model and remove it:
-        name_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_NAME)
-        self.globals_model.removeRow(name_item.row())
+        self.globals_model.removeRow(
+            self.get_global_item_by_name(global_name, self.GLOBALS_COL_NAME).row()
+        )
         self.globals_changed()
 
     def update_parse_indication(self, active_groups, sequence_globals, evaled_globals):
-        # Check that we are an active group:
         if self.group_name in active_groups and active_groups[self.group_name] == self.globals_file:
             self.tab_contains_errors = False
             for i in range(self.globals_model.rowCount()):
@@ -1538,7 +1616,7 @@ class GroupTab(object):
                 )
                 inactive_item = default_item if active_item is scan_item else scan_item
 
-                ignore, ignore, expansion = sequence_globals[self.group_name][global_name]
+                _, _, expansion = sequence_globals[self.group_name][global_name]
                 with self.globals_model_item_changed_disconnected:
                     if expansion_item.data(self.GLOBALS_ROLE_PREVIOUS_TEXT) != expansion:
                         expansion_item.setData(expansion, self.GLOBALS_ROLE_PREVIOUS_TEXT)
@@ -1550,28 +1628,21 @@ class GroupTab(object):
                     if active_item is scan_item
                     else 'Used only when Scan? is checked.'
                 )
-                self.update_expression_item_metadata(
-                    inactive_item, inactive_base_tooltip
-                )
+                self.update_expression_item_metadata(inactive_item, inactive_base_tooltip)
                 if isinstance(value, Exception):
                     self.update_expression_backgrounds(global_name, error=True)
-                    tooltip = '%s: %s' % (value.__class__.__name__, str(value))
                     self.update_expression_item_metadata(
                         active_item,
-                        tooltip,
+                        '%s: %s' % (value.__class__.__name__, str(value)),
                         QtGui.QIcon(':qtutils/fugue/exclamation'),
                     )
                     self.tab_contains_errors = True
                 else:
                     self.update_expression_backgrounds(global_name)
-                    tooltip = repr(value)
-                    self.update_expression_item_metadata(active_item, tooltip)
-            if self.tab_contains_errors:
-                self.set_tab_icon(':qtutils/fugue/exclamation')
-            else:
-                self.set_tab_icon(None)
+                    self.update_expression_item_metadata(active_item, repr(value))
+                self._update_boolean_state(global_name)
+            self.set_tab_icon(':qtutils/fugue/exclamation' if self.tab_contains_errors else None)
         else:
-            # Clear everything:
             self.set_tab_icon(None)
             for row in range(self.globals_model.rowCount()):
                 default_item = self.globals_model.item(row, self.GLOBALS_COL_DEFAULT)
@@ -1580,18 +1651,31 @@ class GroupTab(object):
                 scan_item = self.globals_model.item(row, self.GLOBALS_COL_SCAN)
                 for item in (default_item, scan_item):
                     self.update_expression_item_metadata(item, 'Group inactive')
-                self.update_expression_backgrounds(self.globals_model.item(row, self.GLOBALS_COL_NAME).text())
+                self.update_expression_backgrounds(
+                    self.globals_model.item(row, self.GLOBALS_COL_NAME).text()
+                )
 
 
-class RunmanagerMainWindow(FirstPaintMainWindow):
+class RunmanagerMainWindow(QtWidgets.QMainWindow):
+    # A signal to show that the window is shown and painted.
+    firstPaint = Signal()
+
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        QtWidgets.QMainWindow.__init__(self, *args, **kwargs)
+        self._previously_painted = False
 
     def closeEvent(self, event):
         if app.on_close_event():
-            return super().closeEvent(event)
+            return QtWidgets.QMainWindow.closeEvent(self, event)
         else:
             event.ignore()
+
+    def paintEvent(self, event):
+        result = QtWidgets.QMainWindow.paintEvent(self, event)
+        if not self._previously_painted:
+            self._previously_painted = True
+            self.firstPaint.emit()
+        return result
 
 
 class PoppedOutOutputBoxWindow(QtWidgets.QDialog):
@@ -1627,8 +1711,6 @@ class RunManager(object):
         self.ui = loader.load(
             os.path.join(runmanager_dir, 'main.ui'), RunmanagerMainWindow()
         )
-        self.move_queue_tab_to_front()
-        self.setup_shot_target_controls()
 
         self.output_box = OutputBox(self.ui.verticalLayout_output_tab)
 
@@ -1638,8 +1720,8 @@ class RunManager(object):
         self.output_popout_button.setIcon(QtGui.QIcon(':/qtutils/fugue/arrow-out'))
         self.output_popout_button.setToolTip('Toggle whether the output box is in a separate window')
         self.ui.tabWidget.tabBar().setTabButton(output_tab_index, QtWidgets.QTabBar.RightSide, self.output_popout_button)
-        # Fix the built-in tabs in place:
-        for index in range(self.ui.tabWidget.count()):
+        # Fix the first three tabs in place:
+        for index in range(3):
             self.ui.tabWidget.tabBar().setMovable(False, index=index)
         # Whether or not the output box is currently popped out:
         self.output_box_is_popped_out = False
@@ -1649,14 +1731,23 @@ class RunManager(object):
         self.output_box_window_verticalLayout.setContentsMargins(0, 0, 0, 0)
         self.output_box_window.setWindowTitle('runmanager output')
         self.output_box_window.resize(800, 1000)
+        # A flag telling the compilation worker to abort:
+        self.compilation_aborted = threading.Event()
         self.setup_config()
-        self.queue_controller = QueueController(
-            on_items_discarded=self.delete_queue_placeholder_files,
-        )
         self.setup_axes_tab()
         self.setup_groups_tab()
+        self.queue_manager = QueueManager(
+            prepare_run_file=self.prepare_queue_shot,
+            compile_run_file=self.compile_run_file,
+            send_to_runviewer=self.send_to_runviewer,
+            output=self.output_box.output,
+            compilation_aborted=self.compilation_aborted,
+            set_abort_enabled=lambda enabled: inmain(
+                self.ui.pushButton_abort.setEnabled, enabled
+            ),
+        )
         self.setup_queue_tab()
-        run_view_layout = self.ui.findChild(QtWidgets.QLayout, 'gridLayout_shot_targets')
+        run_view_layout = self.ui.findChild(QtWidgets.QLayout, 'verticalLayout_2')
         self.analysis_submission = AnalysisSubmission(self, run_view_layout)
         self.connect_signals()
 
@@ -1666,6 +1757,8 @@ class RunManager(object):
         # The last location from which a globals file was selected, defaults
         # to experiment_shot_storage:
         self.last_opened_globals_folder = self.exp_config.get('paths', 'experiment_shot_storage')
+        # The last file to which the user saved or loaded a configuration:
+        self.last_save_config_file = None
         # The last manually selected shot output folder, defaults to
         # experiment_shot_storage:
         self.last_selected_shot_output_folder = self.exp_config.get('paths', 'experiment_shot_storage')
@@ -1685,18 +1778,18 @@ class RunManager(object):
         self.preparse_globals_required = queue.Queue()
         self.preparse_globals_thread.start()
 
-        # A flag telling the compilation thread to abort:
-        self.compilation_aborted = threading.Event()
+        # A few attributes for self.guess_expansion_modes() to keep track of
+        # its state, and thus detect changes:
+        self.previous_evaled_globals = {}
+        self.previous_global_hierarchy = {}
+        self.previous_expansion_types = {}
+        self.previous_expansions = {}
 
         # The prospective number of shots resulting from compilation
         self.n_shots = None
 
-        # Start the loop that allows compilations to be queued up:
-        self.compile_queue = queue.Queue()
         self.compiler_lock = threading.Lock()
-        self.compile_queue_thread = threading.Thread(target=self.compile_loop)
-        self.compile_queue_thread.daemon = True
-        self.compile_queue_thread.start()
+        self._next_default_shot_index = {}
 
         splash.update_text('starting compiler subprocess')
         # Start the compiler subprocess:
@@ -1713,19 +1806,9 @@ class RunManager(object):
         inthread(self.rollover_shot_output_folder)
         self.non_default_folder = None
 
-        self.appconfig = AppConfigActions(
-            self.ui,
-            'runmanager configuration',
-            self.get_default_configuration_path,
-            self.ui.actionSave_configuration,
-            self.ui.actionSave_configuration_as,
-            self.ui.actionLoad_configuration,
-            self.ui.actionRevert_configuration,
-            self.get_save_data,
-            self.save_configuration,
-            self.load_configuration,
-            lambda message: show_error_dialog(self.ui, 'runmanager', message),
-        )
+        # The data from the last time we saved the configuration, so we can
+        # know if something's changed:
+        self.last_save_data = None
 
         # autoload a config file, if labconfig is set to do so:
         try:
@@ -1753,31 +1836,6 @@ class RunManager(object):
 
         splash.update_text('done')
         self.ui.show()
-
-    def move_queue_tab_to_front(self):
-        queue_tab = self.ui.tab_queue
-        queue_index = self.ui.tabWidget.indexOf(queue_tab)
-        if queue_index <= 0:
-            return
-        icon = self.ui.tabWidget.tabIcon(queue_index)
-        title = self.ui.tabWidget.tabText(queue_index)
-        tooltip = self.ui.tabWidget.tabToolTip(queue_index)
-        whats_this = self.ui.tabWidget.tabWhatsThis(queue_index)
-        enabled = self.ui.tabWidget.isTabEnabled(queue_index)
-        self.ui.tabWidget.removeTab(queue_index)
-        self.ui.tabWidget.insertTab(0, queue_tab, icon, title)
-        self.ui.tabWidget.setTabToolTip(0, tooltip)
-        self.ui.tabWidget.setTabWhatsThis(0, whats_this)
-        self.ui.tabWidget.setTabEnabled(0, enabled)
-        self.ui.tabWidget.setCurrentWidget(queue_tab)
-
-    def setup_shot_target_controls(self):
-        set_icon_label_pixmap(
-            self.ui.label_run_shots_icon, art_dir / 'blacs_22x22.png'
-        )
-        set_icon_label_pixmap(
-            self.ui.label_view_shots_icon, art_dir / 'runviewer_22x22.png'
-        )
 
     def setup_config(self):
         required_config_params = {"default": ["apparatus_name"],
@@ -1875,68 +1933,47 @@ class RunManager(object):
         self.on_groups_model_active_changed_recursion_depth = 0
 
     def setup_queue_tab(self):
-        self.tab_queue = self.ui.tab_queue
+        self.tab_queue = QtWidgets.QWidget(self.ui.tabWidget)
+        self.tab_queue.setObjectName('tab_queue')
         self.tab_queue.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
         )
-        queue_tab_index = self.ui.tabWidget.indexOf(self.tab_queue)
-        self.ui.tabWidget.tabBar().setMovable(False, index=queue_tab_index)
-
+        self.verticalLayout_queue_tab = QtWidgets.QVBoxLayout(self.tab_queue)
+        self.verticalLayout_queue_tab.setObjectName('verticalLayout_queue_tab')
+        controls_layout = QtWidgets.QHBoxLayout()
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.addWidget(QtWidgets.QLabel('Compile mode', self.tab_queue))
         self.queue_compile_mode_combo = QtWidgets.QComboBox(self.tab_queue)
-        self.queue_compile_mode_combo.addItem('Precompile shots', COMPILE_MODE_PRECOMPILE)
-        self.queue_compile_mode_combo.addItem(
-            'Compile when requested', COMPILE_MODE_ON_REQUEST
-        )
-
+        self.queue_compile_mode_combo.addItem('Eager compile', COMPILE_MODE_EAGER)
+        self.queue_compile_mode_combo.addItem('Lazy compile', COMPILE_MODE_LAZY)
+        controls_layout.addWidget(self.queue_compile_mode_combo)
+        controls_layout.addWidget(QtWidgets.QLabel('When queue is empty', self.tab_queue))
         self.queue_empty_policy_combo = QtWidgets.QComboBox(self.tab_queue)
-        self.queue_empty_policy_combo.addItem('Stop', EMPTY_QUEUE_STOP)
+        self.queue_empty_policy_combo.addItem('Send nothing', EMPTY_QUEUE_NOTHING)
         self.queue_empty_policy_combo.addItem(
-            'Repeat last queued shot', EMPTY_QUEUE_REPEAT_LAST
+            'Send default shot', EMPTY_QUEUE_DEFAULT_LABSCRIPT
         )
-        self.queue_empty_policy_combo.addItem(
-            'Repeat standard shot', EMPTY_QUEUE_REPEAT_STANDARD
-        )
-
-        self.standard_labscript_lineedit = self.ui.lineEdit_standard_labscript_file
-        self.standard_labscript_lineedit.setPlaceholderText(
-            'Standard shot labscript file'
-        )
-        self.standard_labscript_button = self.ui.toolButton_select_standard_labscript_file
-
-        self.queue_status_label = QtWidgets.QLabel(self.tab_queue)
-        self.queue_status_label.setSizePolicy(
-            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
-        )
-        self.queue_status_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-        self.queue_status_label.setWordWrap(True)
-
+        controls_layout.addWidget(self.queue_empty_policy_combo)
+        controls_layout.addStretch(1)
         self.queue_widget = RunmanagerQueueWidget(self.tab_queue)
         self.queue_widget.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
         )
-
-        controls_layout = QtWidgets.QGridLayout()
-        controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setColumnStretch(1, 1)
-        controls_layout.setColumnStretch(3, 1)
-        controls_layout.addWidget(QtWidgets.QLabel('Compile mode', self.tab_queue), 0, 0)
-        controls_layout.addWidget(self.queue_compile_mode_combo, 0, 1)
-        controls_layout.addWidget(
-            QtWidgets.QLabel('Empty queue', self.tab_queue), 0, 2
+        self.queue_last_sent_label = QtWidgets.QLabel(self.tab_queue)
+        self.queue_last_sent_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
         )
-        controls_layout.addWidget(self.queue_empty_policy_combo, 0, 3)
-
-        layout = self.ui.verticalLayout_queue_tab
-        layout.addLayout(controls_layout)
-        layout.addWidget(self.queue_widget, 1)
-        layout.addWidget(self.queue_status_label)
-
-        self.queue_compile_mode_combo.setCurrentIndex(
-            self.queue_compile_mode_combo.findData(COMPILE_MODE_PRECOMPILE)
+        self.queue_last_sent_label.setAlignment(
+            QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
         )
-        self.queue_empty_policy_combo.setCurrentIndex(
-            self.queue_empty_policy_combo.findData(EMPTY_QUEUE_STOP)
-        )
+        self.queue_last_sent_label.setWordWrap(True)
+        self.verticalLayout_queue_tab.addLayout(controls_layout)
+        self.verticalLayout_queue_tab.addWidget(self.queue_widget)
+        self.verticalLayout_queue_tab.addWidget(self.queue_last_sent_label)
+        self.ui.tabWidget.insertTab(0, self.tab_queue, 'Queue')
+        queue_tab_index = self.ui.tabWidget.indexOf(self.tab_queue)
+        self.ui.tabWidget.tabBar().setMovable(False, index=queue_tab_index)
+        self.ui.tabWidget.setCurrentWidget(self.tab_queue)
         self.refresh_queue_tab()
 
     def connect_signals(self):
@@ -1944,14 +1981,27 @@ class RunManager(object):
         self.output_popout_button.clicked.connect(self.on_output_popout_button_clicked)
 
         # The menu items:
+        self.ui.actionLoad_configuration.triggered.connect(self.on_load_configuration_triggered)
+        self.ui.actionRevert_configuration.triggered.connect(self.on_revert_configuration_triggered)
+        self.ui.actionSave_configuration.triggered.connect(self.on_save_configuration_triggered)
+        self.ui.actionSave_configuration_as.triggered.connect(self.on_save_configuration_as_triggered)
         self.ui.actionQuit.triggered.connect(self.ui.close)
 
         # labscript file and folder selection stuff:
         self.ui.toolButton_select_labscript_file.clicked.connect(self.on_select_labscript_file_clicked)
+        self.ui.toolButton_select_default_labscript_file.clicked.connect(
+            self.on_select_default_labscript_file_clicked
+        )
         self.ui.toolButton_select_shot_output_folder.clicked.connect(self.on_select_shot_output_folder_clicked)
         self.ui.toolButton_edit_labscript_file.clicked.connect(self.on_edit_labscript_file_clicked)
+        self.ui.toolButton_edit_default_labscript_file.clicked.connect(
+            self.on_edit_default_labscript_file_clicked
+        )
         self.ui.toolButton_reset_shot_output_folder.clicked.connect(self.on_reset_shot_output_folder_clicked)
         self.ui.lineEdit_labscript_file.textChanged.connect(self.on_labscript_file_text_changed)
+        self.ui.lineEdit_default_labscript_file.textChanged.connect(
+            self.on_default_labscript_file_text_changed
+        )
         self.ui.lineEdit_shot_output_folder.textChanged.connect(self.on_shot_output_folder_text_changed)
 
         # Control buttons; engage, abort, restart subprocess:
@@ -1999,20 +2049,16 @@ class RunManager(object):
         self.groups_model_item_changed_disconnected = DisconnectContextManager(
             self.groups_model.itemChanged, self.on_groups_model_item_changed)
 
+        self.queue_manager.queueChanged.connect(self.refresh_queue_tab)
         self.queue_compile_mode_combo.currentIndexChanged.connect(
             self.on_queue_compile_mode_changed
         )
         self.queue_empty_policy_combo.currentIndexChanged.connect(
             self.on_queue_empty_policy_changed
         )
-        self.standard_labscript_button.clicked.connect(
-            self.on_select_standard_labscript_file_clicked
-        )
-        self.standard_labscript_lineedit.textChanged.connect(
-            self.on_standard_labscript_file_text_changed
-        )
         self.queue_widget.deleteRowsRequested.connect(self.on_queue_delete_rows_requested)
         self.queue_widget.clearQueueRequested.connect(self.on_queue_clear_requested)
+        self.queue_widget.moveRequested.connect(self.on_queue_move_requested)
         
         # Keyboard shortcuts:
         engage_shortcut = QtWidgets.QShortcut('F5', self.ui,
@@ -2022,30 +2068,21 @@ class RunManager(object):
         QtWidgets.QShortcut('ctrl+Tab', self.ui, lambda: self.switch_tabs(+1))
         QtWidgets.QShortcut('ctrl+shift+Tab', self.ui, lambda: self.switch_tabs(-1))
 
-    def get_default_configuration_path(self):
-        """Return the default runmanager configuration path."""
-        try:
-            return os.path.join(
-                self.exp_config.get('default', 'app_saved_configs'),
-                'runmanager',
-                'runmanager.toml',
-            )
-        except LabConfig.NoOptionError:
-            return os.path.join(
-                self.exp_config.get('paths', 'experiment_shot_storage'),
-                'runmanager.toml',
-            )
-
     def on_close_event(self):
-        if not self.appconfig.prompt_to_save_if_dirty(
-            'Quit runmanager',
-            ('Current configuration (which groups are active/open and other GUI state) '
-             'has changed: save config file \'%s\'?'
-             % self.appconfig.current_save_target()),
-        ):
-            return False
+        save_data = self.get_save_data()
+        if self.last_save_data is not None and save_data != self.last_save_data:
+            message = ('Current configuration (which groups are active/open and other GUI state) '
+                       'has changed: save config file \'%s\'?' % self.last_save_config_file)
+            reply = QtWidgets.QMessageBox.question(self.ui, 'Quit runmanager', message,
+                                               QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel)
+            if reply == QtWidgets.QMessageBox.Cancel:
+                return False
+            if reply == QtWidgets.QMessageBox.Yes:
+                self.save_configuration(self.last_save_config_file)
         self.analysis_submission.shutdown()
+        self.queue_manager.shutdown()
         self.to_child.put(['quit', None])
+        self.output_box.shutdown()
         return True
 
     def close_current_tab(self):
@@ -2060,6 +2097,42 @@ class RunManager(object):
         new_index = (current_index + change) % n_tabs
         self.ui.tabWidget.setCurrentIndex(new_index)
 
+    def on_queue_delete_rows_requested(self, rows):
+        self.queue_manager.delete_rows(rows)
+
+    def on_queue_clear_requested(self):
+        self.queue_manager.clear()
+
+    def on_queue_move_requested(self, direction, rows):
+        self.queue_manager.move(direction, rows)
+
+    def on_queue_empty_policy_changed(self, index):
+        empty_queue_policy = self.queue_empty_policy_combo.itemData(index)
+        if empty_queue_policy is None:
+            return
+        self.queue_manager.set_empty_queue_policy(empty_queue_policy)
+
+    def on_queue_compile_mode_changed(self, index):
+        compile_mode = self.queue_compile_mode_combo.itemData(index)
+        if compile_mode is None:
+            return
+        self.queue_manager.set_compile_mode(compile_mode)
+
+    @inmain_decorator()
+    def refresh_queue_tab(self):
+        controller = self.queue_manager.controller
+        self.queue_widget.set_queue_paths(controller.get_queue_display_items())
+        state = controller.get_queue_state()
+        last_sent_to_blacs = state['last_sent_to_blacs']
+        if last_sent_to_blacs:
+            self.queue_last_sent_label.setText(
+                'Last sent to BLACS: %s' % last_sent_to_blacs
+            )
+            self.queue_last_sent_label.setToolTip(last_sent_to_blacs)
+        else:
+            self.queue_last_sent_label.setText('Last sent to BLACS: nothing')
+            self.queue_last_sent_label.setToolTip('')
+
     def on_output_popout_button_clicked(self):
         if self.output_box_is_popped_out:
             self.ui.verticalLayout_output_tab.addWidget(self.output_box.output_textedit)
@@ -2073,47 +2146,69 @@ class RunManager(object):
             self.output_box_window.show()
         self.output_box_is_popped_out = not self.output_box_is_popped_out
 
-    def on_select_labscript_file_clicked(self, checked):
-        labscript_file = select_open_file(
-            self.ui,
-            'Select labscript file',
-            self.last_opened_labscript_folder,
-            "Python files (*.py)",
+    def select_labscript_file(self, title):
+        labscript_file = QtWidgets.QFileDialog.getOpenFileName(
+            self.ui, title, self.last_opened_labscript_folder, "Python files (*.py)"
         )
+        if type(labscript_file) is tuple:
+            labscript_file, _ = labscript_file
+
+        if not labscript_file:
+            return None
+        labscript_file = os.path.abspath(labscript_file)
+        if not os.path.isfile(labscript_file):
+            error_dialog("No such file %s." % labscript_file)
+            return None
+        self.last_opened_labscript_folder = os.path.dirname(labscript_file)
+        return labscript_file
+
+    def on_select_labscript_file_clicked(self, checked):
+        labscript_file = self.select_labscript_file('Select labscript file')
         if not labscript_file:
             return
-        if not os.path.isfile(labscript_file):
-            show_error_dialog(app.ui, 'runmanager', "No such file %s." % labscript_file)
-            return
-        # Save the containing folder for use next time we open the dialog box:
-        self.last_opened_labscript_folder = os.path.dirname(labscript_file)
-        # Write the file to the lineEdit:
         self.ui.lineEdit_labscript_file.setText(labscript_file)
 
-    def on_edit_labscript_file_clicked(self, checked):
-        # Get the current labscript file:
-        current_labscript_file = self.ui.lineEdit_labscript_file.text()
-        # Ignore if no file selected
-        if not current_labscript_file:
+    def on_select_default_labscript_file_clicked(self, checked):
+        labscript_file = self.select_labscript_file('Select default-shot labscript file')
+        if not labscript_file:
             return
-        launch_from_config(
-            self.exp_config,
-            current_labscript_file,
-            'text_editor',
-            'text_editor_arguments',
-            "No editor specified in the labconfig.",
-            "Unable to launch text editor specified in %s. Error was: %s",
-            lambda message: show_error_dialog(self.ui, 'runmanager', message),
-        )
+        self.ui.lineEdit_default_labscript_file.setText(labscript_file)
+
+    def edit_labscript_file(self, labscript_file):
+        editor_path = self.exp_config.get('programs', 'text_editor')
+        editor_args = self.exp_config.get('programs', 'text_editor_arguments')
+        if not labscript_file:
+            return
+        if not editor_path:
+            error_dialog("No editor specified in the labconfig.")
+        if '{file}' in editor_args:
+            editor_args = [arg if arg != '{file}' else labscript_file for arg in editor_args.split()]
+        else:
+            editor_args = [labscript_file] + editor_args.split()
+        try:
+            subprocess.Popen([editor_path] + editor_args)
+        except Exception as e:
+            error_dialog("Unable to launch text editor specified in %s. Error was: %s" %
+                         (self.exp_config.config_path, str(e)))
+
+    def on_edit_labscript_file_clicked(self, checked):
+        self.edit_labscript_file(self.ui.lineEdit_labscript_file.text())
+
+    def on_edit_default_labscript_file_clicked(self, checked):
+        self.edit_labscript_file(self.ui.lineEdit_default_labscript_file.text())
 
     def on_select_shot_output_folder_clicked(self, checked):
-        shot_output_folder = select_directory(
-            self.ui,
-            'Select shot output folder',
-            self.last_selected_shot_output_folder,
-        )
+        shot_output_folder = QtWidgets.QFileDialog.getExistingDirectory(self.ui,
+                                                                    'Select shot output folder',
+                                                                    self.last_selected_shot_output_folder)
+        if type(shot_output_folder) is tuple:
+            shot_output_folder, _ = shot_output_folder
+
         if not shot_output_folder:
+            # User cancelled selection
             return
+        # Convert to standard platform specific path, otherwise Qt likes forward slashes:
+        shot_output_folder = os.path.abspath(shot_output_folder)
         # Save the containing folder for use next time we open the dialog box:
         self.last_selected_shot_output_folder = os.path.dirname(shot_output_folder)
         # Write the file to the lineEdit:
@@ -2140,6 +2235,12 @@ class RunManager(object):
         # Check if the output folder needs to be updated:
         self.check_output_folder_update()
 
+    def on_default_labscript_file_text_changed(self, text):
+        self.ui.toolButton_edit_default_labscript_file.setEnabled(bool(text))
+        self.ui.lineEdit_default_labscript_file.setToolTip(text)
+        self.queue_manager.set_default_labscript_file(text)
+        self.refresh_queue_tab()
+
     def on_shot_output_folder_text_changed(self, text):
         # Blank out the 'reset default output folder' button if the user is
         # already using the default output folder
@@ -2151,72 +2252,17 @@ class RunManager(object):
         self.ui.label_non_default_folder.setVisible(self.non_default_folder)
         self.ui.lineEdit_shot_output_folder.setToolTip(text)
 
-    def on_queue_compile_mode_changed(self, index):
-        compile_mode = self.queue_compile_mode_combo.itemData(index)
-        if compile_mode is None:
-            return
-        self.queue_controller.set_compile_mode(compile_mode)
-        self.refresh_queue_tab()
-
-    def on_queue_empty_policy_changed(self, index):
-        empty_policy = self.queue_empty_policy_combo.itemData(index)
-        if empty_policy is None:
-            return
-        self.queue_controller.set_empty_queue_policy(empty_policy)
-        self.refresh_queue_tab()
-
-    def on_standard_labscript_file_text_changed(self, text):
-        self.queue_controller.set_standard_labscript_file(text)
-        self.standard_labscript_lineedit.setToolTip(text)
-        self.refresh_queue_tab()
-
-    def on_select_standard_labscript_file_clicked(self):
-        labscript_file = select_open_file(
-            self.ui,
-            'Select standard-shot labscript file',
-            self.last_opened_labscript_folder,
-            "Python files (*.py)",
-        )
-        if not labscript_file:
-            return
-        if not os.path.isfile(labscript_file):
-            show_error_dialog(app.ui, 'runmanager', "No such file %s." % labscript_file)
-            return
-        self.last_opened_labscript_folder = os.path.dirname(labscript_file)
-        self.standard_labscript_lineedit.setText(labscript_file)
-
-    def on_queue_delete_rows_requested(self, rows):
-        self.queue_controller.delete_rows(rows)
-        self.refresh_queue_tab()
-
-    def on_queue_clear_requested(self):
-        self.queue_controller.clear()
-        self.refresh_queue_tab()
-
-    @inmain_decorator()
-    def refresh_queue_tab(self):
-        items = []
-        for item in self.queue_controller.get_queue_items():
-            display = '[{status}] {label}'.format(
-                status=item['status'], label=os.path.basename(item['run_file'])
-            )
-            tooltip = item['run_file']
-            if item['compile_error']:
-                tooltip += '\n\n' + item['compile_error']
-            items.append({'id': item['id'], 'display_text': display, 'tooltip': tooltip})
-        self.queue_widget.set_queue_items(items)
-        state = self.queue_controller.get_queue_state()
-        self.queue_status_label.setText(
-            'Queued: {n_items}    Mode: {compile_mode}    Empty: {empty_queue_policy}'.format(
-                **state
-            )
-        )
-
     def on_engage_clicked(self):
         logger.info('Engage')
         try:
-            send_to_blacs = self.ui.checkBox_run_shots.isChecked()
+            send_to_BLACS = self.ui.checkBox_run_shots.isChecked()
             send_to_runviewer = self.ui.checkBox_view_shots.isChecked()
+            if not send_to_BLACS and not send_to_runviewer:
+                self.output_box.output(
+                    "Warning: neither 'Run shot(s)' nor 'View shot(s)' is selected.\n\n",
+                    red=True,
+                )
+                return
             labscript_file = self.ui.lineEdit_labscript_file.text()
             # even though we shuffle on a per global basis, if ALL of the globals are set to shuffle, then we may as well shuffle again. This helps shuffle shots more randomly than just shuffling within each level (because without this, you would still do all shots with the outer most variable the same, etc)
             shuffle = self.ui.pushButton_shuffle.checkState() == QtCore.Qt.Checked
@@ -2239,34 +2285,39 @@ class RunManager(object):
                 sequenceglobals, shots, evaled_globals, global_hierarchy, expansions = self.parse_globals(active_groups, expansion_order=expansion_order)
             except Exception as e:
                 raise Exception('Error parsing globals:\n%s\nCompilation aborted.' % str(e))
-            logger.info('Queueing shots')
-            descriptors = self.build_queue_descriptors(
+            logger.info('Making h5 files')
+            globals_details = runmanager.get_globals_details(active_groups)
+            labscript_file, run_files = self.make_h5_files(
                 labscript_file,
                 output_folder,
-                active_groups,
                 sequenceglobals,
                 shots,
                 shuffle,
-                send_to_blacs,
-                send_to_runviewer,
+                with_metadata=True,
             )
-            if send_to_blacs:
-                shot_ids = self.queue_controller.enqueue(descriptors)
-                self.refresh_queue_tab()
-                if self.queue_controller.compile_mode == COMPILE_MODE_PRECOMPILE:
-                    self.ui.pushButton_abort.setEnabled(True)
-                    for shot_id in shot_ids:
-                        self.compile_queue.put(shot_id)
-                self.output_box.output(
-                    'Queued %d shot(s) in runmanager.\n\n' % len(shot_ids)
+            compile_mode = self.queue_compile_mode_combo.currentData()
+            queue_records = []
+            for run_file_info in run_files:
+                queue_records.append(
+                    {
+                        'path': run_file_info['path'],
+                        'labscript_file': labscript_file,
+                        'active_groups': dict(active_groups),
+                        'compile_mode': compile_mode,
+                        'compiled': False,
+                        'frozen_globals': runmanager.get_frozen_globals(
+                            globals_details,
+                            run_file_info['shot_globals'],
+                        ),
+                        'sequence_attrs': run_file_info['sequence_attrs'],
+                        'run_no': run_file_info['run_no'],
+                        'n_runs': run_file_info['n_runs'],
+                    }
                 )
-            else:
-                self.ui.pushButton_abort.setEnabled(True)
-                self.compile_queue.put(('compile_descriptors', descriptors))
-                self.output_box.output(
-                    'Compiling %d shot(s) without queueing for BLACS.\n\n'
-                    % len(descriptors)
-                )
+            self.ui.pushButton_abort.setEnabled(True)
+            self.queue_manager.compile_shots(
+                queue_records, send_to_BLACS, send_to_runviewer
+            )
         except Exception as e:
             self.output_box.output('%s\n\n' % str(e), red=True)
         logger.info('end engage')
@@ -2527,7 +2578,7 @@ class RunManager(object):
         # message.
         confirm_multiple = (len(name_items) > 1)
         if confirm_multiple:
-            if not ask_question_dialog(app.ui, 'runmanager', "Delete %d groups?" % len(name_items)):
+            if not question_dialog("Delete %d groups?" % len(name_items)):
                 return
         for item in name_items:
             globals_file = item.parent().text()
@@ -2581,7 +2632,7 @@ class RunManager(object):
         child_is_open = [child_item.data(self.GROUPS_ROLE_GROUP_IS_OPEN)
                          for child_item in child_openclose_items]
         if any(child_is_open):
-            if not ask_question_dialog(app.ui, 'runmanager', 'Close %d file(s)? This will close %d currently open group(s).' %
+            if not question_dialog('Close %d file(s)? This will close %d currently open group(s).' %
                                    (len(name_items), child_is_open.count(True))):
                 return
         for item in name_items:
@@ -2589,16 +2640,20 @@ class RunManager(object):
             self.close_globals_file(globals_file, confirm=False)
 
     def on_open_globals_file_clicked(self):
-        globals_file = select_open_file(
-            self.ui,
-            'Select globals file',
-            self.last_opened_globals_folder,
-            "Globals files (*.toml *.h5 *.hdf5)",
-        )
+        globals_file = QtWidgets.QFileDialog.getOpenFileName(self.ui,
+                                                         'Select globals file',
+                                                         self.last_opened_globals_folder,
+                                                         "Globals files (*.toml *.h5 *.hdf5)")
+        if type(globals_file) is tuple:
+            globals_file, _ = globals_file
+
         if not globals_file:
+            # User cancelled selection
             return
+        # Convert to standard platform specific path, otherwise Qt likes forward slashes:
+        globals_file = os.path.abspath(globals_file)
         if not os.path.isfile(globals_file):
-            show_error_dialog(app.ui, 'runmanager', "No such file %s." % globals_file)
+            error_dialog("No such file %s." % globals_file)
             return
         # Save the containing folder for use next time we open the dialog box:
         self.last_opened_globals_folder = os.path.dirname(globals_file)
@@ -2606,15 +2661,21 @@ class RunManager(object):
         self.open_globals_file(globals_file)
 
     def on_new_globals_file_clicked(self):
-        globals_file = select_save_file(
-            self.ui,
-            'Create new globals file',
-            self.last_opened_globals_folder,
-            "TOML files (*.toml)",
-            suffix='.toml',
-        )
+        globals_file = QtWidgets.QFileDialog.getSaveFileName(self.ui,
+                                                         'Create new globals file',
+                                                         self.last_opened_globals_folder,
+                                                         "TOML files (*.toml)")
+        if type(globals_file) is tuple:
+            globals_file, _ = globals_file
+
         if not globals_file:
+            # User cancelled
             return
+        if not globals_file.lower().endswith('.toml'):
+            globals_file += '.toml'
+        # Convert to standard platform specific path, otherwise Qt likes
+        # forward slashes:
+        globals_file = os.path.abspath(globals_file)
         # Save the containing folder for use next time we open the dialog box:
         self.last_opened_globals_folder = os.path.dirname(globals_file)
         # Create the new file and open it:
@@ -2622,14 +2683,19 @@ class RunManager(object):
         self.open_globals_file(globals_file)
 
     def on_diff_globals_file_clicked(self):
-        globals_file = select_open_file(
-            self.ui,
-            'Select globals file to compare',
-            self.last_opened_globals_folder,
-            "Globals files (*.toml *.h5 *.hdf5)",
-        )
+        globals_file = QtWidgets.QFileDialog.getOpenFileName(self.ui,
+                                                         'Select globals file to compare',
+                                                         self.last_opened_globals_folder,
+                                                         "Globals files (*.toml *.h5 *.hdf5)")
+        if type(globals_file) is tuple:
+            globals_file, _ = globals_file
+
         if not globals_file:
+            # User cancelled
             return
+
+        # Convert to standard platform specific path, otherwise Qt likes forward slashes:
+        globals_file = os.path.abspath(globals_file)
 
         # Get runmanager's globals
         active_groups = self.get_active_groups()
@@ -2770,8 +2836,7 @@ class RunManager(object):
         parent_item = item.parent()
         # File rows are supposed to be uneditable, but just to be sure we have
         # a group row:
-        if parent_item is None:
-            return
+        assert parent_item is not None
         if item.data(self.GROUPS_ROLE_IS_DUMMY_ROW):
             item_text = item.text()
             if item_text != self.GROUPS_DUMMY_ROW_TEXT:
@@ -3020,14 +3085,23 @@ class RunManager(object):
             # There was an error, get_active_groups has already shown
             # it to the user.
             return
-        results = self.parse_globals(
-            active_groups,
-            raise_exceptions=False,
-            expand_globals=True,
-            return_dimensions=True,
-        )
-        sequence_globals, shots, evaled_globals, global_hierarchy, expansions, dimensions = results
-        self.n_shots = len(shots)
+        # Expansion mode is automatically updated when the global's
+        # type changes. If this occurs, we will have to parse again to
+        # include the change:
+        while True:
+            results = self.parse_globals(active_groups, raise_exceptions=False, expand_globals=False, return_dimensions = True)
+            sequence_globals, shots, evaled_globals, global_hierarchy, expansions, dimensions = results
+            self.n_shots = len(shots)
+            expansions_changed = self.guess_expansion_modes(
+                active_groups, evaled_globals, global_hierarchy, expansions)
+            if not expansions_changed:
+                # Now expand globals while parsing to calculate the number of shots.
+                # this must only be done after the expansion type guessing has been updated to avoid exceptions
+                # when changing a zip group from a list to a single value
+                results = self.parse_globals(active_groups, raise_exceptions=False, expand_globals=True, return_dimensions = True)
+                sequence_globals, shots, evaled_globals, global_hierarchy, expansions, dimensions = results
+                self.n_shots = len(shots)
+                break
         self.update_tabs_parsing_indication(active_groups, sequence_globals, evaled_globals, self.n_shots)
         self.update_axes_tab(expansions, dimensions)
 
@@ -3130,7 +3204,7 @@ class RunManager(object):
                             + 'Active groups must have unique names.'
                         )
                         if interactive:
-                            show_error_dialog(app.ui, 'runmanager', msg)
+                            error_dialog(msg)
                             return
                         raise RuntimeError(msg)
                     active_groups[group_name] = globals_file
@@ -3164,15 +3238,19 @@ class RunManager(object):
         if not runmanager.globals_file_requires_conversion(globals_file):
             return globals_file
         suggested_path = runmanager.default_toml_globals_file(globals_file)
-        destination = select_save_file(
+        destination = QtWidgets.QFileDialog.getSaveFileName(
             parent or self.ui,
-            'Convert globals file to TOML',
+            'Convert globals file to TOML for editing',
             suggested_path,
             "TOML files (*.toml)",
-            suffix='.toml',
         )
+        if type(destination) is tuple:
+            destination, _ = destination
         if not destination:
             raise RuntimeError('Conversion to TOML cancelled.')
+        if not destination.lower().endswith('.toml'):
+            destination += '.toml'
+        destination = os.path.abspath(destination)
         if destination != globals_file and self.groups_model.findItems(destination, column=self.GROUPS_COL_NAME):
             raise RuntimeError("A globals file named %s is already open." % destination)
         runmanager.convert_globals_file(globals_file, destination)
@@ -3182,8 +3260,11 @@ class RunManager(object):
     def open_globals_file(self, globals_file):
         # Do nothing if this file is already open:
         if self.groups_model.findItems(globals_file, column=self.GROUPS_COL_NAME):
-            return
+            return globals_file
 
+        # Legacy HDF5 globals and shot files remain readable from the file
+        # selector. Conversion to TOML is deferred until the user attempts an
+        # edit operation.
         # Get the groups:
         groups = runmanager.get_grouplist(globals_file)
         # Add the parent row:
@@ -3250,6 +3331,7 @@ class RunManager(object):
         self.do_model_sort()
         # If this changed the sort order, ensure the file item is visible:
         scroll_view_to_row_if_current(self.ui.treeView_groups, file_name_item)
+        return globals_file
 
     def make_group_row(self, group_name):
         """Returns a new row representing one group in the groups tab, ready to be
@@ -3297,7 +3379,7 @@ class RunManager(object):
         child_is_open = [child_item.data(self.GROUPS_ROLE_GROUP_IS_OPEN)
                          for child_item in child_openclose_items]
         if confirm and any(child_is_open):
-            if not ask_question_dialog(app.ui, 'runmanager', 'Close %s? This will close %d currently open group(s).' %
+            if not question_dialog('Close %s? This will close %d currently open group(s).' %
                                    (globals_file, child_is_open.count(True))):
                 return
         to_close = [name_item for name_item, is_open in zip(child_name_items, child_is_open) if is_open]
@@ -3323,19 +3405,12 @@ class RunManager(object):
             dest_globals_file = self.ensure_editable_globals_file(dest_globals_file)
             if source_globals_file == dest_globals_file and delete_source_group:
                 source_globals_file = dest_globals_file
-        except Exception as e:
-            show_error_dialog(app.ui, 'runmanager', str(e))
-            return
-        try:
             dest_group_name = runmanager.copy_group(source_globals_file, source_group_name, dest_globals_file, delete_source_group)
         except Exception as e:
-            show_error_dialog(app.ui, 'runmanager', str(e))
+            error_dialog(str(e))
         else:
             # Insert the newly created globals group into the model, as a
             # child row of the new globals file.
-            if dest_globals_file is None:
-                dest_globals_file = source_globals_file
-
             # find the new groups parent row by filepath
             for index in range(self.groups_model.rowCount()):
                 if self.groups_model.item(index, self.GROUPS_COL_NAME).text() == dest_globals_file:
@@ -3368,7 +3443,7 @@ class RunManager(object):
             globals_file = self.ensure_editable_globals_file(globals_file)
             runmanager.new_group(globals_file, group_name)
         except Exception as e:
-            show_error_dialog(app.ui, 'runmanager', str(e))
+            error_dialog(str(e))
         else:
             # Insert the newly created globals group into the model, as a
             # child row of the globals file it belong to.
@@ -3414,7 +3489,7 @@ class RunManager(object):
             globals_file = self.ensure_editable_globals_file(globals_file)
             runmanager.rename_group(globals_file, previous_group_name, new_group_name)
         except Exception as e:
-            show_error_dialog(app.ui, 'runmanager', str(e))
+            error_dialog(str(e))
             # Set the item text back to the old name, since the rename failed:
             item.setText(previous_group_name)
         else:
@@ -3439,22 +3514,72 @@ class RunManager(object):
 
     def delete_group(self, globals_file, group_name, confirm=True):
         if confirm:
-            if not ask_question_dialog(app.ui, 'runmanager', "Delete the group '%s'?" % group_name):
+            if not question_dialog("Delete the group '%s'?" % group_name):
                 return
         # If the group is open, close it:
         group_tab = self.currently_open_groups.get((globals_file, group_name))
         if group_tab is not None:
             self.close_group(globals_file, group_name)
-        try:
-            globals_file = self.ensure_editable_globals_file(globals_file)
-        except Exception as e:
-            show_error_dialog(app.ui, 'runmanager', str(e))
-            return
+        globals_file = self.ensure_editable_globals_file(globals_file)
         runmanager.delete_group(globals_file, group_name)
         # Find the entry for this group in self.groups_model and remove it:
         name_item = self.get_group_item_by_name(globals_file, group_name, self.GROUPS_COL_NAME)
         name_item.parent().removeRow(name_item.row())
         self.globals_changed()
+
+    def on_save_configuration_triggered(self):
+        if self.last_save_config_file is None:
+            self.on_save_configuration_as_triggered()
+            self.ui.actionSave_configuration_as.setEnabled(True)
+            self.ui.actionRevert_configuration.setEnabled(True)
+        else:
+            self.save_configuration(self.last_save_config_file)
+
+    def on_revert_configuration_triggered(self):
+        save_data = self.get_save_data()
+        if self.last_save_data is not None and save_data != self.last_save_data:
+            message = 'Revert configuration to the last saved state in \'%s\'?' % self.last_save_config_file
+            reply = QtWidgets.QMessageBox.question(self.ui, 'Load configuration', message,
+                                               QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel)
+            if reply == QtWidgets.QMessageBox.Cancel:
+                return
+            elif reply == QtWidgets.QMessageBox.Yes:
+                self.load_configuration(self.last_save_config_file)
+        else:
+            error_dialog('no changes to revert')
+
+    def on_save_configuration_as_triggered(self):
+        if self.last_save_config_file is not None:
+            default = self.last_save_config_file
+        else:
+            try:
+                default = os.path.join(
+                    self.exp_config.get('default', 'app_saved_configs'),
+                    'runmanager',
+                    'runmanager.toml',
+                )
+            except LabConfig.NoOptionError:
+                default = os.path.join(
+                    self.exp_config.get('paths', 'experiment_shot_storage'),
+                    'runmanager.toml',
+                )
+        save_file = QtWidgets.QFileDialog.getSaveFileName(self.ui,
+                                                      'Select  file to save current runmanager configuration',
+                                                      default,
+                                                      "Config files (*.toml)")
+        if type(save_file) is tuple:
+            save_file, _ = save_file
+
+        if not save_file:
+            # User cancelled
+            return
+        # Convert to standard platform specific path, otherwise Qt likes
+        # forward slashes:
+        save_file = os.path.abspath(save_file)
+        self.save_configuration(save_file)
+        self.ui.actionSave_configuration.setText(
+            'Save configuration {}'.format(self.last_save_config_file)
+        )
 
     def get_save_data(self):
         # Get the currently open files and active groups:
@@ -3512,19 +3637,57 @@ class RunManager(object):
                      'send_to_blacs': send_to_blacs,
                      'shuffle': shuffle,
                      'axes': axes,
-                     'queue_compile_mode': self.queue_controller.compile_mode,
-                     'queue_empty_policy': self.queue_controller.empty_queue_policy,
-                     'standard_labscript_file': self.standard_labscript_lineedit.text(),
-                     'queue_state': self.queue_controller.export_state(),
-                     'analysis_data': (
-                         self.analysis_submission.get_configuration_data()
-                     )}
+                     'queue_state': self.queue_manager.export_state(),
+                     'analysis_submission': self.analysis_submission.get_configuration_data()}
         return save_data
 
     def save_configuration(self, save_file):
         save_data = self.get_save_data()
         save_file = save_appconfig(save_file, {'runmanager_state': save_data})
-        self.appconfig.mark_clean(save_file, save_data)
+        self.last_save_config_file = save_file
+        self.last_save_data = save_data
+
+    def on_load_configuration_triggered(self):
+        save_data = self.get_save_data()
+        if self.last_save_data is not None and save_data != self.last_save_data:
+            message = ('Current configuration (which groups are active/open and other GUI state) '
+                       'has changed: save config file \'%s\'?' % self.last_save_config_file)
+            reply = QtWidgets.QMessageBox.question(self.ui, 'Load configuration', message,
+                                               QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel)
+            if reply == QtWidgets.QMessageBox.Cancel:
+                return
+            if reply == QtWidgets.QMessageBox.Yes:
+                self.save_configuration(self.last_save_config_file)
+
+        if self.last_save_config_file is not None:
+            default = self.last_save_config_file
+        else:
+            try:
+                default = os.path.join(
+                    self.exp_config.get('default', 'app_saved_configs'),
+                    'runmanager',
+                    'runmanager.toml',
+                )
+            except LabConfig.NoOptionError:
+                default = os.path.join(
+                    self.exp_config.get('paths', 'experiment_shot_storage'),
+                    'runmanager.toml',
+                )
+
+        file = QtWidgets.QFileDialog.getOpenFileName(self.ui,
+                                                 'Select runmanager configuration file to load',
+                                                 default,
+                                                 "Config files (*.toml *.ini)")
+        if type(file) is tuple:
+            file, _ = file
+
+        if not file:
+            # User cancelled
+            return
+        # Convert to standard platform specific path, otherwise Qt likes
+        # forward slashes:
+        file = os.path.abspath(file)
+        self.load_configuration(file)
 
     def load_configuration(self, filename):
         # Close all files:
@@ -3533,8 +3696,9 @@ class RunManager(object):
             self.close_globals_file(globals_file, confirm=False)
         # Ensure folder exists, if this was opened programmatically we are
         # creating the file, so the directory had better exist!
-        # LEGACY INI COMPATIBILITY. DEPRECATED CODE, WILL BE REMOVED.
         appconfig, save_target = load_appconfig(filename, return_save_path=True)
+        self.last_save_config_file = save_target
+        self.ui.actionSave_configuration.setText('Save configuration %s'%save_target)
         runmanager_config = appconfig.get('runmanager_state', {})
 
         has_been_a_warning = [False]
@@ -3544,11 +3708,13 @@ class RunManager(object):
                 self.output_box.output('\n')
             self.output_box.output('Warning: %s\n' % message, red=True)
 
+        opened_globals_files = {}
         for globals_file in runmanager_config.get('h5_files_open', []):
             if os.path.exists(globals_file):
                 try:
-                    self.open_globals_file(globals_file)
-                    self.last_opened_globals_folder = os.path.dirname(globals_file)
+                    opened_globals_file = self.open_globals_file(globals_file)
+                    opened_globals_files[globals_file] = opened_globals_file
+                    self.last_opened_globals_folder = os.path.dirname(opened_globals_file)
                 except Exception:
                     raise_exception_in_thread(sys.exc_info())
                     continue
@@ -3556,6 +3722,7 @@ class RunManager(object):
                 self.output_box.output('\nWarning: globals file %s no longer exists\n' % globals_file, red=True)
 
         for globals_file, group_name in runmanager_config.get('active_groups', []):
+            globals_file = opened_globals_files.get(globals_file, globals_file)
             try:
                 group_active_item = self.get_group_item_by_name(globals_file, group_name, self.GROUPS_COL_ACTIVE)
                 group_active_item.setCheckState(QtCore.Qt.Checked)
@@ -3563,6 +3730,7 @@ class RunManager(object):
                 warning("previously active group '%s' in %s no longer exists" % (group_name, globals_file))
 
         for globals_file, group_name in runmanager_config.get('groups_open', []):
+            globals_file = opened_globals_files.get(globals_file, globals_file)
             # First check if it exists:
             try:
                 self.get_group_item_by_name(globals_file, group_name, self.GROUPS_COL_NAME)
@@ -3616,421 +3784,40 @@ class RunManager(object):
                 self.add_item_to_axes_model(name, shuffle)
             self.update_axes_indentation() 
 
-        queue_compile_mode = runmanager_config.get('queue_compile_mode')
-        if queue_compile_mode is not None:
-            index = self.queue_compile_mode_combo.findData(queue_compile_mode)
-            if index != -1:
-                self.queue_compile_mode_combo.setCurrentIndex(index)
-
-        queue_empty_policy = runmanager_config.get('queue_empty_policy')
-        if queue_empty_policy is not None:
-            index = self.queue_empty_policy_combo.findData(queue_empty_policy)
-            if index != -1:
-                self.queue_empty_policy_combo.setCurrentIndex(index)
-
-        standard_labscript_file = runmanager_config.get('standard_labscript_file')
-        if standard_labscript_file is not None:
-            self.standard_labscript_lineedit.setText(standard_labscript_file)
         queue_state = runmanager_config.get('queue_state')
         if isinstance(queue_state, dict):
-            self.queue_controller.restore_state(queue_state)
-            self.initialise_queue_placeholders(
-                self.queue_controller.get_descriptors()
-            )
-            self.standard_labscript_lineedit.setText(
-                self.queue_controller.standard_labscript_file
+            self.queue_manager.restore_state(queue_state)
+            restored_queue_state = self.queue_manager.get_queue_state()
+            self.ui.lineEdit_default_labscript_file.setText(
+                restored_queue_state['default_labscript_file']
             )
             index = self.queue_compile_mode_combo.findData(
-                self.queue_controller.compile_mode
+                restored_queue_state['compile_mode']
             )
             if index != -1:
                 self.queue_compile_mode_combo.setCurrentIndex(index)
             index = self.queue_empty_policy_combo.findData(
-                self.queue_controller.empty_queue_policy
+                restored_queue_state['empty_queue_policy']
             )
             if index != -1:
                 self.queue_empty_policy_combo.setCurrentIndex(index)
-            if self.queue_controller.compile_mode == COMPILE_MODE_PRECOMPILE:
-                for item in self.queue_controller.get_queue_items():
-                    self.compile_queue.put(item['id'])
+
         self.analysis_submission.restore_configuration_data(
-            runmanager_config.get('analysis_data', {})
+            runmanager_config.get('analysis_submission')
         )
-        self.refresh_queue_tab()
 
         # Set as self.last_save_data:
         save_data = self.get_save_data()
-        self.appconfig.mark_clean(save_target, save_data)
+        self.last_save_data = save_data
+        self.ui.actionSave_configuration_as.setEnabled(True)
+        self.ui.actionRevert_configuration.setEnabled(True)
 
-    def compile_loop(self):
-        while True:
-            try:
-                job = self.compile_queue.get()
-                if self.compilation_aborted.is_set():
-                    self.output_box.output('Compilation aborted.\n\n', red=True)
-                    while True:
-                        try:
-                            self.compile_queue.get_nowait()
-                        except queue.Empty:
-                            break
-                    self.compilation_aborted.clear()
-                    inmain(self.ui.pushButton_abort.setEnabled, False)
-                    continue
-                if isinstance(job, tuple) and job and job[0] == 'compile_descriptors':
-                    descriptors = job[1]
-                    pending_cleanup = list(descriptors)
-                    for descriptor in descriptors:
-                        if self.compilation_aborted.is_set():
-                            break
-                        try:
-                            self.compile_descriptor(
-                                descriptor, use_current_defaults=False
-                            )
-                        except Exception as e:
-                            self.output_box.output(str(e) + '\n', red=True)
-                            self.compilation_aborted.set()
-                            break
-                        else:
-                            pending_cleanup.remove(descriptor)
-                    if pending_cleanup:
-                        self.delete_queue_placeholder_files(pending_cleanup)
-                else:
-                    shot_id = job
-                    descriptor = self.queue_controller.get_descriptor_for_precompile(shot_id)
-                    if descriptor is None:
-                        continue
-                    self.refresh_queue_tab()
-                    try:
-                        run_file = self.compile_descriptor(
-                            descriptor, use_current_defaults=False
-                        )
-                    except Exception as e:
-                        self.output_box.output(str(e) + '\n', red=True)
-                        self.queue_controller.finish_precompile(shot_id, error=str(e))
-                    else:
-                        self.queue_controller.finish_precompile(shot_id, compiled_path=run_file)
-                    self.refresh_queue_tab()
-                inmain(self.ui.pushButton_abort.setEnabled, not self.compile_queue.empty())
-                self.compilation_aborted.clear()
-            except Exception:
-                # Raise it so whatever bug it is gets seen, but keep going so
-                # the thread keeps functioning:
-                exc_info = sys.exc_info()
-                raise_exception_in_thread(exc_info)
-                continue
-
-    def build_queue_descriptors(
-        self,
-        labscript_file,
-        output_folder,
-        active_groups,
-        sequence_globals,
-        shots,
-        shuffle,
-        send_to_blacs,
-        send_to_runviewer,
-    ):
-        sequence_attrs, default_output_dir, filename_prefix = runmanager.new_sequence_details(
-            labscript_file, config=self.exp_config, increment_sequence_index=True
-        )
-        if output_folder == self.previous_default_output_folder:
-            output_folder = default_output_dir
-        self.check_output_folder_update()
-
-        shots = list(copy.deepcopy(shots))
-        if shuffle:
-            import random
-
-            random.shuffle(shots)
-
-        varying_globals = self._get_varying_globals(shots, active_groups)
-        descriptors = []
-        n_runs = len(shots)
-        for run_no, shot_globals in enumerate(shots):
-            run_file = self._queue_run_file_path(
-                output_folder,
-                filename_prefix,
-                run_no,
-                n_runs,
-                suffix='_view' if send_to_runviewer and not send_to_blacs else '',
-            )
-            label = os.path.basename(run_file)
-            descriptors.append(
-                QueueShotDescriptor(
-                    shot_id=uuid.uuid4().hex,
-                    label=label,
-                    labscript_file=labscript_file,
-                    output_folder=output_folder,
-                    run_file=run_file,
-                    active_groups=copy.deepcopy(active_groups),
-                    sequence_attrs=copy.deepcopy(sequence_attrs),
-                    run_no=run_no,
-                    n_runs=n_runs,
-                    sequence_globals_frozen=copy.deepcopy(sequence_globals),
-                    shot_globals_frozen=copy.deepcopy(shot_globals),
-                    shot_globals_overrides={
-                        name: copy.deepcopy(shot_globals[name])
-                        for name in varying_globals
-                        if name in shot_globals
-                    },
-                    send_to_runviewer=send_to_runviewer,
-                    source_kind=SOURCE_KIND_QUEUE,
-                )
-            )
-        self.initialise_queue_placeholders(descriptors)
-        return descriptors
-
-    def initialise_queue_placeholders(self, descriptors):
-        created_paths = []
-        try:
-            for descriptor in descriptors:
-                self._write_queue_placeholder(descriptor)
-                created_paths.append(descriptor.run_file)
-        except Exception:
-            for path in created_paths:
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except OSError:
-                    pass
-            raise
-
-    def _write_queue_placeholder(self, descriptor):
-        os.makedirs(os.path.dirname(descriptor.run_file), exist_ok=True)
-        with h5py.File(descriptor.run_file, 'w') as h5_file:
-            h5_file.attrs.update(descriptor.sequence_attrs)
-            h5_file.attrs['run number'] = descriptor.run_no
-            h5_file.attrs['n_runs'] = descriptor.n_runs
-            h5_file.attrs['runmanager_queue_source'] = descriptor.source_kind
-
-    def delete_queue_placeholder_files(self, descriptors):
-        paths = set()
-        for descriptor in descriptors:
-            for path in (descriptor.run_file, descriptor.compiled_path):
-                if path:
-                    paths.add(path)
-        for path in paths:
-            try:
-                if os.path.exists(path):
-                    os.remove(path)
-            except OSError:
-                pass
-
-    def compile_descriptor(self, descriptor, use_current_defaults):
-        if descriptor.source_kind == SOURCE_KIND_REPEAT_STANDARD:
-            return self._compile_standard_descriptor(descriptor)
-        if use_current_defaults:
-            sequence_globals, runglobals = self._current_globals_for_descriptor(descriptor)
-        else:
-            sequence_globals = copy.deepcopy(descriptor.sequence_globals_frozen)
-            runglobals = copy.deepcopy(descriptor.shot_globals_frozen)
-        run_file = self._prepare_run_file_path(descriptor)
-        self._write_run_file(descriptor, run_file, sequence_globals, runglobals)
-        self._compile_labscript_file(descriptor.labscript_file, run_file)
-        if descriptor.send_to_runviewer:
-            self.send_to_runviewer(run_file)
-        return run_file
-
-    def _compile_standard_descriptor(self, descriptor):
-        run_file = descriptor.run_file
-        sequence_globals, runglobals = self._standard_shot_globals(
-            descriptor.active_groups
-        )
-        self._write_run_file(descriptor, run_file, sequence_globals, runglobals)
-        self._compile_labscript_file(descriptor.labscript_file, run_file)
-        if descriptor.send_to_runviewer:
-            self.send_to_runviewer(run_file)
-        return run_file
-
-    def _current_globals_for_descriptor(self, descriptor):
-        active_groups = copy.deepcopy(descriptor.active_groups)
-        if hasattr(runmanager, 'get_queue_compile_globals'):
-            return runmanager.get_queue_compile_globals(
-                active_groups, copy.deepcopy(descriptor.shot_globals_overrides)
-            )
-        sequence_globals = runmanager.get_globals(active_groups)
-        evaled_globals, _, _ = runmanager.evaluate_globals(
-            sequence_globals, raise_exceptions=True
-        )
-        runglobals = self._flatten_evaled_globals(evaled_globals)
-        for name, value in descriptor.shot_globals_overrides.items():
-            runglobals[name] = copy.deepcopy(value)
-        return sequence_globals, runglobals
-
-    def _standard_shot_globals(self, active_groups):
-        if hasattr(runmanager, 'get_default_shot_globals'):
-            return runmanager.get_default_shot_globals(active_groups)
-        sequence_globals = runmanager.get_globals(active_groups)
-        evaled_globals, _, _ = runmanager.evaluate_globals(
-            sequence_globals, raise_exceptions=True
-        )
-        shots = runmanager.expand_globals(sequence_globals, evaled_globals)
-        if len(shots) != 1:
-            raise ValueError(
-                'Standard shot must compile to exactly one shot, got %d.'
-                % len(shots)
-            )
-        return sequence_globals, shots[0]
-
-    def _write_run_file(self, descriptor, run_file, sequence_globals, runglobals):
-        runmanager.make_single_run_file(
-            run_file,
-            sequence_globals,
-            runglobals,
-            descriptor.sequence_attrs,
-            descriptor.run_no,
-            descriptor.n_runs,
-        )
-        with h5py.File(run_file, 'a') as h5_file:
-            h5_file.attrs['runmanager_queue_source'] = descriptor.source_kind
-            if descriptor.source_kind in (
-                SOURCE_KIND_REPEAT_LAST,
-                SOURCE_KIND_REPEAT_STANDARD,
-            ):
-                h5_file.attrs['run repeat'] = 1
-
-    def _compile_labscript_file(self, labscript_file, run_file):
+    def compile_run_file(self, labscript_file, run_file):
         with self.compiler_lock:
             self.to_child.put(['compile', [labscript_file, run_file]])
             signal, success = self.from_child.get()
         assert signal == 'done'
-        if not success:
-            raise RuntimeError('Compilation failed for %s' % os.path.basename(run_file))
-
-    def _prepare_run_file_path(self, descriptor, force_fresh=False):
-        if descriptor.source_kind == SOURCE_KIND_QUEUE:
-            return descriptor.run_file
-        if (
-            not force_fresh
-            and descriptor.compiled_path
-        ):
-            return descriptor.compiled_path
-        sequence_attrs, _, filename_prefix = runmanager.new_sequence_details(
-            descriptor.labscript_file,
-            config=self.exp_config,
-            increment_sequence_index=True,
-        )
-        descriptor.sequence_attrs = sequence_attrs
-        return self._queue_run_file_path(
-            descriptor.output_folder, filename_prefix, descriptor.run_no, descriptor.n_runs
-        )
-
-    def _queue_run_file_path(
-        self, output_folder, filename_prefix, run_no, n_runs, suffix=''
-    ):
-        if n_runs <= 1:
-            digits = 1
-        else:
-            digits = len(str(n_runs - 1))
-        basename = os.path.join(output_folder, filename_prefix + suffix)
-        return ('%s_%0' + str(digits) + 'd.h5') % (basename, run_no)
-
-    def _get_varying_globals(self, shots, active_groups=None):
-        if active_groups is not None and hasattr(runmanager, 'get_globals_details'):
-            try:
-                globals_details = runmanager.get_globals_details(active_groups)
-            except Exception:
-                pass
-            else:
-                return {
-                    global_name
-                    for group_globals in globals_details.values()
-                    for global_name, record in group_globals.items()
-                    if record.get('scan_enabled')
-                }
-        if not shots:
-            return set()
-        names = set()
-        for shot in shots:
-            names.update(shot.keys())
-        varying = set()
-        for name in names:
-            values = []
-            for shot in shots:
-                values.append(repr(shot.get(name)))
-            if len(set(values)) > 1:
-                varying.add(name)
-        return varying
-
-    def _flatten_evaled_globals(self, evaled_globals):
-        runglobals = {}
-        for group_globals in evaled_globals.values():
-            runglobals.update(group_globals)
-        return runglobals
-
-    @inmain_decorator(True)
-    def build_repeat_standard_descriptor(self):
-        active_groups = self.get_active_groups(interactive=False)
-        if active_groups is None:
-            raise RuntimeError('Cannot build standard shot with invalid active groups.')
-        labscript_file = self.standard_labscript_lineedit.text()
-        if not labscript_file:
-            raise RuntimeError('No standard-shot labscript file configured.')
-        if not os.path.isfile(labscript_file):
-            raise RuntimeError('Standard-shot labscript file does not exist: %s' % labscript_file)
-        output_folder = self.ui.lineEdit_shot_output_folder.text()
-        sequence_attrs, default_output_dir, filename_prefix = runmanager.new_sequence_details(
-            labscript_file, config=self.exp_config, increment_sequence_index=True
-        )
-        if output_folder == self.previous_default_output_folder:
-            output_folder = default_output_dir
-        run_file = self._queue_run_file_path(output_folder, filename_prefix, 0, 1)
-        return QueueShotDescriptor(
-            shot_id=uuid.uuid4().hex,
-            label=os.path.basename(run_file),
-            labscript_file=labscript_file,
-            output_folder=output_folder,
-            run_file=run_file,
-            active_groups=copy.deepcopy(active_groups),
-            sequence_attrs=copy.deepcopy(sequence_attrs),
-            run_no=0,
-            n_runs=1,
-            sequence_globals_frozen={},
-            shot_globals_frozen={},
-            shot_globals_overrides={},
-            send_to_runviewer=self.ui.checkBox_view_shots.isChecked(),
-            source_kind=SOURCE_KIND_REPEAT_STANDARD,
-        )
-
-    def queue_request_next(self):
-        descriptor = self.queue_controller.get_next_descriptor(
-            self.build_repeat_standard_descriptor
-        )
-        self.refresh_queue_tab()
-        if descriptor is None:
-            return None
-        if descriptor.compiled_path and os.path.exists(descriptor.compiled_path):
-            run_file = descriptor.compiled_path
-        else:
-            use_current_defaults = (
-                self.queue_controller.compile_mode == COMPILE_MODE_ON_REQUEST
-            )
-            try:
-                run_file = self.compile_descriptor(
-                    descriptor, use_current_defaults=use_current_defaults
-                )
-            except Exception as e:
-                self.queue_controller.note_compile_error(descriptor.shot_id, str(e))
-                self.refresh_queue_tab()
-                raise
-        descriptor.compiled_path = run_file
-        descriptor.status = STATUS_READY
-        descriptor.compile_error = None
-        agnostic_path = shared_drive.path_to_agnostic(run_file)
-        self.queue_controller.mark_descriptor_sent(descriptor)
-        self.refresh_queue_tab()
-        return {
-            'agnostic_path': agnostic_path,
-            'source_kind': descriptor.source_kind,
-        }
-
-    def queue_add_shot(self, agnostic_path, start=False):
-        restored = self.queue_controller.add_sent_descriptor(
-            shared_drive.path_to_local(agnostic_path), start=start
-        )
-        if restored:
-            self.refresh_queue_tab()
-        return restored
+        return success
 
     def parse_globals(self, active_groups, raise_exceptions=True, expand_globals=True, expansion_order = None, return_dimensions = False):
         sequence_globals = runmanager.get_globals(active_groups)
@@ -4051,7 +3838,184 @@ class RunManager(object):
         else:
             return sequence_globals, shots, evaled_globals, global_hierarchy, expansions
 
-    def make_h5_files(self, labscript_file, output_folder, sequence_globals, shots, shuffle):
+    def guess_expansion_modes(self, active_groups, evaled_globals, global_hierarchy, expansions):
+        """This function is designed to be called iteratively. It changes the
+        expansion type of globals that reference other globals - such that
+        globals referencing an iterable global will be zipped with it, rather
+        than outer producted. Each time this method is called,
+        self.parse_globals should also be called, so that the globals are
+        evaluated with their new expansion modes, if they changed. This should
+        be performed repeatedly until there are no more changes. Note that
+        this method does not return what expansion types it thinks globals
+        should have - it *actually writes them to the globals HDF5 file*. So
+        it is up to later code to ensure it re-reads the expansion mode from
+        the HDF5 file before proceeding. At present this method is only called
+        from self.preparse_globals(), so see there to see how it fits in with
+        everything else. This method uses four instance attributes to store
+        state: self.previous_evaled_globals, self.previous_global_hierarchy,
+        self.previous_expansion_types and self.previous_expansions. This is
+        neccesary so that it can detect changes."""
+
+        # Do nothing if there were exceptions:
+        for group_name in evaled_globals:
+            for global_name in evaled_globals[group_name]:
+                value = evaled_globals[group_name][global_name]
+                if isinstance(value, Exception):
+                    # Let ExpansionErrors through through, as they occur
+                    # when the user has changed the value without changing
+                    # the expansion type:
+                    if isinstance(value, runmanager.ExpansionError):
+                        continue
+                    return False
+        # Did the guessed expansion type for any of the globals change?
+        expansion_types_changed = False
+        expansion_types = {}
+        for group_name in evaled_globals:
+            for global_name in evaled_globals[group_name]:
+                new_value = evaled_globals[group_name][global_name]
+                try:
+                    previous_value = self.previous_evaled_globals[group_name][global_name]
+                except KeyError:
+                    # This variable is used to guess the expansion type
+                    # 
+                    # If we already have an expansion specified for this, but
+                    # don't have a previous value, then we should use the 
+                    # new_value for the guess as we are likely loading from HDF5
+                    # file for the first time (and either way, don't want to 
+                    # overwrite what the user has put in the expansion type)
+                    #
+                    # If we don't have an expansion...
+                    # then we set it to '0' which will result in an
+                    # expansion type guess of '' (emptys string) This will
+                    # either result in nothing being done to the expansion
+                    # type or the expansion type being found to be 'outer',
+                    # which will then make it go through the machinery below
+                    if global_name in expansions and expansions[global_name]:
+                        previous_value = new_value
+                    else:
+                        previous_value = 0
+
+                new_guess = runmanager.guess_expansion_type(new_value)
+                previous_guess = runmanager.guess_expansion_type(previous_value)
+
+                if new_guess == 'outer':
+                    expansion_types[global_name] = {'previous_guess': previous_guess,
+                                                    'new_guess': new_guess,
+                                                    'group_name': group_name,
+                                                    'value': new_value
+                                                    }
+                elif new_guess != previous_guess:
+                    filename = active_groups[group_name]
+                    runmanager.set_expansion(filename, group_name, global_name, new_guess)
+                    expansions[global_name] = new_guess
+                    expansion_types_changed = True
+
+        # recursively find dependencies and add them to a zip group!
+        def find_dependencies(global_name, global_hierarchy, expansion_types):
+            results = set()
+            for name, dependencies in global_hierarchy.items():
+                if name in expansion_types and global_name in dependencies:
+                    results.add(name)
+                    results = results.union(find_dependencies(name, global_hierarchy, expansion_types))
+            return results
+
+        def global_depends_on_global_with_outer_product(global_name, global_hierarchy, expansions):
+            if global_name not in global_hierarchy:
+                return False
+            else:
+                for dependency in global_hierarchy[global_name]:
+                    if expansions[dependency]:
+                        return True
+
+        def set_expansion_type_guess(expansion_types, expansions, global_name, expansion_to_set, new=True):
+            if new:
+                key = 'new_guess'
+            else:
+                key = 'previous_guess'
+                
+            # debug logging
+            log_if_global(global_name, [], 'setting expansion type for new dependency' if new else 'setting expansion type for old dependencies')
+            
+            
+            # only do this if the expansion is *not* already set to a specific zip group
+            if global_name in expansions and expansions[global_name] != '' and expansions[global_name] != 'outer':
+                expansion_types[global_name][key] = expansions[global_name]
+                
+                # debug logging
+                log_if_global(global_name, [], 'Using existing expansion %s for %s'%(expansions[global_name], global_name))
+            else:
+                expansion_types[global_name][key] = expansion_to_set
+                expansions[global_name] = expansion_to_set
+                
+                # debug logging
+                log_if_global(global_name, [], 'Using existing expansion %s for %s'%(expansion_to_set, global_name))
+            
+        
+        for global_name in sorted(expansion_types):
+            # we have a global that does not depend on anything that has an
+            # expansion type of 'outer'
+            if (not global_depends_on_global_with_outer_product(global_name, global_hierarchy, expansions)
+                    and not isinstance(expansion_types[global_name]['value'], runmanager.ExpansionError)):
+                current_dependencies = find_dependencies(global_name, global_hierarchy, expansion_types)
+
+                # if this global has other globals that use it, then add them
+                # all to a zip group with the name of this global
+                if current_dependencies:
+                    for dependency in current_dependencies:                        
+                        set_expansion_type_guess(expansion_types, expansions, dependency,  str(global_name))
+                            
+                    set_expansion_type_guess(expansion_types, expansions, global_name,  str(global_name))
+
+        for global_name in sorted(self.previous_expansion_types):
+            if (not global_depends_on_global_with_outer_product(
+                global_name, self.previous_global_hierarchy, self.previous_expansions)
+                    and not isinstance(self.previous_expansion_types[global_name]['value'], runmanager.ExpansionError)):
+                old_dependencies = find_dependencies(global_name, self.previous_global_hierarchy, self.previous_expansion_types)
+                # if this global has other globals that use it, then add them
+                # all to a zip group with the name of this global
+                if old_dependencies:
+                    for dependency in old_dependencies:
+                        if dependency in expansion_types:
+                            set_expansion_type_guess(expansion_types, self.previous_expansions, dependency, str(global_name), new=False)
+                    if global_name in expansion_types:
+                        set_expansion_type_guess(expansion_types, self.previous_expansions, global_name, str(global_name), new=False)
+
+        for global_name, guesses in expansion_types.items():
+            if guesses['new_guess'] != guesses['previous_guess']:
+                filename = active_groups[guesses['group_name']]
+                runmanager.set_expansion(
+                    filename, str(guesses['group_name']), str(global_name), str(guesses['new_guess']))
+                expansions[global_name] = guesses['new_guess']
+                expansion_types_changed = True
+
+        # Now check everything that has an expansion type not equal to outer.
+        # If it has one, but is not iteratble, remove it from teh zip group
+        for group_name in evaled_globals:
+            for global_name in evaled_globals[group_name]:
+                if expansions[global_name] and expansions[global_name] != 'outer':
+                    try:
+                        iter(evaled_globals[group_name][global_name])
+                    except Exception:
+                        filename = active_groups[group_name]
+                        runmanager.set_expansion(filename, group_name, global_name, '')
+                        expansion_types_changed = True
+
+        self.previous_evaled_globals = evaled_globals
+        self.previous_global_hierarchy = global_hierarchy
+        self.previous_expansion_types = expansion_types
+        self.previous_expansions = expansions
+
+        return expansion_types_changed
+
+    def make_h5_files(
+        self,
+        labscript_file,
+        output_folder,
+        sequence_globals,
+        shots,
+        shuffle,
+        with_metadata=False,
+    ):
         sequence_attrs, default_output_dir, filename_prefix = runmanager.new_sequence_details(
             labscript_file, config=self.exp_config, increment_sequence_index=True
         )
@@ -4069,14 +4033,32 @@ class RunManager(object):
             sequence_attrs,
             filename_prefix,
             shuffle,
+            return_infos=with_metadata,
+            create_files=not with_metadata,
         )
         logger.debug(run_files)
         return labscript_file, run_files
 
-    def send_to_BLACS(self, run_file, BLACS_hostname=None):
+    def prepare_queue_shot(self, item):
+        active_groups = item.get('active_groups') or inmain(
+            self.get_active_groups, interactive=False
+        )
+        if active_groups is None:
+            raise RuntimeError('No active globals groups available for queued compilation.')
+        sequence_globals, runglobals = runmanager.get_queue_compile_globals(
+            active_groups, item['frozen_globals']
+        )
+        runmanager.make_single_run_file(
+            item['path'],
+            sequence_globals,
+            runglobals,
+            item['sequence_attrs'],
+            item['run_no'],
+            item['n_runs'],
+        )
+
+    def send_to_BLACS(self, run_file, BLACS_hostname):
         port = int(self.exp_config.get('ports', 'BLACS'))
-        if BLACS_hostname is None:
-            BLACS_hostname = self.exp_config.get('servers', 'blacs', fallback='localhost')
         agnostic_path = shared_drive.path_to_agnostic(run_file)
         self.output_box.output('Submitting run file %s.\n' % os.path.basename(run_file))
         try:
@@ -4126,6 +4108,79 @@ class RunManager(object):
         except Exception as e:
             self.output_box.output('Couldn\'t submit shot to runviewer: %s\n\n' % str(e), red=True)
 
+    def queue_request_next(self):
+        item = self.queue_manager.pop_next()
+        if item is None:
+            queue_state = self.queue_manager.get_queue_state()
+            if queue_state['empty_queue_policy'] != EMPTY_QUEUE_DEFAULT_LABSCRIPT:
+                self.queue_manager.set_last_sent_to_blacs(None)
+                return None
+            labscript_file = queue_state['default_labscript_file']
+            if not labscript_file:
+                self.queue_manager.set_last_sent_to_blacs(None)
+                return None
+            self.queue_manager.set_last_sent_to_blacs(None)
+            if not os.path.isfile(labscript_file):
+                raise RuntimeError(
+                    'Default-shot labscript file does not exist: %s' % labscript_file
+                )
+            active_groups = inmain(self.get_active_groups, interactive=False)
+            if active_groups is None:
+                self.queue_manager.set_last_sent_to_blacs(None)
+                return None
+            sequence_globals, runglobals = runmanager.get_default_shot_globals(
+                active_groups
+            )
+            send_to_runviewer = inmain(self.ui.checkBox_view_shots.isChecked)
+            sequence_attrs, output_folder, filename_prefix = (
+                runmanager.new_sequence_details(
+                    labscript_file,
+                    config=self.exp_config,
+                    increment_sequence_index=True,
+                    default=True,
+                )
+            )
+            run_file_base = os.path.join(
+                output_folder,
+                '{}.h5'.format(filename_prefix),
+            )
+            start = self._next_default_shot_index.get(run_file_base, 0)
+            run_file, default_index = next_available_indexed_filepath(
+                run_file_base,
+                '_{index}',
+                start=start,
+            )
+            self._next_default_shot_index[run_file_base] = default_index + 1
+            runmanager.make_single_run_file(
+                run_file,
+                sequence_globals,
+                runglobals,
+                sequence_attrs,
+                0,
+                1,
+            )
+            success = self.queue_manager.compile_shot(
+                {'path': run_file, 'labscript_file': labscript_file},
+                send_to_runviewer=send_to_runviewer,
+            )
+            if not success:
+                raise RuntimeError(
+                    'Compilation failed for %s' % os.path.basename(run_file)
+                )
+        else:
+            run_file = item['path']
+            if not item['compiled']:
+                send_to_runviewer = inmain(self.ui.checkBox_view_shots.isChecked)
+                success = self.queue_manager.compile_shot(
+                    item, send_to_runviewer=send_to_runviewer
+                )
+                if not success:
+                    self.queue_manager.set_last_sent_to_blacs(None)
+                    return None
+        agnostic_path = shared_drive.path_to_agnostic(run_file)
+        self.queue_manager.set_last_sent_to_blacs(agnostic_path)
+        return agnostic_path
+
 
 class RemoteServer(ZMQServer):
     def __init__(self):
@@ -4134,91 +4189,183 @@ class RemoteServer(ZMQServer):
         )
         ZMQServer.__init__(self, port=port)
 
-    def handle_get_globals(self, raw=False):
+    def _get_active_global_locations(self):
         active_groups = inmain(app.get_active_groups, interactive=False)
         sequence_globals = runmanager.get_globals(active_groups)
-        all_globals = {}
+        locations = {}
+        for group_name, group_globals in sequence_globals.items():
+            globals_file = active_groups[group_name]
+            for global_name in group_globals:
+                if global_name in locations:
+                    other_file, other_group = locations[global_name]
+                    msg = """Global %s is defined in multiple active groups: %s and %s"""
+                    raise RuntimeError(msg % (global_name, other_group, group_name))
+                locations[global_name] = (globals_file, group_name)
+        return active_groups, sequence_globals, locations
+
+    def _get_global_field_values(self, getter):
+        _, _, locations = self._get_active_global_locations()
+        values = {}
+        for global_name, (globals_file, group_name) in locations.items():
+            values[global_name] = getter(globals_file, group_name, global_name)
+        return values
+
+    def _get_expression_field_values(self, getter, raw=False):
+        active_groups, _, locations = self._get_active_global_locations()
+        sequence_globals = {group_name: {} for group_name in active_groups}
+        for global_name, (globals_file, group_name) in locations.items():
+            expression = getter(globals_file, group_name, global_name)
+            sequence_globals[group_name][global_name] = (expression, '', '')
         if raw:
+            values = {}
             for group_globals in sequence_globals.values():
-                values_only = {name: val for name, (val, _, _) in group_globals.items()}
-                all_globals.update(values_only)
-        else:
-            evaled_globals, global_hierarchy, expansions = runmanager.evaluate_globals(
-                sequence_globals, raise_exceptions=False
-            )
-            for group_globals in evaled_globals.values():
-                all_globals.update(group_globals)
-        return all_globals
+                values.update(
+                    {name: expression for name, (expression, _, _) in group_globals.items()}
+                )
+            return values
+        evaled_globals, _, _ = runmanager.evaluate_globals(
+            sequence_globals, raise_exceptions=False
+        )
+        values = {}
+        for group_globals in evaled_globals.values():
+            values.update(group_globals)
+        return values
+
+    @staticmethod
+    def _coerce_remote_boolean(value, name):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int) and value in (0, 1):
+            return bool(value)
+        raise TypeError('%s must be a bool, not %s' % (name, value.__class__.__name__))
 
     @inmain_decorator()
-    def handle_set_globals(self, globals, raw=False):
-        active_groups = app.get_active_groups(interactive=False)
-        sequence_globals = runmanager.get_globals(active_groups)
+    def _set_expression_field_values(self, getter, setter, changer_name, globals, raw=False):
+        _, _, locations = self._get_active_global_locations()
         try:
             for global_name, new_value in globals.items():
-                # Unless raw=True, convert to str representation for saving to the GUI
-                # or file. If this does not result in an object the user can actually
-                # use, evaluation will error and the caller will find out about it later
                 if not raw:
                     new_value = repr(new_value)
                 elif not isinstance(new_value, (str, bytes)):
                     msg = "global %s must be a string if raw=True, not %s"
                     raise TypeError(msg % (global_name, new_value.__class__.__name__))
-
-                # Find the group this global is in:
-                for group_name, group_globals in sequence_globals.items():
-                    globals_file = active_groups[group_name]
-                    if global_name in group_globals:
-                        # Confirm it's not also in another group:
-                        for other_name, other_globals in sequence_globals.items():
-                            if other_globals is not group_globals:
-                                if global_name in other_globals:
-                                    msg = """Cannot set global %s, it is defined in
-                                        multiple active groups: %s and %s"""
-                                    msg = msg % (global_name, group_name, other_name)
-                                    raise RuntimeError(dedent(msg))
-                        previous_value = runmanager.get_value(
-                            globals_file, group_name, global_name
-                        )
-
-                        # Append expression-final comments in the previous expression to
-                        # the new one:
-                        comments = runmanager.find_comments(previous_value)
-                        if comments:
-                            # Only the final comment
-                            comment_start, comment_end = comments[-1]
-                            # Only if the comment is the last thing in the expression:
-                            if comment_end == len(previous_value):
-                                new_value += previous_value[comment_start:comment_end]
-                        try:
-                            # Is the group open?
-                            group_tab = app.currently_open_groups[
-                                globals_file, group_name
-                            ]
-                        except KeyError:
-                            # Group is not open. Change the global value on disk:
-                            globals_file = app.ensure_editable_globals_file(globals_file)
-                            runmanager.set_value(
-                                globals_file, group_name, global_name, new_value
-                            )
-                        else:
-                            # Group is open. Change the global value via the GUI:
-                            group_tab.change_global_default(
-                                global_name,
-                                previous_value,
-                                new_value,
-                                interactive=False,
-                            )
-                        break
+                try:
+                    globals_file, group_name = locations[global_name]
+                except KeyError:
+                    raise ValueError(
+                        "Global %s not found in any active group" % global_name
+                    )
+                previous_value = getter(globals_file, group_name, global_name)
+                comments = runmanager.find_comments(previous_value)
+                if comments:
+                    comment_start, comment_end = comments[-1]
+                    if comment_end == len(previous_value):
+                        new_value += previous_value[comment_start:comment_end]
+                try:
+                    group_tab = app.currently_open_groups[globals_file, group_name]
+                except KeyError:
+                    globals_file = app.ensure_editable_globals_file(globals_file)
+                    setter(globals_file, group_name, global_name, new_value)
                 else:
-                    # Global was not found.
-                    msg = "Global %s not found in any active group" % global_name
-                    raise ValueError(msg)
+                    getattr(group_tab, changer_name)(
+                        global_name, previous_value, new_value, interactive=False
+                    )
         finally:
-            # Trigger preparsing of globals to occur so that changes in globals not in
-            # open tabs are reflected in the GUI, such as n_shots, errors on other
-            # globals that depend on them, etc.
             app.globals_changed()
+
+    @inmain_decorator()
+    def _set_boolean_field_values(self, getter, setter, changer_name, globals):
+        _, _, locations = self._get_active_global_locations()
+        try:
+            for global_name, new_value in globals.items():
+                new_value = self._coerce_remote_boolean(
+                    new_value, 'global %s' % global_name
+                )
+                try:
+                    globals_file, group_name = locations[global_name]
+                except KeyError:
+                    raise ValueError(
+                        "Global %s not found in any active group" % global_name
+                    )
+                previous_value = getter(globals_file, group_name, global_name)
+                try:
+                    group_tab = app.currently_open_groups[globals_file, group_name]
+                except KeyError:
+                    globals_file = app.ensure_editable_globals_file(globals_file)
+                    setter(globals_file, group_name, global_name, new_value)
+                else:
+                    getattr(group_tab, changer_name)(
+                        global_name, previous_value, new_value, interactive=False
+                    )
+        finally:
+            app.globals_changed()
+
+    def handle_get_default_globals(self, raw=False):
+        return self._get_expression_field_values(runmanager.get_value, raw=raw)
+
+    def handle_get_globals(self, raw=False):
+        active_groups = inmain(app.get_active_groups, interactive=False)
+        sequence_globals = runmanager.get_globals(active_groups)
+        if raw:
+            values = {}
+            for group_globals in sequence_globals.values():
+                values.update(
+                    {name: expression for name, (expression, _, _) in group_globals.items()}
+                )
+            return values
+        evaled_globals, _, _ = runmanager.evaluate_globals(
+            sequence_globals, raise_exceptions=False
+        )
+        values = {}
+        for group_globals in evaled_globals.values():
+            values.update(group_globals)
+        return values
+
+    def handle_get_scan_globals(self, raw=False):
+        return self._get_expression_field_values(runmanager.get_scan, raw=raw)
+
+    def handle_get_scan_enabled(self):
+        return self._get_global_field_values(runmanager.get_scan_enabled)
+
+    def handle_get_jit_enabled(self):
+        return self._get_global_field_values(runmanager.get_jit_enabled)
+
+    def handle_set_default_globals(self, globals, raw=False):
+        return self._set_expression_field_values(
+            runmanager.get_value,
+            runmanager.set_value,
+            'change_global_default',
+            globals,
+            raw=raw,
+        )
+
+    def handle_set_globals(self, globals, raw=False):
+        return self.handle_set_default_globals(globals, raw=raw)
+
+    def handle_set_scan_globals(self, globals, raw=False):
+        return self._set_expression_field_values(
+            runmanager.get_scan,
+            runmanager.set_scan,
+            'change_global_scan',
+            globals,
+            raw=raw,
+        )
+
+    def handle_set_scan_enabled(self, globals):
+        return self._set_boolean_field_values(
+            runmanager.get_scan_enabled,
+            runmanager.set_scan_enabled,
+            'change_global_scan_enabled',
+            globals,
+        )
+
+    def handle_set_jit_enabled(self, globals):
+        return self._set_boolean_field_values(
+            runmanager.get_jit_enabled,
+            runmanager.set_jit_enabled,
+            'change_global_jit_enabled',
+            globals,
+        )
 
     def handle_engage(self):
         app.wait_until_preparse_complete()
@@ -4234,7 +4381,9 @@ class RemoteServer(ZMQServer):
 
     @inmain_decorator()
     def handle_set_run_shots(self, value):
-        app.ui.checkBox_run_shots.setChecked(value)
+        app.ui.checkBox_run_shots.setChecked(
+            self._coerce_remote_boolean(value, 'value')
+        )
 
     @inmain_decorator()
     def handle_get_view_shots(self):
@@ -4242,7 +4391,9 @@ class RemoteServer(ZMQServer):
 
     @inmain_decorator()
     def handle_set_view_shots(self, value):
-        app.ui.checkBox_view_shots.setChecked(value)
+        app.ui.checkBox_view_shots.setChecked(
+            self._coerce_remote_boolean(value, 'value')
+        )
 
     @inmain_decorator()
     def handle_get_shuffle(self):
@@ -4250,7 +4401,9 @@ class RemoteServer(ZMQServer):
 
     @inmain_decorator()
     def handle_set_shuffle(self, value):
-        app.ui.pushButton_shuffle.setChecked(value)
+        app.ui.pushButton_shuffle.setChecked(
+            self._coerce_remote_boolean(value, 'value')
+        )
 
     def handle_n_shots(self):
         # Wait until any current preparsing is done, to ensure this is not racy w.r.t
@@ -4300,25 +4453,6 @@ class RemoteServer(ZMQServer):
     def handle_queue_request_next(self):
         return app.queue_request_next()
 
-    def handle_queue_add_shot(self, agnostic_path, start=False):
-        return app.queue_add_shot(agnostic_path, start=start)
-
-    def handle_queue_get_state(self):
-        return app.queue_controller.get_queue_state()
-
-    def handle_queue_get_items(self):
-        return app.queue_controller.get_queue_items()
-
-    def handle_queue_clear(self):
-        app.queue_controller.clear()
-        app.refresh_queue_tab()
-        return app.queue_controller.get_queue_state()
-
-    def handle_queue_delete(self, rows):
-        app.queue_controller.delete_rows(rows)
-        app.refresh_queue_tab()
-        return app.queue_controller.get_queue_state()
-
     def handle_notify_shot_complete(self, filepath):
         return app.analysis_submission.notify_shot_complete(filepath)
 
@@ -4340,9 +4474,21 @@ if __name__ == "__main__":
     logger = setup_logging('runmanager')
     labscript_utils.excepthook.set_logger(logger)
     logger.info('\n\n===============starting===============\n')
-    qapplication = get_qapplication()
+    qapplication = QtWidgets.QApplication.instance()
+    if qapplication is None:
+        qapplication = QtWidgets.QApplication(sys.argv)
+    qapplication.setAttribute(QtCore.Qt.AA_DontShowIconsInMenus, False)
     app = RunManager()
     splash.update_text('Starting remote server')
     remote_server = RemoteServer()
     splash.hide()
-    run_qapplication(qapplication, on_shutdown=remote_server.shutdown)
+
+    # Let the interpreter run every 500ms so it sees Ctrl-C interrupts:
+    timer = QtCore.QTimer()
+    timer.start(500)
+    timer.timeout.connect(lambda: None)
+    # Upon seeing a ctrl-c interrupt, quit the event loop
+    signal.signal(signal.SIGINT, lambda *args: qapplication.exit())
+
+    qapplication.exec_()
+    remote_server.shutdown()
