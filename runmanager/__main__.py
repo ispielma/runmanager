@@ -2266,19 +2266,25 @@ class RunManager(object):
             lambda: self.on_engage_clicked(submission_mode=SUBMISSION_MODE_ADD_SHOTS)
         )
         self.engage_add_clear_action = self.engage_submission_menu.addAction(
-            'Add shots and empty queue'
+            'Replace queue and add shots'
         )
         self.engage_add_clear_action.triggered.connect(
             lambda: self.on_engage_clicked(
                 submission_mode=SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE
             )
         )
+        self.engage_add_clear_action.setToolTip(
+            'Delete the remaining queued shots, then submit a replacement batch onto the same shot series.'
+        )
+        self.engage_add_clear_action.setStatusTip(
+            'Delete the remaining queued shots, then submit a replacement batch onto the same shot series.'
+        )
         self.engage_submission_menu.aboutToShow.connect(
             self.update_engage_submission_menu_actions
         )
         button.setMenu(self.engage_submission_menu)
         button.setToolTip(
-            """<html><head/><body><p>Compile pending shots, submit them to BLACS if "run shots" is checked, and send them to runviewer if "view shots" is checked.</p><p>Press and hold to choose alternate queue submission modes.</p></body></html>"""
+            """<html><head/><body><p>Compile pending shots, submit them to BLACS if "run shots" is checked, and send them to runviewer if "view shots" is checked.</p><p>Press and hold to choose alternate queue submission modes.</p><p><span style="font-style:italic;">Replace queue and add shots</span> deletes the remaining queued shots before submitting the replacement batch. With lazy compile enabled, later compile failures are still possible when BLACS requests those shots.</p></body></html>"""
         )
 
     def get_queue_append_filepath(self):
