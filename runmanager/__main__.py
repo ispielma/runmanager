@@ -2260,18 +2260,23 @@ class RunManager(object):
     def setup_engage_submission_menu(self):
         button = self.ui.pushButton_engage
         button.setPopupMode(QtWidgets.QToolButton.DelayedPopup)
-        engage_menu = QtWidgets.QMenu(button)
-        add_shots_action = engage_menu.addAction('Add shots')
-        add_shots_action.triggered.connect(
+        self.engage_submission_menu = QtWidgets.QMenu(button)
+        self.engage_add_shots_action = self.engage_submission_menu.addAction('Add shots')
+        self.engage_add_shots_action.triggered.connect(
             lambda: self.on_engage_clicked(submission_mode=SUBMISSION_MODE_ADD_SHOTS)
         )
-        add_clear_action = engage_menu.addAction('Add shots and empty queue')
-        add_clear_action.triggered.connect(
+        self.engage_add_clear_action = self.engage_submission_menu.addAction(
+            'Add shots and empty queue'
+        )
+        self.engage_add_clear_action.triggered.connect(
             lambda: self.on_engage_clicked(
                 submission_mode=SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE
             )
         )
-        button.setMenu(engage_menu)
+        self.engage_submission_menu.aboutToShow.connect(
+            self.update_engage_submission_menu_actions
+        )
+        button.setMenu(self.engage_submission_menu)
         button.setToolTip(
             """<html><head/><body><p>Compile pending shots, submit them to BLACS if "run shots" is checked, and send them to runviewer if "view shots" is checked.</p><p>Press and hold to choose alternate queue submission modes.</p></body></html>"""
         )
@@ -2289,14 +2294,16 @@ class RunManager(object):
             return None
         return os.path.abspath(shared_drive.path_to_local(last_sent_from_queue))
 
-    def delete_queue_files(self):
-        queue_paths = self.queue_manager.get_queue_paths()
-        for path in queue_paths:
-            try:
-                os.remove(path)
-            except FileNotFoundError:
-                continue
-        return queue_paths
+    def can_use_queue_append_submission_mode(self):
+        return (
+            self.ui.checkBox_run_shots.isChecked()
+            and self.get_queue_append_filepath() is not None
+        )
+
+    def update_engage_submission_menu_actions(self):
+        enabled = self.can_use_queue_append_submission_mode()
+        self.engage_add_shots_action.setEnabled(enabled)
+        self.engage_add_clear_action.setEnabled(enabled)
 
     def reindex_run_file_infos(
         self, run_file_infos, output_folder, filename_prefix, indexed_path_base=None
@@ -2331,6 +2338,21 @@ class RunManager(object):
                     red=True,
                 )
                 return
+            queue_append_filepath = None
+            if submission_mode != SUBMISSION_MODE_NEW_FOLDER:
+                queue_append_filepath = self.get_queue_append_filepath()
+                if not send_to_BLACS:
+                    self.output_box.output(
+                        "Warning: alternate queue submission modes require 'Run shot(s)' to be selected.\n\n",
+                        red=True,
+                    )
+                    return
+                if queue_append_filepath is None:
+                    self.output_box.output(
+                        'Warning: alternate queue submission modes require shots in the queue.\n\n',
+                        red=True,
+                    )
+                    return
             labscript_file = self.ui.lineEdit_labscript_file.text()
             # even though we shuffle on a per global basis, if ALL of the globals are set to shuffle, then we may as well shuffle again. This helps shuffle shots more randomly than just shuffling within each level (because without this, you would still do all shots with the outer most variable the same, etc)
             shuffle = self.ui.pushButton_shuffle.checkState() == QtCore.Qt.Checked
@@ -2356,19 +2378,13 @@ class RunManager(object):
             logger.info('Making h5 files')
             globals_details = runmanager.get_globals_details(active_groups)
             indexed_path_base = None
-            queue_append_filepath = self.get_queue_append_filepath()
             if submission_mode == SUBMISSION_MODE_ADD_SHOTS:
                 indexed_path_base = queue_append_filepath
-            elif (
-                submission_mode == SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE
-                and queue_append_filepath is not None
-            ):
+            elif submission_mode == SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE:
                 indexed_path_base = (
                     self.get_last_sent_from_queue_filepath() or queue_append_filepath
                 )
-                if indexed_path_base is not None:
-                    self.delete_queue_files()
-                    self.queue_manager.clear()
+                self.queue_manager.clear()
             labscript_file, run_files = self.make_h5_files(
                 labscript_file,
                 output_folder,
