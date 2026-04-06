@@ -26,7 +26,7 @@ import threading
 from qtutils.qt import QtCore, QtGui, QtWidgets
 from qtutils.qt.QtCore import pyqtSignal as Signal
 
-from labscript_utils.qtwidgets.shotqueue import FILEPATH_COLUMN, ShotQueueWidget
+from labscript_utils.qtwidgets.shotqueue import ShotQueueWidget
 from zprocess import raise_exception_in_thread
 
 EMPTY_QUEUE_NOTHING = 'nothing'
@@ -47,7 +47,8 @@ class RunmanagerQueueWidget(ShotQueueWidget):
             accepted_extensions=('.h5', '.hdf5'),
             file_dialog_filter='Shot files (*.h5 *.hdf5)',
             allow_duplicates=True,
-            column_titles=['Shot file', 'Mode'],
+            column_titles=['Mode', 'Shot file'],
+            path_column=1,
         )
         self.queue_view.setAcceptDrops(False)
         self.queue_view.setDragEnabled(False)
@@ -97,21 +98,12 @@ class RunmanagerQueueWidget(ShotQueueWidget):
         self._restore_selection(selected_paths)
 
     def selected_paths(self):
-        paths = []
-        for row in self.selected_rows():
-            item = self.queue_model.item(row, FILEPATH_COLUMN)
-            paths.append(item.data(QtCore.Qt.UserRole))
-        return paths
+        return self.selected_files()
 
     def _restore_selection(self, selected_paths):
         if not selected_paths:
             return
-        rows = []
-        for row in range(self.queue_model.rowCount()):
-            item = self.queue_model.item(row, FILEPATH_COLUMN)
-            if item.data(QtCore.Qt.UserRole) in selected_paths:
-                rows.append(row)
-        self._select_rows(rows)
+        self.select_paths(selected_paths)
 
     def _emit_delete(self):
         rows = self.selected_rows()
