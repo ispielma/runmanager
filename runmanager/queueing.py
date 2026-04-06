@@ -23,7 +23,7 @@ import os
 import queue
 import threading
 
-from qtutils.qt import QtCore, QtGui, QtWidgets
+from qtutils.qt import QtCore, QtWidgets
 from qtutils.qt.QtCore import pyqtSignal as Signal
 
 from labscript_utils.qtwidgets.shotqueue import ShotQueueWidget
@@ -49,31 +49,19 @@ class RunmanagerQueueWidget(ShotQueueWidget):
             allow_duplicates=True,
             column_titles=['Mode', 'Shot file'],
             path_column=1,
+            connect_add_button=False,
+            connect_delete_requested=False,
+            connect_files_dropped=False,
         )
         self.queue_view.setAcceptDrops(False)
         self.queue_view.setDragEnabled(False)
         self.queue_view.setDropIndicatorShown(False)
         self.queue_view.setDragDropMode(QtWidgets.QAbstractItemView.NoDragDrop)
-        self._disconnect_default_controls()
         self.add_button.hide()
         self.queue_view.deleteRequested.connect(self._emit_delete)
 
-    def _disconnect_default_controls(self):
-        try:
-            self.add_button.clicked.disconnect()
-        except TypeError:
-            pass
-        try:
-            self.queue_view.deleteRequested.disconnect()
-        except TypeError:
-            pass
-        try:
-            self.queue_view.filesDropped.disconnect()
-        except TypeError:
-            pass
-
     def set_queue_paths(self, paths):
-        selected_paths = set(self.selected_paths())
+        selected_paths = set(self.selected_files())
         row_infos = []
         for path_info in paths:
             if isinstance(path_info, dict):
@@ -95,14 +83,6 @@ class RunmanagerQueueWidget(ShotQueueWidget):
             else:
                 row_infos.append(path_info)
         self.set_row_infos(row_infos)
-        self._restore_selection(selected_paths)
-
-    def selected_paths(self):
-        return self.selected_files()
-
-    def _restore_selection(self, selected_paths):
-        if not selected_paths:
-            return
         self.select_paths(selected_paths)
 
     def _emit_delete(self):
@@ -183,31 +163,6 @@ class QueueController(object):
             removed_paths = [item['path'] for item in self._items]
             self._items = []
             return removed_paths
-
-    def move(self, direction, rows):
-        rows = sorted(set(rows))
-        if not rows:
-            return
-        with self._lock:
-            items = self._items
-            if direction == 'up':
-                for row in rows:
-                    if row > 0 and row - 1 not in rows:
-                        items[row - 1], items[row] = items[row], items[row - 1]
-            elif direction == 'down':
-                for row in reversed(rows):
-                    if row < len(items) - 1 and row + 1 not in rows:
-                        items[row + 1], items[row] = items[row], items[row + 1]
-            elif direction == 'top':
-                selected = [items[row] for row in rows]
-                remaining = [item for index, item in enumerate(items) if index not in rows]
-                self._items = selected + remaining
-            elif direction == 'bottom':
-                selected = [items[row] for row in rows]
-                remaining = [item for index, item in enumerate(items) if index not in rows]
-                self._items = remaining + selected
-            else:
-                raise ValueError('Invalid move direction: %s' % direction)
 
     def get_queue_paths(self):
         with self._lock:
@@ -370,9 +325,6 @@ class QueueManager(QtCore.QObject):
     def clear(self):
         return self._request('clear')
 
-    def move(self, direction, rows):
-        return self._request('move', direction, list(rows))
-
     def pop_next(self):
         return self._request('pop_next')
 
@@ -435,10 +387,6 @@ class QueueManager(QtCore.QObject):
                 elif command == 'clear':
                     result = self.controller.clear()
                     changed = bool(result)
-                elif command == 'move':
-                    self.controller.move(*args)
-                    changed = True
-                    result = None
                 elif command == 'pop_next':
                     result = self.controller.pop_next()
                     changed = result is not None
