@@ -54,6 +54,7 @@ splash.update_text('importing labscript suite modules')
 from labscript_utils.ls_zprocess import zmq_get, ProcessTree, ZMQServer
 from labscript_utils.labconfig import (
     LabConfig,
+    LabscriptApplication,
     save_appconfig,
     load_appconfig,
 )
@@ -1578,7 +1579,10 @@ class PoppedOutOutputBoxWindow(QtWidgets.QDialog):
         app.on_output_popout_button_clicked()
 
 
-class RunManager(object):
+class RunManager(LabscriptApplication):
+
+    app_name = 'runmanager'
+    default_config_filename = 'runmanager.toml'
 
     # Constants for the model in the axes tab:
     AXES_COL_NAME = 0
@@ -1605,6 +1609,7 @@ class RunManager(object):
         self.ui = loader.load(
             os.path.join(runmanager_dir, 'main.ui'), RunmanagerMainWindow()
         )
+        self.init_config_window_title()
 
         self.output_box = OutputBox(self.ui.verticalLayout_output_tab)
 
@@ -1704,11 +1709,13 @@ class RunManager(object):
         self.last_save_data = None
 
         # autoload a config file, if labconfig is set to do so:
+        active_config_file = self.get_default_config_file()
         try:
             autoload_config_file = self.exp_config.get('runmanager', 'autoload_config_file')
         except (LabConfig.NoOptionError, LabConfig.NoSectionError):
             self.output_box.output('Ready.\n\n')
         else:
+            active_config_file = autoload_config_file
             self.ui.setEnabled(False)
             self.output_box.output('Loading default config file %s...' % autoload_config_file)
 
@@ -1727,6 +1734,7 @@ class RunManager(object):
             # so that the GUI pops up faster in the meantime
             self.ui.firstPaint.connect(lambda: QtCore.QTimer.singleShot(50, load_the_config_file))
 
+        self.set_config_window_title(active_config_file)
         splash.update_text('done')
         self.ui.show()
 
@@ -3355,17 +3363,7 @@ class RunManager(object):
         if self.last_save_config_file is not None:
             default = self.last_save_config_file
         else:
-            try:
-                default = os.path.join(
-                    self.exp_config.get('default', 'app_saved_configs'),
-                    'runmanager',
-                    'runmanager.toml',
-                )
-            except LabConfig.NoOptionError:
-                default = os.path.join(
-                    self.exp_config.get('paths', 'experiment_shot_storage'),
-                    'runmanager.toml',
-                )
+            default = self.get_default_config_file(ensure_directory=True)
         save_file = QtWidgets.QFileDialog.getSaveFileName(self.ui,
                                                       'Select  file to save current runmanager configuration',
                                                       default,
@@ -3449,6 +3447,7 @@ class RunManager(object):
         save_file = save_appconfig(save_file, {'runmanager_state': save_data})
         self.last_save_config_file = save_file
         self.last_save_data = save_data
+        self.set_config_window_title(save_file)
 
     def on_load_configuration_triggered(self):
         save_data = self.get_save_data()
@@ -3465,17 +3464,7 @@ class RunManager(object):
         if self.last_save_config_file is not None:
             default = self.last_save_config_file
         else:
-            try:
-                default = os.path.join(
-                    self.exp_config.get('default', 'app_saved_configs'),
-                    'runmanager',
-                    'runmanager.toml',
-                )
-            except LabConfig.NoOptionError:
-                default = os.path.join(
-                    self.exp_config.get('paths', 'experiment_shot_storage'),
-                    'runmanager.toml',
-                )
+            default = self.get_default_config_file()
 
         file = QtWidgets.QFileDialog.getOpenFileName(self.ui,
                                                  'Select runmanager configuration file to load',
@@ -3600,6 +3589,7 @@ class RunManager(object):
         self.last_save_data = save_data
         self.ui.actionSave_configuration_as.setEnabled(True)
         self.ui.actionRevert_configuration.setEnabled(True)
+        self.set_config_window_title(save_target)
 
     def compile_loop(self):
         while True:
