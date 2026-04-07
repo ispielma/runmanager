@@ -33,6 +33,7 @@ import numpy as np
 
 from labscript_utils.ls_zprocess import ProcessTree, zmq_push_multipart
 from labscript_utils.labconfig import LabConfig
+from labscript_utils.lookup_format import format_lookup_string
 import labscript_utils.shot_utils
 process_tree = ProcessTree.instance()
 
@@ -638,6 +639,7 @@ def new_sequence_details(script_path, config=None, increment_sequence_index=True
         'sequence_index': sequence_index,
         'sequence_id': sequence_id,
     }
+    context = dict(sequence_attrs, sequence_timestamp=sequence_timestamp, globals={})
 
     # Compute the output directory based on labconfig settings:
     try:
@@ -647,8 +649,8 @@ def new_sequence_details(script_path, config=None, increment_sequence_index=True
 
     # Format the output directory according to the current timestamp, sequence index and
     # sequence_timestamp, if present in the format string:
-    subdir = now.strftime(subdir_format).format(
-        sequence_index=sequence_index, sequence_timestamp=sequence_timestamp
+    subdir = format_lookup_string(
+        subdir_format, context, dt=now, preserve_unresolved_roots=('globals',)
     )
     shot_output_dir = os.path.join(shot_basedir, subdir)
 
@@ -660,10 +662,8 @@ def new_sequence_details(script_path, config=None, increment_sequence_index=True
         filename_prefix_format = '{sequence_timestamp}_{script_basename}'
     # Format the filename prefix according to the current timestamp, sequence index,
     # sequence_timestamp, and script_basename, if present in the format string:
-    filename_prefix = now.strftime(filename_prefix_format).format(
-        sequence_index=sequence_index,
-        sequence_timestamp=sequence_timestamp,
-        script_basename=script_basename,
+    filename_prefix = format_lookup_string(
+        filename_prefix_format, context, dt=now, preserve_unresolved_roots=('globals',)
     )
 
     return sequence_attrs, shot_output_dir, filename_prefix
@@ -695,12 +695,15 @@ def make_run_files(
     created at some point, simply convert the returned generator to a list. The
     filenames the run files are given is simply the sequence_id with increasing integers
     appended."""
-    basename = os.path.join(output_folder, filename_prefix)
     nruns = len(shots)
     ndigits = int(np.ceil(np.log10(nruns)))
     if shuffle:
         random.shuffle(shots)
     for i, shot_globals in enumerate(shots):
+        basename = os.path.join(
+            format_lookup_string(output_folder, {'globals': shot_globals}),
+            format_lookup_string(filename_prefix, {'globals': shot_globals}),
+        )
         runfilename = ('%s_%0' + str(ndigits) + 'd.h5') % (basename, i)
         make_single_run_file(
             runfilename, sequence_globals, shot_globals, sequence_attrs, i, nruns
