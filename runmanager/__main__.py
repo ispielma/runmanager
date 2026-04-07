@@ -95,6 +95,11 @@ process_tree = ProcessTree.instance()
 # Set a meaningful name for zprocess.locking's client id:
 process_tree.zlock_client.set_process_name('runmanager')
 
+SUBMISSION_MODE_NEW_FOLDER = 'new_folder'
+SUBMISSION_MODE_ADD_SHOTS = 'add_shots'
+SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE = 'new_folder_clear_queue'
+SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE = 'add_shots_clear_queue'
+
 
 def log_if_global(g, g_list, message):
     """logs a message if the global name "g" is in "g_list"
@@ -2013,6 +2018,7 @@ class RunManager(LabscriptApplication):
         self.ui.lineEdit_shot_output_folder.textChanged.connect(self.on_shot_output_folder_text_changed)
 
         # Control buttons; engage, abort, restart subprocess:
+        self.setup_engage_submission_menu()
         self.ui.pushButton_engage.clicked.connect(self.on_engage_clicked)
         self.ui.pushButton_abort.clicked.connect(self.on_abort_clicked)
         self.ui.pushButton_restart_subprocess.clicked.connect(self.on_restart_subprocess_clicked)
@@ -2123,14 +2129,14 @@ class RunManager(LabscriptApplication):
         controller = self.queue_manager.controller
         self.queue_widget.set_queue_paths(controller.get_queue_display_items())
         state = controller.get_queue_state()
-        last_sent_to_blacs = state['last_sent_to_blacs']
-        if last_sent_to_blacs:
+        last_sent_from_queue = state['last_sent_from_queue']
+        if last_sent_from_queue:
             self.queue_last_sent_label.setText(
-                'Last sent to BLACS: %s' % last_sent_to_blacs
+                'Last sent from queue: %s' % last_sent_from_queue
             )
-            self.queue_last_sent_label.setToolTip(last_sent_to_blacs)
+            self.queue_last_sent_label.setToolTip(last_sent_from_queue)
         else:
-            self.queue_last_sent_label.setText('Last sent to BLACS: nothing')
+            self.queue_last_sent_label.setText('Last sent from queue: nothing')
             self.queue_last_sent_label.setToolTip('')
 
     def on_output_popout_button_clicked(self):
@@ -2252,7 +2258,117 @@ class RunManager(LabscriptApplication):
         self.ui.label_non_default_folder.setVisible(self.non_default_folder)
         self.ui.lineEdit_shot_output_folder.setToolTip(text)
 
-    def on_engage_clicked(self):
+    def setup_engage_submission_menu(self):
+        button = self.ui.pushButton_engage
+        button.setPopupMode(QtWidgets.QToolButton.DelayedPopup)
+        self.engage_submission_menu = QtWidgets.QMenu(button)
+        self.engage_new_sequence_action = self.engage_submission_menu.addAction(
+            'Add shots to new sequence'
+        )
+        self.engage_new_sequence_action.triggered.connect(
+            lambda: self.on_engage_clicked(submission_mode=SUBMISSION_MODE_NEW_FOLDER)
+        )
+        self.engage_new_sequence_action.setToolTip(
+            'Submit the new batch as a new shot sequence.'
+        )
+        self.engage_new_sequence_action.setStatusTip(
+            'Submit the new batch as a new shot sequence.'
+        )
+        self.engage_add_shots_action = self.engage_submission_menu.addAction(
+            'Add shots to last sequence'
+        )
+        self.engage_add_shots_action.triggered.connect(
+            lambda: self.on_engage_clicked(submission_mode=SUBMISSION_MODE_ADD_SHOTS)
+        )
+        self.engage_replace_queue_action = self.engage_submission_menu.addAction(
+            'Empty queue, then add shots to new sequence'
+        )
+        self.engage_replace_queue_action.triggered.connect(
+            lambda: self.on_engage_clicked(
+                submission_mode=SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE
+            )
+        )
+        self.engage_replace_queue_action.setToolTip(
+            'Delete the remaining queued shots, then submit the replacement batch as a new shot sequence.'
+        )
+        self.engage_replace_queue_action.setStatusTip(
+            'Delete the remaining queued shots, then submit the replacement batch as a new shot sequence.'
+        )
+        self.engage_add_clear_action = self.engage_submission_menu.addAction(
+            'Empty queue, then add shots to last sequence'
+        )
+        self.engage_add_clear_action.triggered.connect(
+            lambda: self.on_engage_clicked(
+                submission_mode=SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE
+            )
+        )
+        self.engage_add_clear_action.setToolTip(
+            'Delete the remaining queued shots, then submit the replacement batch onto the same shot sequence.'
+        )
+        self.engage_add_clear_action.setStatusTip(
+            'Delete the remaining queued shots, then submit the replacement batch onto the same shot sequence.'
+        )
+        self.engage_submission_menu.aboutToShow.connect(
+            self.update_engage_submission_menu_actions
+        )
+        button.setMenu(self.engage_submission_menu)
+        button.setToolTip(
+            """<html><head/><body><p>Compile pending shots, submit them to BLACS if "run shots" is checked, and send them to runviewer if "view shots" is checked.</p><p>Press and hold to choose alternate queue submission modes.</p><p><span style="font-style:italic;">Empty queue, then add shots to new sequence</span> and <span style="font-style:italic;">Empty queue, then add shots to last sequence</span> delete the remaining queued shots before submitting the replacement batch. With lazy compile enabled, later compile failures are still possible when BLACS requests those shots.</p></body></html>"""
+        )
+
+    def get_queue_append_filepath(self):
+        queue_paths = self.queue_manager.get_queue_paths()
+        if not queue_paths:
+            return None
+        return os.path.abspath(queue_paths[-1])
+
+    def get_last_sent_from_queue_filepath(self):
+        queue_state = self.queue_manager.get_queue_state()
+        last_sent_from_queue = queue_state.get('last_sent_from_queue')
+        if not last_sent_from_queue:
+            return None
+        return os.path.abspath(shared_drive.path_to_local(last_sent_from_queue))
+
+    def can_use_alternate_submission_mode(self):
+        return (
+            self.ui.checkBox_run_shots.isChecked()
+            and self.get_queue_append_filepath() is not None
+        )
+
+    def update_engage_submission_menu_actions(self):
+        enabled = self.can_use_alternate_submission_mode()
+        self.engage_add_shots_action.setEnabled(enabled)
+        self.engage_replace_queue_action.setEnabled(enabled)
+        self.engage_add_clear_action.setEnabled(enabled)
+
+    def reindex_run_file_infos(
+        self,
+        run_file_infos,
+        output_folder,
+        filename_prefix,
+        indexed_path_base=None,
+        index_start=None,
+    ):
+        if not run_file_infos:
+            return run_file_infos
+        if indexed_path_base is None:
+            indexed_path_base = os.path.join(output_folder, '{}.h5'.format(filename_prefix))
+        candidate_stem = os.path.splitext(os.path.basename(indexed_path_base))[0]
+        _, _, index_str = candidate_stem.rpartition('_')
+        width = len(index_str) if index_str.isdigit() else 1
+        suffix_format = '_{index:0%dd}' % width
+        next_index = index_start
+        for run_file_info in run_file_infos:
+            run_file, next_index = next_available_indexed_filepath(
+                indexed_path_base,
+                suffix_format,
+                start=next_index,
+            )
+            run_file_info['path'] = run_file
+            next_index += 1
+        return run_file_infos
+
+    def on_engage_clicked(self, checked=False, submission_mode=SUBMISSION_MODE_NEW_FOLDER):
         logger.info('Engage')
         try:
             send_to_BLACS = self.ui.checkBox_run_shots.isChecked()
@@ -2263,6 +2379,21 @@ class RunManager(LabscriptApplication):
                     red=True,
                 )
                 return
+            queue_append_filepath = None
+            if submission_mode != SUBMISSION_MODE_NEW_FOLDER:
+                queue_append_filepath = self.get_queue_append_filepath()
+                if not send_to_BLACS:
+                    self.output_box.output(
+                        "Warning: alternate queue submission modes require 'Run shot(s)' to be selected.\n\n",
+                        red=True,
+                    )
+                    return
+                if queue_append_filepath is None:
+                    self.output_box.output(
+                        'Warning: alternate queue submission modes require shots in the queue.\n\n',
+                        red=True,
+                    )
+                    return
             labscript_file = self.ui.lineEdit_labscript_file.text()
             # even though we shuffle on a per global basis, if ALL of the globals are set to shuffle, then we may as well shuffle again. This helps shuffle shots more randomly than just shuffling within each level (because without this, you would still do all shots with the outer most variable the same, etc)
             shuffle = self.ui.pushButton_shuffle.checkState() == QtCore.Qt.Checked
@@ -2287,6 +2418,18 @@ class RunManager(LabscriptApplication):
                 raise Exception('Error parsing globals:\n%s\nCompilation aborted.' % str(e))
             logger.info('Making h5 files')
             globals_details = runmanager.get_globals_details(active_groups)
+            indexed_path_base = None
+            index_start = None
+            if submission_mode == SUBMISSION_MODE_ADD_SHOTS:
+                indexed_path_base = queue_append_filepath
+            elif submission_mode == SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE:
+                self.queue_manager.clear()
+            elif submission_mode == SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE:
+                indexed_path_base = (
+                    self.get_last_sent_from_queue_filepath() or queue_append_filepath
+                )
+                index_start = 0
+                self.queue_manager.clear()
             labscript_file, run_files = self.make_h5_files(
                 labscript_file,
                 output_folder,
@@ -2294,6 +2437,8 @@ class RunManager(LabscriptApplication):
                 shots,
                 shuffle,
                 with_metadata=True,
+                indexed_path_base=indexed_path_base,
+                index_start=index_start,
             )
             compile_mode = self.queue_compile_mode_combo.currentData()
             queue_records = []
@@ -3997,6 +4142,8 @@ class RunManager(LabscriptApplication):
         shots,
         shuffle,
         with_metadata=False,
+        indexed_path_base=None,
+        index_start=None,
     ):
         sequence_attrs, default_output_dir, filename_prefix = runmanager.new_sequence_details(
             labscript_file, config=self.exp_config, increment_sequence_index=True
@@ -4008,16 +4155,53 @@ class RunManager(LabscriptApplication):
             # from the UI may be out of date since we only update it once a second.
             output_folder = default_output_dir
         self.check_output_folder_update()
-        run_files = runmanager.make_run_files(
-            output_folder,
-            sequence_globals,
-            shots,
-            sequence_attrs,
-            filename_prefix,
-            shuffle,
-            return_infos=with_metadata,
-            create_files=not with_metadata,
+        run_output_folder = (
+            os.path.dirname(os.path.abspath(indexed_path_base))
+            if indexed_path_base is not None
+            else output_folder
         )
+        if indexed_path_base is not None:
+            run_files = list(
+                runmanager.make_run_files(
+                    run_output_folder,
+                    sequence_globals,
+                    shots,
+                    sequence_attrs,
+                    filename_prefix,
+                    shuffle,
+                    return_infos=True,
+                    create_files=False,
+                )
+            )
+            run_files = self.reindex_run_file_infos(
+                run_files,
+                run_output_folder,
+                filename_prefix,
+                indexed_path_base=indexed_path_base,
+                index_start=index_start,
+            )
+            if not with_metadata:
+                for run_file_info in run_files:
+                    runmanager.make_single_run_file(
+                        run_file_info['path'],
+                        sequence_globals,
+                        run_file_info['shot_globals'],
+                        run_file_info['sequence_attrs'],
+                        run_file_info['run_no'],
+                        run_file_info['n_runs'],
+                    )
+                run_files = [run_file_info['path'] for run_file_info in run_files]
+        else:
+            run_files = runmanager.make_run_files(
+                run_output_folder,
+                sequence_globals,
+                shots,
+                sequence_attrs,
+                filename_prefix,
+                shuffle,
+                return_infos=with_metadata,
+                create_files=not with_metadata,
+            )
         logger.debug(run_files)
         return labscript_file, run_files
 
@@ -4095,20 +4279,19 @@ class RunManager(LabscriptApplication):
         if item is None:
             queue_state = self.queue_manager.get_queue_state()
             if queue_state['empty_queue_policy'] != EMPTY_QUEUE_DEFAULT_LABSCRIPT:
-                self.queue_manager.set_last_sent_to_blacs(None)
+                self.queue_manager.set_last_sent_from_queue(None)
                 return None
             labscript_file = queue_state['default_labscript_file']
             if not labscript_file:
-                self.queue_manager.set_last_sent_to_blacs(None)
+                self.queue_manager.set_last_sent_from_queue(None)
                 return None
-            self.queue_manager.set_last_sent_to_blacs(None)
             if not os.path.isfile(labscript_file):
                 raise RuntimeError(
                     'Default-shot labscript file does not exist: %s' % labscript_file
                 )
             active_groups = inmain(self.get_active_groups, interactive=False)
             if active_groups is None:
-                self.queue_manager.set_last_sent_to_blacs(None)
+                self.queue_manager.set_last_sent_from_queue(None)
                 return None
             sequence_globals, runglobals = runmanager.get_default_shot_globals(
                 active_groups
@@ -4157,10 +4340,10 @@ class RunManager(LabscriptApplication):
                     item, send_to_runviewer=send_to_runviewer
                 )
                 if not success:
-                    self.queue_manager.set_last_sent_to_blacs(None)
+                    self.queue_manager.set_last_sent_from_queue(None)
                     return None
         agnostic_path = shared_drive.path_to_agnostic(run_file)
-        self.queue_manager.set_last_sent_to_blacs(agnostic_path)
+        self.queue_manager.set_last_sent_from_queue(agnostic_path)
         return agnostic_path
 
 

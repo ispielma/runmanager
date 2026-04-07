@@ -98,7 +98,7 @@ class QueueController(object):
         self.empty_queue_policy = EMPTY_QUEUE_NOTHING
         self.default_labscript_file = ''
         self.compile_mode = COMPILE_MODE_EAGER
-        self.last_sent_to_blacs = None
+        self.last_sent_from_queue = None
         self._items = []
         self._lock = threading.RLock()
 
@@ -156,7 +156,7 @@ class QueueController(object):
         with self._lock:
             for row in sorted(set(rows), reverse=True):
                 if 0 <= row < len(self._items):
-                    del self._items[row]
+                    self._items.pop(row)
 
     def clear(self):
         with self._lock:
@@ -185,9 +185,9 @@ class QueueController(object):
                 )
             return items
 
-    def set_last_sent_to_blacs(self, value):
+    def set_last_sent_from_queue(self, value):
         with self._lock:
-            self.last_sent_to_blacs = str(value) if value else None
+            self.last_sent_from_queue = str(value) if value else None
 
     def export_state(self):
         with self._lock:
@@ -219,6 +219,7 @@ class QueueController(object):
             if compile_mode not in (COMPILE_MODE_EAGER, COMPILE_MODE_LAZY):
                 compile_mode = COMPILE_MODE_EAGER
             self.compile_mode = compile_mode
+            self.last_sent_from_queue = None
             self._items = [self._normalise_item(item) for item in state.get('items', [])]
 
     def get_queue_state(self):
@@ -227,7 +228,7 @@ class QueueController(object):
                 'empty_queue_policy': self.empty_queue_policy,
                 'default_labscript_file': self.default_labscript_file,
                 'compile_mode': self.compile_mode,
-                'last_sent_to_blacs': self.last_sent_to_blacs,
+                'last_sent_from_queue': self.last_sent_from_queue,
                 'n_items': len(self._items),
             }
 
@@ -294,6 +295,8 @@ class QueueManager(QtCore.QObject):
         item['compiled'] = bool(success)
         return success
 
+    def set_last_sent_from_queue(self, value):
+        return self._request('set_last_sent_from_queue', value)
     def _delete_queue_files(self, paths):
         for path in paths:
             try:
@@ -306,9 +309,6 @@ class QueueManager(QtCore.QObject):
                     % (os.path.basename(path), str(exc)),
                     red=True,
                 )
-
-    def set_last_sent_to_blacs(self, value):
-        return self._request('set_last_sent_to_blacs', value)
 
     def set_empty_queue_policy(self, value):
         return self._request('set_empty_queue_policy', value)
@@ -376,8 +376,8 @@ class QueueManager(QtCore.QObject):
                     self.controller.set_compile_mode(*args)
                     changed = True
                     result = None
-                elif command == 'set_last_sent_to_blacs':
-                    self.controller.set_last_sent_to_blacs(*args)
+                elif command == 'set_last_sent_from_queue':
+                    self.controller.set_last_sent_from_queue(*args)
                     changed = True
                     result = None
                 elif command == 'delete_rows':
