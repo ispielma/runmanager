@@ -671,7 +671,13 @@ def get_filename_prefix_format(config, default=False):
     return filename_prefix_format
 
 
-def new_sequence_details(script_path, config=None, increment_sequence_index=True, default=False):
+def new_sequence_details(
+    script_path,
+    config=None,
+    increment_sequence_index=True,
+    default=False,
+    format_globals={},
+):
     """Generate the details for a new sequence: the toplevel attrs sequence_date,
     sequence_index, sequence_id; and the the output directory and filename prefix for
     the shot files, according to labconfig settings. If increment_sequence_index=True,
@@ -700,7 +706,11 @@ def new_sequence_details(script_path, config=None, increment_sequence_index=True
         'sequence_index': sequence_index,
         'sequence_id': sequence_id,
     }
-    context = dict(sequence_attrs, sequence_timestamp=sequence_timestamp, globals={})
+    context = dict(
+        sequence_attrs,
+        sequence_timestamp=sequence_timestamp,
+        globals=format_globals,
+    )
 
     # Compute the output directory based on labconfig settings:
     subdir_format = get_output_folder_format(config, default=default)

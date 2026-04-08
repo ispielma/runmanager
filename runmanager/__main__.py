@@ -4303,6 +4303,7 @@ class RunManager(LabscriptApplication):
                     config=self.exp_config,
                     increment_sequence_index=True,
                     default=True,
+                    format_globals=runglobals,
                 )
             )
             run_file_base = os.path.join(
