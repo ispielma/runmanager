@@ -18,13 +18,18 @@ import os
 import sys
 import labscript_utils.excepthook
 
+APPLICATION_NAME = 'runmanager'
+RUNMANAGER_DIR = os.path.dirname(__file__)
+
 # Associate app windows with OS menu shortcuts:
 import desktop_app
-desktop_app.set_process_appid('runmanager')
+desktop_app.set_process_appid(APPLICATION_NAME)
 
 # Splash screen
 from labscript_utils.splash import Splash
-splash = Splash(os.path.join(os.path.dirname(__file__), 'runmanager.svg'))
+splash = Splash(
+    os.path.join(RUNMANAGER_DIR, 'runmanager.svg'), application_name=APPLICATION_NAME
+)
 splash.show()
 
 splash.update_text('importing standard library modules')
@@ -88,12 +93,12 @@ import qtutils.icons
 
 GLOBAL_MONOSPACE_FONT = "Consolas" if os.name == 'nt' else "Ubuntu Mono"
 
-runmanager_dir = Path(__file__).absolute().parent
+runmanager_dir = RUNMANAGER_DIR
 
 process_tree = ProcessTree.instance()
 
 # Set a meaningful name for zprocess.locking's client id:
-process_tree.zlock_client.set_process_name('runmanager')
+process_tree.zlock_client.set_process_name(APPLICATION_NAME)
 
 SUBMISSION_MODE_NEW_FOLDER = 'new_folder'
 SUBMISSION_MODE_ADD_SHOTS = 'add_shots'
@@ -4637,7 +4642,7 @@ class RemoteServer(ZMQServer):
 
 
 if __name__ == "__main__":
-    logger = setup_logging('runmanager')
+    logger = setup_logging(APPLICATION_NAME)
     labscript_utils.excepthook.set_logger(logger)
     logger.info('\n\n===============starting===============\n')
     qapplication = QtWidgets.QApplication.instance()
