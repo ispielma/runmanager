@@ -64,6 +64,7 @@ from labscript_utils.labconfig import (
     load_appconfig,
 )
 from labscript_utils.file_utils import next_available_indexed_filepath
+from labscript_utils.lookup_format import unescape_braces
 from labscript_utils.setup_logging import setup_logging
 import labscript_utils.shared_drive as shared_drive
 from labscript_utils import dedent
@@ -3102,7 +3103,10 @@ class RunManager(LabscriptApplication):
             increment_sequence_index=False,
         )
         default_output_folder = os.path.normpath(default_output_folder)
-        return default_output_folder
+        # This is still a template: unresolved globals[...] lookups are shown as
+        # written, and literal braces are escaped for the per-shot pass. Undo
+        # that escaping for display.
+        return unescape_braces(default_output_folder)
 
     def rollover_shot_output_folder(self):
         """Runs in a thread, checking every 30 seconds if the default output folder has
