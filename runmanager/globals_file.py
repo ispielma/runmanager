@@ -75,9 +75,11 @@ def _normalise_record(record):
     )
     if normalised["scan_enabled"] and normalised["jit_enabled"]:
         normalised["jit_enabled"] = False
-    if not normalised["scan_enabled"]:
-        normalised["expansion"] = ""
-    elif not normalised["expansion"]:
+    # The stored expansion is retained while a scan is disabled, so that a
+    # zip group survives a scan off/on cycle. get_globals() reports an empty
+    # expansion for globals that are not being scanned, so retaining it here
+    # does not affect how the global is expanded.
+    if normalised["scan_enabled"] and not normalised["expansion"]:
         normalised["expansion"] = "outer"
     return normalised
 
@@ -178,8 +180,29 @@ def save_document(filename, document):
     directory = os.path.dirname(filename)
     if directory:
         os.makedirs(directory, exist_ok=True)
-    with open(filename, "wb") as f:
-        tomli_w.dump(document, f)
+    # Every edit to a single global rewrites the whole file, so write out of
+    # place and replace: a save that is interrupted or that raises part way
+    # through must not leave a truncated file where the globals used to be.
+    temp_filename = "%s.%d.tmp" % (filename, os.getpid())
+    try:
+        with open(temp_filename, "wb") as f:
+            tomli_w.dump(document, f)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            # Keep the permissions the globals file already had. Experiment
+            # globals commonly live on a shared drive, where dropping group
+            # access would lock out everyone else on the apparatus:
+            os.chmod(temp_filename, os.stat(filename).st_mode & 0o777)
+        except OSError:
+            pass
+        os.replace(temp_filename, filename)
+    except BaseException:
+        try:
+            os.remove(temp_filename)
+        except OSError:
+            pass
+        raise
 
 
 def new_globals_file(filename):
@@ -355,19 +378,18 @@ def get_field(filename, groupname, globalname, field):
 
 def set_field(filename, groupname, globalname, field, value):
     record = get_global_record(filename, groupname, globalname)
+    # Disabling a scan (directly, or by enabling JIT) leaves the stored
+    # expansion alone, so that a zip group survives a scan off/on cycle.
     if field == "scan_enabled":
         record[field] = bool(value)
-        if not record[field]:
-            record["expansion"] = ""
-        else:
+        if record[field]:
             record["jit_enabled"] = False
-        if record[field] and not record["expansion"]:
-            record["expansion"] = "outer"
+            if not record["expansion"]:
+                record["expansion"] = "outer"
     elif field == "jit_enabled":
         record[field] = bool(value)
         if record[field]:
             record["scan_enabled"] = False
-            record["expansion"] = ""
     else:
         record[field] = value
     set_global_record(filename, groupname, globalname, record)

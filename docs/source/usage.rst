@@ -411,6 +411,51 @@ This architecture also has several unrealised benefits:
     then be sent to a scheduling program (like BLACS) that feeds them to the simulation
     software.
 
+Where shot files are written
+----------------------------
+
+Shot files are written under the ``experiment_shot_storage`` path from the lab
+configuration, in a directory named after the labscript file. Within that, the
+directory and filename are built from the ``output_folder_format`` and
+``filename_prefix_format`` settings in the ``runmanager`` section of the lab
+configuration, which default to ``%Y/%m/%d/{sequence_index:05d}`` and
+``{sequence_timestamp}_{script_basename}`` respectively. Each press of engage
+claims a new sequence index, so an ordinary sequence gets a numbered directory
+of its own and its shots are named with an index suffix within it.
+
+Runmanager owns the shot queue. Shots produced by engage are placed in that
+queue, and BLACS asks runmanager for the next shot when it is ready to run one,
+rather than runmanager pushing shots to BLACS.
+
+Default shots
+~~~~~~~~~~~~~
+
+When the queue is empty, runmanager can supply a *default shot*: a single shot
+built from the default values of the active globals, ignoring any scans. This
+is selected with the queue tab's *When queue is empty* setting, and the
+labscript file it compiles is named in the *Default shot* field.
+
+Default shots are deliberately gathered together rather than being given a
+numbered sequence directory each:
+
+*   The sequence-index placeholder is replaced with the literal text
+    ``default`` in both the output folder and the filename prefix. With the
+    default settings this puts every default shot for a given day and
+    labscript file in one ``.../%Y/%m/%d/default/`` directory, which rolls over
+    daily like any other shot directory.
+
+*   Within that directory each default shot takes the next free ``_<n>``
+    index, so the shot index advances just as it does for ordinary shots
+    within their sequence directory. Successive default shots therefore
+    accumulate rather than overwrite one another, and the numbering continues
+    from the existing files if runmanager is restarted.
+
+A sequence index is still claimed for each default shot even though it does not
+appear in the path. Sequence numbers for ordinary runs consequently advance
+faster than the number of sequences actually run, and the numbered sequence
+directories are not contiguous. This is expected, and is not a sign that
+sequences have been lost.
+
 .. rubric:: Footnotes
 
 .. [1] Documentation taken from Phillip T. Starkey *A software framework for control and automation of precisely timed experiments*

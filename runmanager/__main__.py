@@ -73,6 +73,8 @@ import runmanager
 import runmanager.remote
 from runmanager.analysis_submission import AnalysisSubmission
 from runmanager.queueing import (
+    FAILURE_POLICY_DROP,
+    FAILURE_POLICY_RETRY,
     COMPILE_MODE_EAGER,
     COMPILE_MODE_LAZY,
     EMPTY_QUEUE_DEFAULT_LABSCRIPT,
@@ -1752,6 +1754,24 @@ class RunManager(LabscriptApplication):
         self.setup_config()
         self.setup_axes_tab()
         self.setup_groups_tab()
+        # The compiler subprocess and its lock must be in place before the
+        # queue manager starts its worker thread, as that thread compiles
+        # shots via self.compile_run_file():
+        self.compiler_lock = threading.Lock()
+        self._next_default_shot_index = {}
+        # A default shot is produced off the request thread; these track the one
+        # being made and the one waiting to be handed over:
+        self._default_shot_lock = threading.Lock()
+        self._default_shot_preparing = False
+        self._default_shot_ready = None
+
+        splash.update_text('starting compiler subprocess')
+        # Start the compiler subprocess:
+        self.to_child, self.from_child, self.child = process_tree.subprocess(
+            os.path.join(runmanager_dir, 'batch_compiler.py'),
+            output_redirection_port=self.output_box.port,
+        )
+
         self.queue_manager = QueueManager(
             prepare_run_file=self.prepare_queue_shot,
             compile_run_file=self.compile_run_file,
@@ -1804,16 +1824,6 @@ class RunManager(LabscriptApplication):
         # The prospective number of shots resulting from compilation
         self.n_shots = None
 
-        self.compiler_lock = threading.Lock()
-        self._next_default_shot_index = {}
-
-        splash.update_text('starting compiler subprocess')
-        # Start the compiler subprocess:
-        self.to_child, self.from_child, self.child = process_tree.subprocess(
-            os.path.join(runmanager_dir, 'batch_compiler.py'),
-            output_redirection_port=self.output_box.port,
-        )
-
         # Is blank until a labscript file is selected:
         self.previous_default_output_folder = ''
 
@@ -1861,7 +1871,7 @@ class RunManager(LabscriptApplication):
                                   "programs": ["text_editor",
                                                "text_editor_arguments",
                                                ],
-                                  "ports": ['BLACS', 'runviewer', 'lyse'],
+                                  "ports": ['runviewer', 'lyse'],
                                   "paths": ["shared_drive",
                                             "experiment_shot_storage",
                                             "labscriptlib",
@@ -1966,6 +1976,18 @@ class RunManager(LabscriptApplication):
         self.queue_compile_mode_combo.addItem('Eager compile', COMPILE_MODE_EAGER)
         self.queue_compile_mode_combo.addItem('Lazy compile', COMPILE_MODE_LAZY)
         controls_layout.addWidget(self.queue_compile_mode_combo)
+        controls_layout.addWidget(
+            QtWidgets.QLabel('When a shot does not run', self.tab_queue)
+        )
+        self.queue_failure_policy_combo = QtWidgets.QComboBox(self.tab_queue)
+        self.queue_failure_policy_combo.addItem('Retry', FAILURE_POLICY_RETRY)
+        self.queue_failure_policy_combo.addItem('Drop', FAILURE_POLICY_DROP)
+        self.queue_failure_policy_combo.setToolTip(
+            'What to do with a shot BLACS could not run. Retry returns it to '
+            'the head of the queue; Drop discards it. A shot BLACS refused to '
+            'accept at all is never offered again.'
+        )
+        controls_layout.addWidget(self.queue_failure_policy_combo)
         controls_layout.addWidget(QtWidgets.QLabel('When queue is empty', self.tab_queue))
         self.queue_empty_policy_combo = QtWidgets.QComboBox(self.tab_queue)
         self.queue_empty_policy_combo.addItem('Send nothing', EMPTY_QUEUE_NOTHING)
@@ -2070,6 +2092,9 @@ class RunManager(LabscriptApplication):
             self.groups_model.itemChanged, self.on_groups_model_item_changed)
 
         self.queue_manager.queueChanged.connect(self.refresh_queue_tab)
+        self.queue_failure_policy_combo.currentIndexChanged.connect(
+            self.on_queue_failure_policy_changed
+        )
         self.queue_compile_mode_combo.currentIndexChanged.connect(
             self.on_queue_compile_mode_changed
         )
@@ -2130,6 +2155,12 @@ class RunManager(LabscriptApplication):
             return
         self.queue_manager.set_compile_mode(compile_mode)
 
+    def on_queue_failure_policy_changed(self, index):
+        failure_policy = self.queue_failure_policy_combo.itemData(index)
+        if failure_policy is None:
+            return
+        self.queue_manager.set_failure_policy(failure_policy)
+
     @inmain_decorator()
     def refresh_queue_tab(self):
         controller = self.queue_manager.controller
@@ -2137,13 +2168,24 @@ class RunManager(LabscriptApplication):
         state = controller.get_queue_state()
         last_sent_from_queue = state['last_sent_from_queue']
         if last_sent_from_queue:
-            self.queue_last_sent_label.setText(
-                'Last sent from queue: %s' % last_sent_from_queue
-            )
-            self.queue_last_sent_label.setToolTip(last_sent_from_queue)
+            text = 'Last sent from queue: %s' % last_sent_from_queue
+            tooltip = last_sent_from_queue
         else:
-            self.queue_last_sent_label.setText('Last sent from queue: nothing')
-            self.queue_last_sent_label.setToolTip('')
+            text = 'Last sent from queue: nothing'
+            tooltip = ''
+        # In-flight shots are shown here rather than as queue rows, so that row
+        # indices keep addressing queued shots only:
+        for shot in state['in_flight']:
+            if shot['state'] == 'running':
+                text += ' (running in BLACS)'
+                if shot['running_path'] and shot['running_path'] != shot['path']:
+                    text += ', as %s' % os.path.basename(shot['running_path'])
+            elif shot['state'] == 'rejected':
+                text += ' (rejected by BLACS: %s)' % shot['message']
+            else:
+                text += ' (awaiting BLACS)'
+        self.queue_last_sent_label.setText(text)
+        self.queue_last_sent_label.setToolTip(tooltip)
 
     def on_output_popout_button_clicked(self):
         if self.output_box_is_popped_out:
@@ -2251,7 +2293,6 @@ class RunManager(LabscriptApplication):
         self.ui.toolButton_edit_default_labscript_file.setEnabled(bool(text))
         self.ui.lineEdit_default_labscript_file.setToolTip(text)
         self.queue_manager.set_default_labscript_file(text)
-        self.refresh_queue_tab()
 
     def on_shot_output_folder_text_changed(self, text):
         # Blank out the 'reset default output folder' button if the user is
@@ -2465,6 +2506,7 @@ class RunManager(LabscriptApplication):
                         'n_runs': run_file_info['n_runs'],
                     }
                 )
+            self.compilation_aborted.clear()
             self.ui.pushButton_abort.setEnabled(True)
             self.queue_manager.compile_shots(
                 queue_records, send_to_BLACS, send_to_runviewer
@@ -3936,6 +3978,11 @@ class RunManager(LabscriptApplication):
             )
             if index != -1:
                 self.queue_empty_policy_combo.setCurrentIndex(index)
+            index = self.queue_failure_policy_combo.findData(
+                restored_queue_state['failure_policy']
+            )
+            if index != -1:
+                self.queue_failure_policy_combo.setCurrentIndex(index)
 
         self.analysis_submission.restore_configuration_data(
             runmanager_config.get('analysis_submission')
@@ -4232,20 +4279,6 @@ class RunManager(LabscriptApplication):
             item['n_runs'],
         )
 
-    def send_to_BLACS(self, run_file, BLACS_hostname):
-        port = int(self.exp_config.get('ports', 'BLACS'))
-        agnostic_path = shared_drive.path_to_agnostic(run_file)
-        self.output_box.output('Submitting run file %s.\n' % os.path.basename(run_file))
-        try:
-            response = zmq_get(port, BLACS_hostname, data=agnostic_path)
-            if 'added successfully' in response:
-                self.output_box.output(response)
-            else:
-                raise Exception(response)
-        except Exception as e:
-            self.output_box.output('Couldn\'t submit job to control server: %s\n' % str(e), red=True)
-            self.compilation_aborted.set()
-
     def send_to_runviewer(self, run_file):
         runviewer_port = int(self.exp_config.get('ports', 'runviewer'))
         agnostic_path = shared_drive.path_to_agnostic(run_file)
@@ -4283,29 +4316,51 @@ class RunManager(LabscriptApplication):
         except Exception as e:
             self.output_box.output('Couldn\'t submit shot to runviewer: %s\n\n' % str(e), red=True)
 
-    def queue_request_next(self):
-        item = self.queue_manager.pop_next()
-        if item is None:
-            queue_state = self.queue_manager.get_queue_state()
-            if queue_state['empty_queue_policy'] != EMPTY_QUEUE_DEFAULT_LABSCRIPT:
-                self.queue_manager.set_last_sent_from_queue(None)
+    def discard_default_shot(self):
+        """Drop a prepared default shot that is not going to be handed over.
+
+        Its globals were read when it was produced, so it must not be handed to
+        BLACS later as though they were current. This happens when the queue
+        has taken over, or the empty-queue policy no longer calls for one."""
+        with self._default_shot_lock:
+            run_file = self._default_shot_ready
+            self._default_shot_ready = None
+        if run_file is not None:
+            try:
+                os.remove(run_file)
+            except OSError:
+                pass
+
+    def take_default_shot(self, labscript_file):
+        """Return a compiled default shot, or None while one is being produced.
+
+        At most one is produced at a time, however often BLACS asks. The shot
+        is collected by a later request once it is ready."""
+        with self._default_shot_lock:
+            run_file = self._default_shot_ready
+            if run_file is not None:
+                self._default_shot_ready = None
+                return run_file
+            if self._default_shot_preparing:
                 return None
-            labscript_file = queue_state['default_labscript_file']
-            if not labscript_file:
-                self.queue_manager.set_last_sent_from_queue(None)
-                return None
-            if not os.path.isfile(labscript_file):
-                raise RuntimeError(
-                    'Default-shot labscript file does not exist: %s' % labscript_file
-                )
+            self._default_shot_preparing = True
+        send_to_runviewer = inmain(self.ui.checkBox_view_shots.isChecked)
+        thread = threading.Thread(
+            target=self.prepare_default_shot,
+            args=(labscript_file, send_to_runviewer),
+        )
+        thread.daemon = True
+        thread.start()
+        return None
+
+    def prepare_default_shot(self, labscript_file, send_to_runviewer):
+        """Write and compile one default shot, and leave it ready to hand over."""
+        run_file = None
+        try:
             active_groups = inmain(self.get_active_groups, interactive=False)
-            if active_groups is None:
-                self.queue_manager.set_last_sent_from_queue(None)
-                return None
             sequence_globals, runglobals = runmanager.get_default_shot_globals(
                 active_groups
             )
-            send_to_runviewer = inmain(self.ui.checkBox_view_shots.isChecked)
             sequence_attrs, output_folder, filename_prefix = (
                 runmanager.new_sequence_details(
                     labscript_file,
@@ -4334,26 +4389,71 @@ class RunManager(LabscriptApplication):
                 0,
                 1,
             )
-            success = self.queue_manager.compile_shot(
-                {'path': run_file, 'labscript_file': labscript_file},
-                send_to_runviewer=send_to_runviewer,
-            )
-            if not success:
+            if not self.compile_run_file(labscript_file, run_file):
                 raise RuntimeError(
                     'Compilation failed for %s' % os.path.basename(run_file)
                 )
-        else:
-            run_file = item['path']
-            if not item['compiled']:
-                send_to_runviewer = inmain(self.ui.checkBox_view_shots.isChecked)
-                success = self.queue_manager.compile_shot(
-                    item, send_to_runviewer=send_to_runviewer
+            if send_to_runviewer:
+                self.send_to_runviewer(run_file)
+        except Exception as e:
+            self.output_box.output(
+                'Could not produce a default shot: %s\n' % str(e), red=True
+            )
+            run_file = None
+        finally:
+            with self._default_shot_lock:
+                self._default_shot_ready = run_file
+                self._default_shot_preparing = False
+
+    def queue_request_next(self):
+        # BLACS acknowledges a shot before running it, on this same thread, so
+        # anything still unacknowledged when it asks again never reached it:
+        self.queue_manager.reclaim_unaccepted()
+        item = self.queue_manager.pop_next()
+        if item is None:
+            # A queued shot that is not compiled yet stays at the head of the
+            # queue and is compiled off this thread, so that a slow compile
+            # neither holds up the remote server nor loses the shot when BLACS
+            # stops waiting. BLACS asks again shortly, and the queue is not
+            # empty meanwhile, so the empty-queue policy does not step in ahead
+            # of it:
+            if self.queue_manager.compile_next_in_background(
+                lambda: inmain(self.ui.checkBox_view_shots.isChecked)
+            ):
+                return None
+            queue_state = self.queue_manager.get_queue_state()
+            if queue_state['empty_queue_policy'] != EMPTY_QUEUE_DEFAULT_LABSCRIPT:
+                self.discard_default_shot()
+                self.queue_manager.set_last_sent_from_queue(None)
+                return None
+            labscript_file = queue_state['default_labscript_file']
+            if not labscript_file:
+                self.discard_default_shot()
+                self.queue_manager.set_last_sent_from_queue(None)
+                return None
+            if not os.path.isfile(labscript_file):
+                raise RuntimeError(
+                    'Default-shot labscript file does not exist: %s' % labscript_file
                 )
-                if not success:
-                    self.queue_manager.set_last_sent_from_queue(None)
-                    return None
+            # Producing a default shot means evaluating the globals, writing
+            # the shot file and compiling it. That happens off this thread for
+            # the same reason a queued shot's compile does: it must not hold up
+            # the remote server, nor finish into a client that stopped waiting.
+            run_file = self.take_default_shot(labscript_file)
+            if run_file is None:
+                return None
+        else:
+            # The queue has taken over, so any default shot prepared while it
+            # was empty is now out of date:
+            self.discard_default_shot()
+            run_file = item['path']
         agnostic_path = shared_drive.path_to_agnostic(run_file)
-        self.queue_manager.set_last_sent_from_queue(agnostic_path)
+        if item is not None:
+            # Only shots that came from the queue are recorded here. A default
+            # shot is not part of a sequence, and lives in the daily default
+            # directory, so it must not become the anchor that "add shots to
+            # last sequence" writes the next batch alongside:
+            self.queue_manager.set_last_sent_from_queue(agnostic_path)
         return agnostic_path
 
 
@@ -4628,7 +4728,26 @@ class RemoteServer(ZMQServer):
     def handle_queue_request_next(self):
         return app.queue_request_next()
 
-    def handle_notify_shot_complete(self, filepath):
+    def handle_shot_accepted(self, filepath, running_filepath=''):
+        return app.queue_manager.shot_accepted(
+            shared_drive.path_to_local(str(filepath)),
+            shared_drive.path_to_local(str(running_filepath)) if running_filepath else '',
+        )
+
+    def handle_shot_rejected(self, filepath, message=''):
+        return app.queue_manager.shot_rejected(
+            shared_drive.path_to_local(str(filepath)), message
+        )
+
+    def handle_notify_shot_complete(self, filepath, status='completed', message=''):
+        app.queue_manager.shot_finished(
+            shared_drive.path_to_local(str(filepath)), status, message
+        )
+        if status != 'completed':
+            # Only completed shots are submitted for analysis. Before this,
+            # BLACS reported nothing at all for a shot that failed, so lyse
+            # never saw one; that must not change here.
+            return 'noted'
         return app.analysis_submission.notify_shot_complete(filepath)
 
     def handler(self, request_data):

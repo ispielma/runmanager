@@ -33,6 +33,8 @@ EMPTY_QUEUE_NOTHING = 'nothing'
 EMPTY_QUEUE_DEFAULT_LABSCRIPT = 'default_labscript'
 COMPILE_MODE_EAGER = 'eager'
 COMPILE_MODE_LAZY = 'lazy'
+FAILURE_POLICY_RETRY = 'retry'
+FAILURE_POLICY_DROP = 'drop'
 
 
 class RunmanagerQueueWidget(ShotQueueWidget):
@@ -86,7 +88,10 @@ class RunmanagerQueueWidget(ShotQueueWidget):
         self.select_paths(selected_paths)
 
     def _emit_delete(self):
-        rows = self.selected_rows()
+        # Emit the selected paths alongside their rows: the queue can shift
+        # under the widget when BLACS takes the shot at the front of it, so the
+        # controller needs to confirm which shots were actually selected.
+        rows = list(zip(self.selected_rows(), self.selected_files()))
         if rows:
             self.deleteRowsRequested.emit(rows)
 
@@ -98,8 +103,14 @@ class QueueController(object):
         self.empty_queue_policy = EMPTY_QUEUE_NOTHING
         self.default_labscript_file = ''
         self.compile_mode = COMPILE_MODE_EAGER
+        self.failure_policy = FAILURE_POLICY_RETRY
         self.last_sent_from_queue = None
         self._items = []
+        # Shots handed to BLACS whose fate is not yet known. Normally at most
+        # one, since BLACS only asks when it is idle. These are not queued, so
+        # they are deliberately absent from the queued shot count, the queue
+        # paths and the display items:
+        self._in_flight = []
         self._lock = threading.RLock()
 
     def _normalise_item(self, item):
@@ -116,6 +127,9 @@ class QueueController(object):
             compile_mode = COMPILE_MODE_EAGER
         record['compile_mode'] = compile_mode
         record['compiled'] = bool(record.get('compiled', compile_mode == COMPILE_MODE_EAGER))
+        # A compile in progress belongs to this session only, so a restored
+        # shot never starts out claimed:
+        record['compiling'] = False
         record['frozen_globals'] = {
             str(name): str(expression)
             for name, expression in record.get('frozen_globals', {}).items()
@@ -129,6 +143,10 @@ class QueueController(object):
         }
         record['run_no'] = int(record.get('run_no', 0))
         record['n_runs'] = int(record.get('n_runs', 1))
+        # Set once the shot is handed to BLACS; see pop_next():
+        record['state'] = ''
+        record['running_path'] = ''
+        record['message'] = ''
         return record
 
     def set_empty_queue_policy(self, value):
@@ -147,22 +165,48 @@ class QueueController(object):
         with self._lock:
             self.compile_mode = value
 
+    def set_failure_policy(self, value):
+        if value not in (FAILURE_POLICY_RETRY, FAILURE_POLICY_DROP):
+            raise ValueError('Invalid failure policy: %s' % value)
+        with self._lock:
+            self.failure_policy = value
+
     def enqueue(self, items):
         records = [self._normalise_item(item) for item in items]
         with self._lock:
             self._items.extend(records)
 
     def delete_rows(self, rows):
+        """Delete the queued shots given as (row, path) pairs.
+
+        The path identifies the shot the user actually selected. Rows whose
+        path no longer matches have shifted since the queue widget was drawn,
+        so they are skipped rather than deleting the wrong shot. Returns the
+        paths of the shots that were removed."""
+        removed_paths = []
         with self._lock:
-            for row in sorted(set(rows), reverse=True):
-                if 0 <= row < len(self._items):
-                    self._items.pop(row)
+            for entry in sorted(rows, key=lambda entry: entry[0], reverse=True):
+                row, path = entry[0], entry[1]
+                if not 0 <= row < len(self._items):
+                    continue
+                if self._items[row]['path'] != os.path.abspath(str(path)):
+                    continue
+                removed_paths.append(self._items.pop(row)['path'])
+            return removed_paths
 
     def clear(self):
         with self._lock:
             removed_paths = [item['path'] for item in self._items]
             self._items = []
             return removed_paths
+
+    def clear_in_flight(self):
+        """Forget shots in flight, without touching their files.
+
+        A shot BLACS has taken is out of runmanager's hands, so clearing the
+        queue must not delete it."""
+        with self._lock:
+            self._in_flight = []
 
     def get_queue_paths(self):
         with self._lock:
@@ -186,8 +230,13 @@ class QueueController(object):
             return items
 
     def set_last_sent_from_queue(self, value):
+        """Record the last shot handed out. True if that changed the value."""
+        value = str(value) if value else None
         with self._lock:
-            self.last_sent_from_queue = str(value) if value else None
+            if self.last_sent_from_queue == value:
+                return False
+            self.last_sent_from_queue = value
+            return True
 
     def export_state(self):
         with self._lock:
@@ -195,6 +244,7 @@ class QueueController(object):
                 'empty_queue_policy': self.empty_queue_policy,
                 'default_labscript_file': self.default_labscript_file,
                 'compile_mode': self.compile_mode,
+                'failure_policy': self.failure_policy,
                 'items': [dict(item) for item in self._items],
             }
 
@@ -219,7 +269,12 @@ class QueueController(object):
             if compile_mode not in (COMPILE_MODE_EAGER, COMPILE_MODE_LAZY):
                 compile_mode = COMPILE_MODE_EAGER
             self.compile_mode = compile_mode
+            failure_policy = state.get('failure_policy', FAILURE_POLICY_RETRY)
+            if failure_policy not in (FAILURE_POLICY_RETRY, FAILURE_POLICY_DROP):
+                failure_policy = FAILURE_POLICY_RETRY
+            self.failure_policy = failure_policy
             self.last_sent_from_queue = None
+            self._in_flight = []
             self._items = [self._normalise_item(item) for item in state.get('items', [])]
 
     def get_queue_state(self):
@@ -228,19 +283,157 @@ class QueueController(object):
                 'empty_queue_policy': self.empty_queue_policy,
                 'default_labscript_file': self.default_labscript_file,
                 'compile_mode': self.compile_mode,
+                'failure_policy': self.failure_policy,
                 'last_sent_from_queue': self.last_sent_from_queue,
                 'n_items': len(self._items),
+                'in_flight': [dict(item) for item in self._in_flight],
             }
 
     def pop_next(self):
+        """Take the shot at the head of the queue if it is ready to hand over.
+
+        A lazy shot that has not been compiled yet stays in the queue, so that
+        it is neither lost nor overtaken by the empty-queue policy while it is
+        being compiled. A shot that is handed over becomes in-flight rather
+        than being discarded, so that it is not lost if it never reaches
+        BLACS."""
+        with self._lock:
+            if not self._items or not self._items[0]['compiled']:
+                return None
+            # BLACS only asks when it is idle, so a shot it already
+            # acknowledged is finished with as far as the queue is concerned.
+            # Dropping those here keeps the in-flight record to the current
+            # shot rather than growing with every shot ever handed out:
+            self._in_flight = [i for i in self._in_flight if i['state'] == 'sent']
+            item = self._items.pop(0)
+            item['state'] = 'sent'
+            item['running_path'] = ''
+            item['message'] = ''
+            self._in_flight.append(item)
+            return item
+
+    def reclaim_unaccepted(self):
+        """Return shots BLACS never acknowledged to the head of the queue.
+
+        BLACS acknowledges a shot from the same thread that asks for the next
+        one, and before it starts running it. So a request arriving while a
+        shot is still awaiting acknowledgement means that shot never reached
+        BLACS. Returns the paths put back."""
+        with self._lock:
+            unaccepted = [i for i in self._in_flight if i['state'] == 'sent']
+            if not unaccepted:
+                return []
+            self._in_flight = [i for i in self._in_flight if i['state'] != 'sent']
+            for item in reversed(unaccepted):
+                item['state'] = ''
+                self._items.insert(0, item)
+            return [item['path'] for item in unaccepted]
+
+    def _take_in_flight(self, path):
+        path = os.path.abspath(str(path))
+        for index, item in enumerate(self._in_flight):
+            if path in (item['path'], item['running_path']):
+                return self._in_flight.pop(index)
+        return None
+
+    def shot_accepted(self, path, running_path=''):
+        """Record that BLACS took a shot, and the path it will actually run."""
+        with self._lock:
+            item = self._take_in_flight(path)
+            if item is None:
+                return False
+            item['state'] = 'running'
+            item['running_path'] = (
+                os.path.abspath(str(running_path)) if running_path else item['path']
+            )
+            self._in_flight.append(item)
+            return True
+
+    def shot_rejected(self, path, message=''):
+        """Record that BLACS refused a shot. It is not offered again."""
+        with self._lock:
+            item = self._take_in_flight(path)
+            if item is None:
+                return False
+            item['state'] = 'rejected'
+            item['message'] = str(message)
+            self._in_flight.append(item)
+            return True
+
+    def shot_finished(self, path, status, message=''):
+        """Record how BLACS says a shot turned out.
+
+        BLACS releases a shot it could not run, so every outcome is terminal
+        and the shot leaves the in-flight record. A shot that did not complete
+        goes back to the head of the queue or is dropped, according to the
+        failure policy. Returns ``(known, outcome)``, where outcome is
+        ``'retried'``, ``'dropped'`` or ``''``."""
+        with self._lock:
+            item = self._take_in_flight(path)
+            if item is None:
+                return False, ''
+            if status == 'completed':
+                return True, ''
+            if self.failure_policy == FAILURE_POLICY_RETRY:
+                item['state'] = ''
+                item['running_path'] = ''
+                item['message'] = ''
+                self._items.insert(0, item)
+                return True, 'retried'
+            return True, 'dropped'
+
+    def get_in_flight(self):
+        with self._lock:
+            return [dict(item) for item in self._in_flight]
+
+    def claim_next_for_compile(self):
+        """Claim the shot at the head of the queue for compilation.
+
+        Returns ``(item, pending)``. ``item`` is the shot to compile, or None
+        if there is nothing to start. ``pending`` is True while a queued shot
+        is not yet ready to hand over, whether this call claimed it or another
+        compile is already under way."""
         with self._lock:
             if not self._items:
-                return None
-            return self._items.pop(0)
+                return None, False
+            item = self._items[0]
+            if item['compiled']:
+                return None, False
+            if item['compiling']:
+                return None, True
+            item['compiling'] = True
+            return item, True
+
+    def finish_compile(self, item, success):
+        """Record the outcome of a background compile.
+
+        A shot that failed to compile is dropped, as documented for lazy
+        compilation. Returns ``(changed, still_queued)``: whether the queue
+        changed, and whether the shot was still queued at all — it may have
+        been deleted by the operator while it was compiling."""
+        with self._lock:
+            item['compiling'] = False
+            item['compiled'] = bool(success)
+            index = None
+            for position, queued in enumerate(self._items):
+                if queued is item:
+                    index = position
+                    break
+            if index is None:
+                return False, False
+            if success:
+                return True, True
+            del self._items[index]
+            return True, False
 
 
 class QueueManager(QtCore.QObject):
-    """Queue worker thread and synchronous wrappers for runmanager."""
+    """Queue state access, and the worker thread that compiles shots.
+
+    Queue state lives in the controller, which is safe to use from any thread,
+    so state operations act on it directly. Only compilation is handed to the
+    worker thread, so that a long Engage batch cannot hold up a queue-tab
+    control or a BLACS request for the next shot."""
 
     queueChanged = Signal()
 
@@ -262,29 +455,27 @@ class QueueManager(QtCore.QObject):
         self.output = output
         self.compilation_aborted = compilation_aborted
         self.set_abort_enabled = set_abort_enabled
+        self.batches_pending = 0
+        self.batches_lock = threading.Lock()
         self.thread = threading.Thread(target=self.mainloop)
         self.thread.daemon = True
         self.thread.start()
 
     def shutdown(self):
-        self.command_queue.put(('close', (), None))
+        self.command_queue.put(('close', ()))
         if self.thread.is_alive() and threading.current_thread() is not self.thread:
             self.thread.join(timeout=1)
 
     def enqueue(self, items):
-        return self._request('enqueue', list(items))
+        self.controller.enqueue(list(items))
+        self.queueChanged.emit()
 
     def compile_shots(self, records, send_to_BLACS, send_to_runviewer):
+        with self.batches_lock:
+            self.batches_pending += 1
         self.command_queue.put(
-            (
-                'compile_shots',
-                (list(records), send_to_BLACS, send_to_runviewer),
-                None,
-            )
+            ('compile_shots', (list(records), send_to_BLACS, send_to_runviewer))
         )
-
-    def compile_shot(self, item, send_to_runviewer=False):
-        return self._request('compile_shot', item, bool(send_to_runviewer))
 
     def _compile_shot(self, item, send_to_runviewer=False):
         if 'frozen_globals' in item:
@@ -295,8 +486,58 @@ class QueueManager(QtCore.QObject):
         item['compiled'] = bool(success)
         return success
 
+    def compile_next_in_background(self, send_to_runviewer):
+        """Start compiling the shot at the head of the queue if it is not ready.
+
+        Returns True while a queued shot is pending, so the caller reports that
+        there is nothing to hand over yet rather than falling back to the
+        empty-queue policy.
+
+        ``send_to_runviewer`` is a callable, evaluated only when a compile is
+        actually started, so that a request with nothing to do does not reach
+        into the GUI.
+
+        The compile runs on its own thread rather than through the worker's
+        command queue, so that it is not held up behind an Engage batch. The
+        compiler lock is taken per shot, so it starts at the next shot
+        boundary."""
+        item, pending = self.controller.claim_next_for_compile()
+        if item is not None:
+            thread = threading.Thread(
+                target=self._background_compile,
+                args=(item, bool(send_to_runviewer())),
+            )
+            thread.daemon = True
+            thread.start()
+        return pending
+
+    def _background_compile(self, item, send_to_runviewer):
+        success = False
+        try:
+            success = self._compile_shot(item, send_to_runviewer=send_to_runviewer)
+        except Exception as exc:
+            self.output(
+                'Could not compile queued shot %s: %s\n'
+                % (os.path.basename(item['path']), str(exc)),
+                red=True,
+            )
+        changed, still_queued = self.controller.finish_compile(item, success)
+        if success and not still_queued:
+            # The shot was deleted from the queue while it was compiling, which
+            # deleted its file. Remove the one this compile just wrote.
+            self._delete_queue_files([item['path']])
+        elif not success and changed:
+            self.output(
+                'Dropped queued shot %s.\n' % os.path.basename(item['path']),
+                red=True,
+            )
+        if changed:
+            self.queueChanged.emit()
+
     def set_last_sent_from_queue(self, value):
-        return self._request('set_last_sent_from_queue', value)
+        if self.controller.set_last_sent_from_queue(value):
+            self.queueChanged.emit()
+
     def _delete_queue_files(self, paths):
         for path in paths:
             try:
@@ -311,106 +552,121 @@ class QueueManager(QtCore.QObject):
                 )
 
     def set_empty_queue_policy(self, value):
-        return self._request('set_empty_queue_policy', value)
+        self.controller.set_empty_queue_policy(value)
+        self.queueChanged.emit()
 
     def set_default_labscript_file(self, value):
-        return self._request('set_default_labscript_file', value)
+        self.controller.set_default_labscript_file(value)
+        self.queueChanged.emit()
 
     def set_compile_mode(self, value):
-        return self._request('set_compile_mode', value)
+        self.controller.set_compile_mode(value)
+        self.queueChanged.emit()
+
+    def set_failure_policy(self, value):
+        self.controller.set_failure_policy(value)
+        self.queueChanged.emit()
 
     def delete_rows(self, rows):
-        return self._request('delete_rows', list(rows))
+        removed_paths = self.controller.delete_rows(list(rows))
+        if removed_paths:
+            self._delete_queue_files(removed_paths)
+            self.queueChanged.emit()
+        return removed_paths
 
     def clear(self):
-        return self._request('clear')
+        self.controller.clear_in_flight()
+        removed_paths = self.controller.clear()
+        if removed_paths:
+            self._delete_queue_files(removed_paths)
+            self.queueChanged.emit()
+        return removed_paths
 
     def pop_next(self):
-        return self._request('pop_next')
+        item = self.controller.pop_next()
+        if item is not None:
+            self.queueChanged.emit()
+        return item
+
+    def reclaim_unaccepted(self):
+        paths = self.controller.reclaim_unaccepted()
+        if paths:
+            for path in paths:
+                self.output(
+                    'BLACS did not acknowledge shot %s; returning it to the '
+                    'queue.\n' % os.path.basename(path),
+                    red=True,
+                )
+            self.queueChanged.emit()
+        return paths
+
+    def shot_accepted(self, path, running_path=''):
+        if self.controller.shot_accepted(path, running_path):
+            self.queueChanged.emit()
+            return True
+        return False
+
+    def shot_finished(self, path, status, message=''):
+        known, outcome = self.controller.shot_finished(path, status, message)
+        if status != 'completed':
+            self.output(
+                'BLACS reported shot %s as %s%s%s\n'
+                % (
+                    os.path.basename(path),
+                    status,
+                    ': %s' % message if message else '',
+                    {
+                        'retried': ' Returned to the queue.',
+                        'dropped': ' Dropped from the queue.',
+                    }.get(outcome, ''),
+                ),
+                red=True,
+            )
+        if known:
+            self.queueChanged.emit()
+        return known
+
+    def shot_rejected(self, path, message=''):
+        if self.controller.shot_rejected(path, message):
+            self.output(
+                'BLACS rejected shot %s: %s\n' % (os.path.basename(path), message),
+                red=True,
+            )
+            self.queueChanged.emit()
+            return True
+        return False
 
     def get_queue_paths(self):
-        return self._request('get_queue_paths')
+        return self.controller.get_queue_paths()
 
     def get_queue_state(self):
-        return self._request('get_queue_state')
+        return self.controller.get_queue_state()
 
     def export_state(self):
-        return self._request('export_state')
+        return self.controller.export_state()
 
     def restore_state(self, state):
-        self.command_queue.put(('restore_state', (dict(state or {}),), None))
-
-    def _request(self, command, *args):
-        response_queue = queue.Queue()
-        self.command_queue.put((command, args, response_queue))
-        success, data = response_queue.get()
-        if success:
-            return data
-        raise data
+        self.controller.restore_state(dict(state or {}))
+        self.queueChanged.emit()
 
     def mainloop(self):
         while True:
             try:
                 try:
-                    command, args, response_queue = self.command_queue.get(timeout=1)
+                    command, args = self.command_queue.get(timeout=1)
                 except queue.Empty:
                     continue
 
                 if command == 'close':
                     return
 
-                changed = False
-                if command == 'enqueue':
-                    self.controller.enqueue(*args)
-                    changed = True
-                    result = None
-                elif command == 'set_empty_queue_policy':
-                    self.controller.set_empty_queue_policy(*args)
-                    changed = True
-                    result = None
-                elif command == 'set_default_labscript_file':
-                    self.controller.set_default_labscript_file(*args)
-                    changed = True
-                    result = None
-                elif command == 'set_compile_mode':
-                    self.controller.set_compile_mode(*args)
-                    changed = True
-                    result = None
-                elif command == 'set_last_sent_from_queue':
-                    self.controller.set_last_sent_from_queue(*args)
-                    changed = True
-                    result = None
-                elif command == 'delete_rows':
-                    self.controller.delete_rows(*args)
-                    changed = True
-                    result = None
-                elif command == 'clear':
-                    result = self.controller.clear()
-                    changed = bool(result)
-                elif command == 'pop_next':
-                    result = self.controller.pop_next()
-                    changed = result is not None
-                elif command == 'get_queue_paths':
-                    result = self.controller.get_queue_paths()
-                elif command == 'get_queue_state':
-                    result = self.controller.get_queue_state()
-                elif command == 'export_state':
-                    result = self.controller.export_state()
-                elif command == 'restore_state':
-                    self.controller.restore_state(*args)
-                    changed = True
-                    result = None
-                elif command == 'compile_shot':
-                    item, send_to_runviewer = args
-                    result = self._compile_shot(
-                        item, send_to_runviewer=send_to_runviewer
-                    )
-                elif command == 'compile_shots':
+                if command == 'compile_shots':
                     records, send_to_BLACS, send_to_runviewer = args
+                    aborted = False
                     try:
                         for item in records:
                             if self.compilation_aborted.is_set():
-                                self.output('Compilation aborted.\n\n', red=True)
+                                aborted = True
                                 break
                             compile_now = (
                                 not send_to_BLACS
@@ -422,32 +678,32 @@ class QueueManager(QtCore.QObject):
                                 )
                                 if not success:
                                     self.compilation_aborted.set()
-                                    continue
+                                    aborted = True
+                                    break
                             if send_to_BLACS:
-                                self.controller.enqueue([item])
-                                self.queueChanged.emit()
+                                # Enqueue each shot as it is compiled, so that
+                                # BLACS can collect it without waiting for the
+                                # rest of the batch:
+                                self.enqueue([item])
                                 self.output(
                                     'Queued shot %s in runmanager.\n'
                                     % os.path.basename(item['path'])
                                 )
+                        if aborted:
+                            self.output('Compilation aborted.\n\n', red=True)
                         else:
                             self.output('Ready.\n\n')
                     finally:
-                        self.set_abort_enabled(False)
-                        self.compilation_aborted.clear()
-                    result = None
+                        # The abort flag is cleared by the next Engage, not
+                        # here, so that aborting also stops batches already
+                        # queued behind this one. Abort stays available while
+                        # any of them are still pending:
+                        with self.batches_lock:
+                            self.batches_pending -= 1
+                            last_batch = self.batches_pending == 0
+                        if last_batch:
+                            self.set_abort_enabled(False)
                 else:
                     raise ValueError('Invalid queue command: %s' % command)
-
-                if command == 'clear' and result:
-                    self._delete_queue_files(result)
-
-                if changed:
-                    self.queueChanged.emit()
-                if response_queue is not None:
-                    response_queue.put((True, result))
             except Exception as exc:
-                if response_queue is not None:
-                    response_queue.put((False, exc))
-                else:
-                    raise_exception_in_thread((type(exc), exc, exc.__traceback__))
+                raise_exception_in_thread((type(exc), exc, exc.__traceback__))

@@ -151,9 +151,20 @@ class Client(ZMQClient):
         """Reserve and return the next queued shot for BLACS."""
         return self.request('queue_request_next')
 
-    def notify_shot_complete(self, filepath):
-        """Notify runmanager that a shot completed and should be analysed."""
-        return self.request('notify_shot_complete', filepath)
+    def shot_accepted(self, filepath, running_filepath=''):
+        """Tell runmanager BLACS has taken this shot, and the path it will run."""
+        return self.request('shot_accepted', filepath, running_filepath)
+
+    def shot_rejected(self, filepath, message=''):
+        """Tell runmanager BLACS will not run this shot, and why."""
+        return self.request('shot_rejected', filepath, message)
+
+    def notify_shot_complete(self, filepath, status='completed', message=''):
+        """Tell runmanager how a shot turned out.
+
+        ``completed`` shots are passed on for analysis; ``aborted`` and
+        ``failed`` ones are recorded and shown, but not analysed."""
+        return self.request('notify_shot_complete', filepath, status, message)
 
 
 _default_client = Client()
@@ -187,6 +198,8 @@ error_in_globals = _default_client.error_in_globals
 is_output_folder_default = _default_client.is_output_folder_default
 reset_shot_output_folder = _default_client.reset_shot_output_folder
 queue_request_next = _default_client.queue_request_next
+shot_accepted = _default_client.shot_accepted
+shot_rejected = _default_client.shot_rejected
 notify_shot_complete = _default_client.notify_shot_complete
 
 if __name__ == '__main__':
