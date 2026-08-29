@@ -290,8 +290,8 @@ class FingerTabBarWidget(QtWidgets.QTabBar):
             total_height += tabRect.height()
         if total_height > self.parent().height():
             # Don't paint over the top of the scroll buttons:
-            scroll_buttons_area_height = 2*max(self.style().pixelMetric(QtWidgets.QStyle.PM_TabBarScrollButtonWidth),
-                                               qapplication.globalStrut().width())
+            scroll_buttons_area_height = 2*self.style().pixelMetric(
+                QtWidgets.QStyle.PM_TabBarScrollButtonWidth)
             self.paint_clip = self.width(), self.parent().height() - scroll_buttons_area_height
         else:
             self.paint_clip = None
@@ -327,7 +327,7 @@ class FingerTabBarWidget(QtWidgets.QTabBar):
 
     def tabSizeHint(self, index):
         fontmetrics = QtGui.QFontMetrics(self.font())
-        text_width = fontmetrics.width(self.tabText(index))
+        text_width = fontmetrics.horizontalAdvance(self.tabText(index))
         text_height = fontmetrics.height()
         height = text_height + 15
         height = max(self.minheight, height)
@@ -453,7 +453,7 @@ class ItemView(object):
             p.setColor(
                 group,
                 QtGui.QPalette.HighlightedText,
-                p.color(QtGui.QPalette.Active, QtGui.QPalette.Foreground)
+                p.color(QtGui.QPalette.Active, QtGui.QPalette.WindowText)
             )
         self.setPalette(p)
 
