@@ -4120,5 +4120,5 @@ if __name__ == "__main__":
     # Upon seeing a ctrl-c interrupt, quit the event loop
     signal.signal(signal.SIGINT, lambda *args: qapplication.exit())
 
-    qapplication.exec_()
+    qapplication.exec()
     remote_server.shutdown()
