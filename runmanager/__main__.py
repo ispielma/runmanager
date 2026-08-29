@@ -1123,7 +1123,7 @@ class GroupTab(object):
         menu.addAction(self.action_globals_set_selected_true)
         menu.addAction(self.action_globals_set_selected_false)
         menu.addAction(self.action_globals_delete_selected)
-        menu.exec_(QtGui.QCursor.pos())
+        menu.exec(QtGui.QCursor.pos())
 
     def on_globals_delete_selected_triggered(self):
         selected_indexes = self.ui.tableView_globals.selectedIndexes()
@@ -2738,7 +2738,7 @@ class RunManager(LabscriptApplication):
             copy_menu.addAction(filename, lambda filepath=filepath: self.on_groups_copy_selected_groups_triggered(filepath, False))
             move_menu.addAction(filename, lambda filepath=filepath: self.on_groups_copy_selected_groups_triggered(filepath, True))
 
-        menu.exec_(QtGui.QCursor.pos())
+        menu.exec(QtGui.QCursor.pos())
 
     def on_groups_copy_selected_groups_triggered(self, dest_globals_file=None, delete_source_group=False):
         selected_indexes = self.ui.treeView_groups.selectedIndexes()
