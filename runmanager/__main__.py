@@ -42,6 +42,7 @@ import pprint
 import traceback
 import signal
 import unicodedata
+import uuid
 from pathlib import Path
 
 splash.update_text('importing matplotlib')
@@ -79,6 +80,8 @@ from runmanager.queueing import (
     COMPILE_MODE_LAZY,
     EMPTY_QUEUE_DEFAULT_LABSCRIPT,
     EMPTY_QUEUE_NOTHING,
+    PROVIDER_NONE,
+    PROVIDER_SHOT,
     QueueManager,
     RunmanagerQueueWidget,
 )
@@ -2173,17 +2176,8 @@ class RunManager(LabscriptApplication):
         else:
             text = 'Last sent from queue: nothing'
             tooltip = ''
-        # In-flight shots are shown here rather than as queue rows, so that row
-        # indices keep addressing queued shots only:
-        for shot in state['in_flight']:
-            if shot['state'] == 'running':
-                text += ' (running in BLACS)'
-                if shot['running_path'] and shot['running_path'] != shot['path']:
-                    text += ', as %s' % os.path.basename(shot['running_path'])
-            elif shot['state'] == 'rejected':
-                text += ' (rejected by BLACS: %s)' % shot['message']
-            else:
-                text += ' (awaiting BLACS)'
+        # A shot BLACS is running is not named here: it keeps its place in the
+        # queue, where its row is coloured to show it is under way.
         self.queue_last_sent_label.setText(text)
         self.queue_last_sent_label.setToolTip(tooltip)
 
@@ -4405,11 +4399,43 @@ class RunManager(LabscriptApplication):
                 self._default_shot_ready = run_file
                 self._default_shot_preparing = False
 
-    def queue_request_next(self):
-        # BLACS acknowledges a shot before running it, on this same thread, so
-        # anything still unacknowledged when it asks again never reached it:
-        self.queue_manager.reclaim_unaccepted()
-        item = self.queue_manager.pop_next()
+    def queue_exchange(self, outcome=None, request_shot=True):
+        """Apply BLACS's outcome for the shot it was offered, then offer one.
+
+        The outcome is applied first, so that a single exchange can retire the
+        row BLACS has just finished and offer the next one in the same reply."""
+        if outcome:
+            self.apply_shot_outcome(outcome)
+        if not request_shot:
+            return {'state': PROVIDER_NONE, 'shot_id': None, 'path': None}
+        return self.offer_shot()
+
+    def apply_shot_outcome(self, outcome):
+        """Record how BLACS says the shot it was offered turned out.
+
+        Only completed shots are submitted for analysis; the others are
+        recorded and shown, but not analysed. Analysis gets the file BLACS
+        actually ran, which is not the queued one when it made a fresh copy to
+        re-run a shot that already held data."""
+        shot_id = str(outcome.get('shot_id') or '')
+        status = str(outcome.get('status', ''))
+        message = str(outcome.get('message', ''))
+        record = self.queue_manager.shot_finished(shot_id, status, message)
+        if status != 'completed':
+            return
+        agnostic_path = outcome.get('path')
+        if not agnostic_path and record is not None:
+            agnostic_path = shared_drive.path_to_agnostic(record['path'])
+        if agnostic_path:
+            self.analysis_submission.notify_shot_complete(agnostic_path)
+
+    def offer_shot(self):
+        """Offer BLACS a shot, if this runmanager has one to run.
+
+        Returns the exchange response: the provider state, plus the stable id
+        and shared-drive-agnostic path of the shot when one is offered."""
+        no_shot = {'state': PROVIDER_NONE, 'shot_id': None, 'path': None}
+        item = self.queue_manager.offer_next()
         if item is None:
             # A queued shot that is not compiled yet stays at the head of the
             # queue and is compiled off this thread, so that a slow compile
@@ -4420,17 +4446,17 @@ class RunManager(LabscriptApplication):
             if self.queue_manager.compile_next_in_background(
                 lambda: inmain(self.ui.checkBox_view_shots.isChecked)
             ):
-                return None
+                return no_shot
             queue_state = self.queue_manager.get_queue_state()
             if queue_state['empty_queue_policy'] != EMPTY_QUEUE_DEFAULT_LABSCRIPT:
                 self.discard_default_shot()
                 self.queue_manager.set_last_sent_from_queue(None)
-                return None
+                return no_shot
             labscript_file = queue_state['default_labscript_file']
             if not labscript_file:
                 self.discard_default_shot()
                 self.queue_manager.set_last_sent_from_queue(None)
-                return None
+                return no_shot
             if not os.path.isfile(labscript_file):
                 raise RuntimeError(
                     'Default-shot labscript file does not exist: %s' % labscript_file
@@ -4441,12 +4467,17 @@ class RunManager(LabscriptApplication):
             # the remote server, nor finish into a client that stopped waiting.
             run_file = self.take_default_shot(labscript_file)
             if run_file is None:
-                return None
+                return no_shot
+            # A default shot has no queue row of its own, so its identifier is
+            # made here. BLACS reports its outcome like any other shot's, which
+            # is what sends a completed one on for analysis:
+            shot_id = uuid.uuid4().hex
         else:
             # The queue has taken over, so any default shot prepared while it
             # was empty is now out of date:
             self.discard_default_shot()
             run_file = item['path']
+            shot_id = item['shot_id']
         agnostic_path = shared_drive.path_to_agnostic(run_file)
         if item is not None:
             # Only shots that came from the queue are recorded here. A default
@@ -4454,7 +4485,7 @@ class RunManager(LabscriptApplication):
             # directory, so it must not become the anchor that "add shots to
             # last sequence" writes the next batch alongside:
             self.queue_manager.set_last_sent_from_queue(agnostic_path)
-        return agnostic_path
+        return {'state': PROVIDER_SHOT, 'shot_id': shot_id, 'path': agnostic_path}
 
 
 class RemoteServer(ZMQServer):
@@ -4725,30 +4756,8 @@ class RemoteServer(ZMQServer):
     def handle_reset_shot_output_folder(self):
         app.on_reset_shot_output_folder_clicked(None)
 
-    def handle_queue_request_next(self):
-        return app.queue_request_next()
-
-    def handle_shot_accepted(self, filepath, running_filepath=''):
-        return app.queue_manager.shot_accepted(
-            shared_drive.path_to_local(str(filepath)),
-            shared_drive.path_to_local(str(running_filepath)) if running_filepath else '',
-        )
-
-    def handle_shot_rejected(self, filepath, message=''):
-        return app.queue_manager.shot_rejected(
-            shared_drive.path_to_local(str(filepath)), message
-        )
-
-    def handle_notify_shot_complete(self, filepath, status='completed', message=''):
-        app.queue_manager.shot_finished(
-            shared_drive.path_to_local(str(filepath)), status, message
-        )
-        if status != 'completed':
-            # Only completed shots are submitted for analysis. Before this,
-            # BLACS reported nothing at all for a shot that failed, so lyse
-            # never saw one; that must not change here.
-            return 'noted'
-        return app.analysis_submission.notify_shot_complete(filepath)
+    def handle_queue_exchange(self, outcome=None, request_shot=True):
+        return app.queue_exchange(outcome, bool(request_shot))
 
     def handler(self, request_data):
         cmd, args, kwargs = request_data

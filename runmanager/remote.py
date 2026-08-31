@@ -147,24 +147,20 @@ class Client(ZMQClient):
         """Reset the shot output folder to the default path"""
         return self.request('reset_shot_output_folder')
 
-    def queue_request_next(self):
-        """Reserve and return the next queued shot for BLACS."""
-        return self.request('queue_request_next')
+    def queue_exchange(self, outcome=None, request_shot=True):
+        """Report how a shot turned out, and ask for the next one.
 
-    def shot_accepted(self, filepath, running_filepath=''):
-        """Tell runmanager BLACS has taken this shot, and the path it will run."""
-        return self.request('shot_accepted', filepath, running_filepath)
+        ``outcome`` is None, or a dict describing the shot runmanager last
+        offered: its ``shot_id``, its ``status`` (``'completed'``,
+        ``'aborted'``, ``'failed'`` or ``'rejected'``), a human-readable
+        ``message``, and the ``path`` actually run if that is not the path
+        offered. Runmanager applies the outcome before choosing what to offer,
+        so one exchange can finish one shot and take the next.
 
-    def shot_rejected(self, filepath, message=''):
-        """Tell runmanager BLACS will not run this shot, and why."""
-        return self.request('shot_rejected', filepath, message)
-
-    def notify_shot_complete(self, filepath, status='completed', message=''):
-        """Tell runmanager how a shot turned out.
-
-        ``completed`` shots are passed on for analysis; ``aborted`` and
-        ``failed`` ones are recorded and shown, but not analysed."""
-        return self.request('notify_shot_complete', filepath, status, message)
+        Returns a dict: ``state`` is ``'shot'``, ``'paused'`` or ``'none'``,
+        and ``shot_id`` and ``path`` name the offered shot when there is
+        one."""
+        return self.request('queue_exchange', outcome, request_shot)
 
 
 _default_client = Client()
@@ -197,10 +193,7 @@ set_shot_output_folder = _default_client.set_shot_output_folder
 error_in_globals = _default_client.error_in_globals
 is_output_folder_default = _default_client.is_output_folder_default
 reset_shot_output_folder = _default_client.reset_shot_output_folder
-queue_request_next = _default_client.queue_request_next
-shot_accepted = _default_client.shot_accepted
-shot_rejected = _default_client.shot_rejected
-notify_shot_complete = _default_client.notify_shot_complete
+queue_exchange = _default_client.queue_exchange
 
 if __name__ == '__main__':
     # Test

@@ -22,8 +22,9 @@ shows only their filepaths.
 import os
 import queue
 import threading
+import uuid
 
-from qtutils.qt import QtCore, QtWidgets
+from qtutils.qt import QtCore, QtGui, QtWidgets
 from qtutils.qt.QtCore import pyqtSignal as Signal
 
 from labscript_utils.qtwidgets.shotqueue import ShotQueueWidget
@@ -35,6 +36,17 @@ COMPILE_MODE_EAGER = 'eager'
 COMPILE_MODE_LAZY = 'lazy'
 FAILURE_POLICY_RETRY = 'retry'
 FAILURE_POLICY_DROP = 'drop'
+# What an exchange tells BLACS about this runmanager: it offered a shot, its
+# queue is paused, or it has nothing to offer right now. Paused is not used
+# until runmanager owns a pause control, but the three states are the whole
+# protocol vocabulary, so BLACS can tell them apart from the outset:
+PROVIDER_SHOT = 'shot'
+PROVIDER_PAUSED = 'paused'
+PROVIDER_NONE = 'none'
+# The shot BLACS is executing keeps its place in the queue, and is coloured
+# rather than given a column of its own, so that the queue reads as a list of
+# outstanding work with one row marked as under way:
+RUNNING_ROW_BACKGROUND = QtGui.QColor('#ccffcc')
 
 
 class RunmanagerQueueWidget(ShotQueueWidget):
@@ -68,20 +80,21 @@ class RunmanagerQueueWidget(ShotQueueWidget):
         for path_info in paths:
             if isinstance(path_info, dict):
                 mode = path_info.get('mode', '')
-                row_infos.append(
-                    {
-                        'path': path_info['path'],
-                        'label': path_info.get('label', os.path.basename(path_info['path'])),
-                        'tooltip': path_info.get('tooltip', path_info['path']),
-                        'columns': [
-                            {
-                                'text': mode,
-                                'tooltip': 'Compile mode: %s' % mode if mode else '',
-                                'alignment': QtCore.Qt.AlignCenter,
-                            }
-                        ],
-                    }
-                )
+                row_info = {
+                    'path': path_info['path'],
+                    'label': path_info.get('label', os.path.basename(path_info['path'])),
+                    'tooltip': path_info.get('tooltip', path_info['path']),
+                    'columns': [
+                        {
+                            'text': mode,
+                            'tooltip': 'Compile mode: %s' % mode if mode else '',
+                            'alignment': QtCore.Qt.AlignCenter,
+                        }
+                    ],
+                }
+                if path_info.get('state') == 'running':
+                    row_info['background'] = RUNNING_ROW_BACKGROUND
+                row_infos.append(row_info)
             else:
                 row_infos.append(path_info)
         self.set_row_infos(row_infos)
@@ -106,11 +119,6 @@ class QueueController(object):
         self.failure_policy = FAILURE_POLICY_RETRY
         self.last_sent_from_queue = None
         self._items = []
-        # Shots handed to BLACS whose fate is not yet known. Normally at most
-        # one, since BLACS only asks when it is idle. These are not queued, so
-        # they are deliberately absent from the queued shot count, the queue
-        # paths and the display items:
-        self._in_flight = []
         self._lock = threading.RLock()
 
     def _normalise_item(self, item):
@@ -118,6 +126,12 @@ class QueueController(object):
             item = {'path': item, 'compile_mode': COMPILE_MODE_EAGER, 'compiled': True}
         record = dict(item)
         record['path'] = os.path.abspath(str(record['path']))
+        # One stable identifier per queue row, assigned when the record is made
+        # and kept for the life of the row, including across a save and restore
+        # and across every retry of it. It names the row rather than a run of
+        # it, so BLACS's outcome finds the row it was offered even when the
+        # file it ran is a fresh copy with another name:
+        record['shot_id'] = str(record.get('shot_id') or uuid.uuid4().hex)
         labscript_file = record.get('labscript_file', '')
         record['labscript_file'] = (
             os.path.abspath(str(labscript_file)) if labscript_file else ''
@@ -143,10 +157,10 @@ class QueueController(object):
         }
         record['run_no'] = int(record.get('run_no', 0))
         record['n_runs'] = int(record.get('n_runs', 1))
-        # Set once the shot is handed to BLACS; see pop_next():
+        # 'running' once the row is offered to BLACS; see offer_next(). Like a
+        # compile in progress, it belongs to this session only, so a restored
+        # shot never starts out running:
         record['state'] = ''
-        record['running_path'] = ''
-        record['message'] = ''
         return record
 
     def set_empty_queue_policy(self, value):
@@ -200,14 +214,6 @@ class QueueController(object):
             self._items = []
             return removed_paths
 
-    def clear_in_flight(self):
-        """Forget shots in flight, without touching their files.
-
-        A shot BLACS has taken is out of runmanager's hands, so clearing the
-        queue must not delete it."""
-        with self._lock:
-            self._in_flight = []
-
     def get_queue_paths(self):
         with self._lock:
             return [item['path'] for item in self._items]
@@ -225,6 +231,7 @@ class QueueController(object):
                         'label': os.path.basename(path),
                         'mode': mode_label,
                         'tooltip': path,
+                        'state': item['state'],
                     }
                 )
             return items
@@ -274,7 +281,6 @@ class QueueController(object):
                 failure_policy = FAILURE_POLICY_RETRY
             self.failure_policy = failure_policy
             self.last_sent_from_queue = None
-            self._in_flight = []
             self._items = [self._normalise_item(item) for item in state.get('items', [])]
 
     def get_queue_state(self):
@@ -286,105 +292,44 @@ class QueueController(object):
                 'failure_policy': self.failure_policy,
                 'last_sent_from_queue': self.last_sent_from_queue,
                 'n_items': len(self._items),
-                'in_flight': [dict(item) for item in self._in_flight],
             }
 
-    def pop_next(self):
-        """Take the shot at the head of the queue if it is ready to hand over.
+    def offer_next(self):
+        """Offer the shot at the head of the queue if it is ready to hand over.
 
         A lazy shot that has not been compiled yet stays in the queue, so that
         it is neither lost nor overtaken by the empty-queue policy while it is
-        being compiled. A shot that is handed over becomes in-flight rather
-        than being discarded, so that it is not lost if it never reaches
-        BLACS."""
+        being compiled. The offered shot stays in the queue too, marked
+        running: the row is what BLACS is executing, so it remains visible, and
+        it is still there to be offered again if the reply never arrives. Only
+        a waiting row is offered, so the shot BLACS is running is not handed
+        out a second time. Returns a copy of the record, or None."""
         with self._lock:
             if not self._items or not self._items[0]['compiled']:
                 return None
-            # BLACS only asks when it is idle, so a shot it already
-            # acknowledged is finished with as far as the queue is concerned.
-            # Dropping those here keeps the in-flight record to the current
-            # shot rather than growing with every shot ever handed out:
-            self._in_flight = [i for i in self._in_flight if i['state'] == 'sent']
-            item = self._items.pop(0)
-            item['state'] = 'sent'
-            item['running_path'] = ''
-            item['message'] = ''
-            self._in_flight.append(item)
-            return item
-
-    def reclaim_unaccepted(self):
-        """Return shots BLACS never acknowledged to the head of the queue.
-
-        BLACS acknowledges a shot from the same thread that asks for the next
-        one, and before it starts running it. So a request arriving while a
-        shot is still awaiting acknowledgement means that shot never reached
-        BLACS. Returns the paths put back."""
-        with self._lock:
-            unaccepted = [i for i in self._in_flight if i['state'] == 'sent']
-            if not unaccepted:
-                return []
-            self._in_flight = [i for i in self._in_flight if i['state'] != 'sent']
-            for item in reversed(unaccepted):
-                item['state'] = ''
-                self._items.insert(0, item)
-            return [item['path'] for item in unaccepted]
-
-    def _take_in_flight(self, path):
-        path = os.path.abspath(str(path))
-        for index, item in enumerate(self._in_flight):
-            if path in (item['path'], item['running_path']):
-                return self._in_flight.pop(index)
-        return None
-
-    def shot_accepted(self, path, running_path=''):
-        """Record that BLACS took a shot, and the path it will actually run."""
-        with self._lock:
-            item = self._take_in_flight(path)
-            if item is None:
-                return False
+            item = self._items[0]
+            if item['state']:
+                return None
             item['state'] = 'running'
-            item['running_path'] = (
-                os.path.abspath(str(running_path)) if running_path else item['path']
-            )
-            self._in_flight.append(item)
-            return True
+            return dict(item)
 
-    def shot_rejected(self, path, message=''):
-        """Record that BLACS refused a shot. It is not offered again."""
+    def shot_finished(self, shot_id, status, message=''):
+        """Record how BLACS says the shot it was offered turned out.
+
+        The outcome names the row by its stable id, so it applies to the row
+        that was offered whichever file BLACS actually ran. A completed shot is
+        finished with and leaves the queue; anything else returns its row to
+        waiting, so the shot stays queued rather than being lost. Returns the
+        record the outcome belonged to, or None if no row has that id."""
         with self._lock:
-            item = self._take_in_flight(path)
-            if item is None:
-                return False
-            item['state'] = 'rejected'
-            item['message'] = str(message)
-            self._in_flight.append(item)
-            return True
-
-    def shot_finished(self, path, status, message=''):
-        """Record how BLACS says a shot turned out.
-
-        BLACS releases a shot it could not run, so every outcome is terminal
-        and the shot leaves the in-flight record. A shot that did not complete
-        goes back to the head of the queue or is dropped, according to the
-        failure policy. Returns ``(known, outcome)``, where outcome is
-        ``'retried'``, ``'dropped'`` or ``''``."""
-        with self._lock:
-            item = self._take_in_flight(path)
-            if item is None:
-                return False, ''
-            if status == 'completed':
-                return True, ''
-            if self.failure_policy == FAILURE_POLICY_RETRY:
+            for index, item in enumerate(self._items):
+                if item['shot_id'] != shot_id:
+                    continue
+                if status == 'completed':
+                    return self._items.pop(index)
                 item['state'] = ''
-                item['running_path'] = ''
-                item['message'] = ''
-                self._items.insert(0, item)
-                return True, 'retried'
-            return True, 'dropped'
-
-    def get_in_flight(self):
-        with self._lock:
-            return [dict(item) for item in self._in_flight]
+                return dict(item)
+            return None
 
     def claim_next_for_compile(self):
         """Claim the shot at the head of the queue for compilation.
@@ -575,66 +520,33 @@ class QueueManager(QtCore.QObject):
         return removed_paths
 
     def clear(self):
-        self.controller.clear_in_flight()
         removed_paths = self.controller.clear()
         if removed_paths:
             self._delete_queue_files(removed_paths)
             self.queueChanged.emit()
         return removed_paths
 
-    def pop_next(self):
-        item = self.controller.pop_next()
+    def offer_next(self):
+        item = self.controller.offer_next()
         if item is not None:
             self.queueChanged.emit()
         return item
 
-    def reclaim_unaccepted(self):
-        paths = self.controller.reclaim_unaccepted()
-        if paths:
-            for path in paths:
-                self.output(
-                    'BLACS did not acknowledge shot %s; returning it to the '
-                    'queue.\n' % os.path.basename(path),
-                    red=True,
-                )
-            self.queueChanged.emit()
-        return paths
-
-    def shot_accepted(self, path, running_path=''):
-        if self.controller.shot_accepted(path, running_path):
-            self.queueChanged.emit()
-            return True
-        return False
-
-    def shot_finished(self, path, status, message=''):
-        known, outcome = self.controller.shot_finished(path, status, message)
+    def shot_finished(self, shot_id, status, message=''):
+        record = self.controller.shot_finished(shot_id, status, message)
         if status != 'completed':
             self.output(
-                'BLACS reported shot %s as %s%s%s\n'
+                'BLACS reported shot %s as %s%s\n'
                 % (
-                    os.path.basename(path),
+                    os.path.basename(record['path']) if record else shot_id,
                     status,
                     ': %s' % message if message else '',
-                    {
-                        'retried': ' Returned to the queue.',
-                        'dropped': ' Dropped from the queue.',
-                    }.get(outcome, ''),
                 ),
                 red=True,
             )
-        if known:
+        if record is not None:
             self.queueChanged.emit()
-        return known
-
-    def shot_rejected(self, path, message=''):
-        if self.controller.shot_rejected(path, message):
-            self.output(
-                'BLACS rejected shot %s: %s\n' % (os.path.basename(path), message),
-                red=True,
-            )
-            self.queueChanged.emit()
-            return True
-        return False
+        return record
 
     def get_queue_paths(self):
         return self.controller.get_queue_paths()
