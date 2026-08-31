@@ -74,8 +74,6 @@ import runmanager
 import runmanager.remote
 from runmanager.analysis_submission import AnalysisSubmission
 from runmanager.queueing import (
-    FAILURE_POLICY_DROP,
-    FAILURE_POLICY_RETRY,
     COMPILE_MODE_EAGER,
     COMPILE_MODE_LAZY,
     EMPTY_QUEUE_DEFAULT_LABSCRIPT,
@@ -1979,18 +1977,6 @@ class RunManager(LabscriptApplication):
         self.queue_compile_mode_combo.addItem('Eager compile', COMPILE_MODE_EAGER)
         self.queue_compile_mode_combo.addItem('Lazy compile', COMPILE_MODE_LAZY)
         controls_layout.addWidget(self.queue_compile_mode_combo)
-        controls_layout.addWidget(
-            QtWidgets.QLabel('When a shot does not run', self.tab_queue)
-        )
-        self.queue_failure_policy_combo = QtWidgets.QComboBox(self.tab_queue)
-        self.queue_failure_policy_combo.addItem('Retry', FAILURE_POLICY_RETRY)
-        self.queue_failure_policy_combo.addItem('Drop', FAILURE_POLICY_DROP)
-        self.queue_failure_policy_combo.setToolTip(
-            'What to do with a shot BLACS could not run. Retry returns it to '
-            'the head of the queue; Drop discards it. A shot BLACS refused to '
-            'accept at all is never offered again.'
-        )
-        controls_layout.addWidget(self.queue_failure_policy_combo)
         controls_layout.addWidget(QtWidgets.QLabel('When queue is empty', self.tab_queue))
         self.queue_empty_policy_combo = QtWidgets.QComboBox(self.tab_queue)
         self.queue_empty_policy_combo.addItem('Send nothing', EMPTY_QUEUE_NOTHING)
@@ -2095,9 +2081,6 @@ class RunManager(LabscriptApplication):
             self.groups_model.itemChanged, self.on_groups_model_item_changed)
 
         self.queue_manager.queueChanged.connect(self.refresh_queue_tab)
-        self.queue_failure_policy_combo.currentIndexChanged.connect(
-            self.on_queue_failure_policy_changed
-        )
         self.queue_compile_mode_combo.currentIndexChanged.connect(
             self.on_queue_compile_mode_changed
         )
@@ -2157,12 +2140,6 @@ class RunManager(LabscriptApplication):
         if compile_mode is None:
             return
         self.queue_manager.set_compile_mode(compile_mode)
-
-    def on_queue_failure_policy_changed(self, index):
-        failure_policy = self.queue_failure_policy_combo.itemData(index)
-        if failure_policy is None:
-            return
-        self.queue_manager.set_failure_policy(failure_policy)
 
     @inmain_decorator()
     def refresh_queue_tab(self):
@@ -3972,11 +3949,6 @@ class RunManager(LabscriptApplication):
             )
             if index != -1:
                 self.queue_empty_policy_combo.setCurrentIndex(index)
-            index = self.queue_failure_policy_combo.findData(
-                restored_queue_state['failure_policy']
-            )
-            if index != -1:
-                self.queue_failure_policy_combo.setCurrentIndex(index)
 
         self.analysis_submission.restore_configuration_data(
             runmanager_config.get('analysis_submission')

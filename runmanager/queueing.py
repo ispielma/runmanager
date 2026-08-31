@@ -34,8 +34,6 @@ EMPTY_QUEUE_NOTHING = 'nothing'
 EMPTY_QUEUE_DEFAULT_LABSCRIPT = 'default_labscript'
 COMPILE_MODE_EAGER = 'eager'
 COMPILE_MODE_LAZY = 'lazy'
-FAILURE_POLICY_RETRY = 'retry'
-FAILURE_POLICY_DROP = 'drop'
 # What an exchange tells BLACS about this runmanager: it offered a shot, its
 # queue is paused, or it has nothing to offer right now. Paused is not used
 # until runmanager owns a pause control, but the three states are the whole
@@ -43,10 +41,16 @@ FAILURE_POLICY_DROP = 'drop'
 PROVIDER_SHOT = 'shot'
 PROVIDER_PAUSED = 'paused'
 PROVIDER_NONE = 'none'
-# The shot BLACS is executing keeps its place in the queue, and is coloured
-# rather than given a column of its own, so that the queue reads as a list of
-# outstanding work with one row marked as under way:
+# The shot BLACS is executing keeps its place in the queue, and so does one it
+# could not run. Both are coloured rather than given a column of their own, so
+# that the queue reads as a list of outstanding work with one row marked as
+# under way, or as needing attention:
 RUNNING_ROW_BACKGROUND = QtGui.QColor('#ccffcc')
+FAILED_ROW_BACKGROUND = QtGui.QColor('#ffcccc')
+ROW_BACKGROUNDS = {'running': RUNNING_ROW_BACKGROUND, 'failed': FAILED_ROW_BACKGROUND}
+# What a shot record says about this session's attempt at it rather than about
+# the shot: assigned by _normalise_item, and left out of a saved queue:
+SESSION_ONLY_FIELDS = ('compiling', 'state', 'message')
 
 
 class RunmanagerQueueWidget(ShotQueueWidget):
@@ -92,8 +96,9 @@ class RunmanagerQueueWidget(ShotQueueWidget):
                         }
                     ],
                 }
-                if path_info.get('state') == 'running':
-                    row_info['background'] = RUNNING_ROW_BACKGROUND
+                background = ROW_BACKGROUNDS.get(path_info.get('state'))
+                if background is not None:
+                    row_info['background'] = background
                 row_infos.append(row_info)
             else:
                 row_infos.append(path_info)
@@ -116,7 +121,6 @@ class QueueController(object):
         self.empty_queue_policy = EMPTY_QUEUE_NOTHING
         self.default_labscript_file = ''
         self.compile_mode = COMPILE_MODE_EAGER
-        self.failure_policy = FAILURE_POLICY_RETRY
         self.last_sent_from_queue = None
         self._items = []
         self._lock = threading.RLock()
@@ -157,10 +161,14 @@ class QueueController(object):
         }
         record['run_no'] = int(record.get('run_no', 0))
         record['n_runs'] = int(record.get('n_runs', 1))
-        # 'running' once the row is offered to BLACS; see offer_next(). Like a
-        # compile in progress, it belongs to this session only, so a restored
-        # shot never starts out running:
+        # 'running' once the row is offered to BLACS, 'failed' once BLACS
+        # reports it did not complete; see offer_next() and shot_finished().
+        # 'message' is why it did not complete. Like a compile in progress,
+        # both belong to this session only: a restored shot never starts out
+        # running, and does not carry the reason a previous session gave for
+        # it, which nothing has attempted since.
         record['state'] = ''
+        record['message'] = ''
         return record
 
     def set_empty_queue_policy(self, value):
@@ -178,12 +186,6 @@ class QueueController(object):
             raise ValueError('Invalid compile mode: %s' % value)
         with self._lock:
             self.compile_mode = value
-
-    def set_failure_policy(self, value):
-        if value not in (FAILURE_POLICY_RETRY, FAILURE_POLICY_DROP):
-            raise ValueError('Invalid failure policy: %s' % value)
-        with self._lock:
-            self.failure_policy = value
 
     def enqueue(self, items):
         records = [self._normalise_item(item) for item in items]
@@ -225,12 +227,15 @@ class QueueController(object):
                 compile_mode = item.get('compile_mode', COMPILE_MODE_EAGER)
                 mode_label = 'JIT' if compile_mode == COMPILE_MODE_LAZY else 'compiled'
                 path = item['path']
+                # A failed row says why in its tooltip rather than in a column
+                # that would be empty on every other row:
+                message = item['message']
                 items.append(
                     {
                         'path': path,
                         'label': os.path.basename(path),
                         'mode': mode_label,
-                        'tooltip': path,
+                        'tooltip': '%s\n%s' % (path, message) if message else path,
                         'state': item['state'],
                     }
                 )
@@ -251,8 +256,20 @@ class QueueController(object):
                 'empty_queue_policy': self.empty_queue_policy,
                 'default_labscript_file': self.default_labscript_file,
                 'compile_mode': self.compile_mode,
-                'failure_policy': self.failure_policy,
-                'items': [dict(item) for item in self._items],
+                # Without what this session made of each row: a saved queue is
+                # a list of work still to do, so writing out that BLACS was
+                # running a row, or the paragraph explaining why it could not,
+                # would only put back something restore_state discards -- and
+                # would make the configuration differ from the saved one, and
+                # so prompt to be saved again, after every offer:
+                'items': [
+                    {
+                        name: value
+                        for name, value in item.items()
+                        if name not in SESSION_ONLY_FIELDS
+                    }
+                    for item in self._items
+                ],
             }
 
     def restore_state(self, state):
@@ -276,10 +293,6 @@ class QueueController(object):
             if compile_mode not in (COMPILE_MODE_EAGER, COMPILE_MODE_LAZY):
                 compile_mode = COMPILE_MODE_EAGER
             self.compile_mode = compile_mode
-            failure_policy = state.get('failure_policy', FAILURE_POLICY_RETRY)
-            if failure_policy not in (FAILURE_POLICY_RETRY, FAILURE_POLICY_DROP):
-                failure_policy = FAILURE_POLICY_RETRY
-            self.failure_policy = failure_policy
             self.last_sent_from_queue = None
             self._items = [self._normalise_item(item) for item in state.get('items', [])]
 
@@ -289,7 +302,6 @@ class QueueController(object):
                 'empty_queue_policy': self.empty_queue_policy,
                 'default_labscript_file': self.default_labscript_file,
                 'compile_mode': self.compile_mode,
-                'failure_policy': self.failure_policy,
                 'last_sent_from_queue': self.last_sent_from_queue,
                 'n_items': len(self._items),
             }
@@ -300,17 +312,30 @@ class QueueController(object):
         A lazy shot that has not been compiled yet stays in the queue, so that
         it is neither lost nor overtaken by the empty-queue policy while it is
         being compiled. The offered shot stays in the queue too, marked
-        running: the row is what BLACS is executing, so it remains visible, and
-        it is still there to be offered again if the reply never arrives. Only
-        a waiting row is offered, so the shot BLACS is running is not handed
-        out a second time. Returns a copy of the record, or None."""
+        running: the row is what BLACS is executing, so it remains visible. A
+        failed row is offered again as well as a waiting one -- that is the
+        retry, and it is why a shot stays at the head until it completes or the
+        operator deletes it. Only a running row is refused, so the shot BLACS is
+        running is not handed out a second time. Returns a copy of the record,
+        or None.
+
+        That refusal has no time limit, and only an outcome or a deletion ends
+        it, so a row whose offer reply never reached BLACS -- or whose BLACS
+        closed while holding it -- stays running for good, and stops the whole
+        queue behind it. Deleting the row is the only way out today. Reclaiming
+        one belongs with the rest of the protocol hardening, and has to come
+        before an active row is protected from deletion."""
         with self._lock:
             if not self._items or not self._items[0]['compiled']:
                 return None
             item = self._items[0]
-            if item['state']:
+            if item['state'] == 'running':
                 return None
             item['state'] = 'running'
+            # Whatever went wrong last time is being attempted again, so the
+            # row goes back to the running appearance rather than keeping a
+            # reason that no longer describes it:
+            item['message'] = ''
             return dict(item)
 
     def shot_finished(self, shot_id, status, message=''):
@@ -318,16 +343,21 @@ class QueueController(object):
 
         The outcome names the row by its stable id, so it applies to the row
         that was offered whichever file BLACS actually ran. A completed shot is
-        finished with and leaves the queue; anything else returns its row to
-        waiting, so the shot stays queued rather than being lost. Returns the
-        record the outcome belonged to, or None if no row has that id."""
+        finished with and leaves the queue; anything else stays where it is,
+        which is the head of the queue, since that is the only row that can be
+        offered. It keeps its id and gains the reason it did not run, so that
+        the same shot is retried when BLACS asks for work again, and until then
+        the operator can see which shot needs attention and why. Deleting the
+        row is the only way to discard it. Returns the record the outcome
+        belonged to, or None if no row has that id."""
         with self._lock:
             for index, item in enumerate(self._items):
                 if item['shot_id'] != shot_id:
                     continue
                 if status == 'completed':
                     return self._items.pop(index)
-                item['state'] = ''
+                item['state'] = 'failed'
+                item['message'] = str(message)
                 return dict(item)
             return None
 
@@ -506,10 +536,6 @@ class QueueManager(QtCore.QObject):
 
     def set_compile_mode(self, value):
         self.controller.set_compile_mode(value)
-        self.queueChanged.emit()
-
-    def set_failure_policy(self, value):
-        self.controller.set_failure_policy(value)
         self.queueChanged.emit()
 
     def delete_rows(self, rows):
