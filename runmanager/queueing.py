@@ -61,6 +61,18 @@ TINTED_ROW_FOREGROUND = QtGui.QColor('#202020')
 SESSION_ONLY_FIELDS = ('compiling', 'state', 'message', 'reclaimed')
 
 
+def sent_to_blacs(row):
+    """Whether this row has been handed to BLACS.
+
+    Any state at all means it has: the empty string is a row that has never
+    left the queue, and every state a row can reach it reaches by being given
+    to BLACS. Written once because three rules turn on it -- which row the
+    queue reserves its first place for, what Clear leaves alone, and what a
+    saved queue means -- and a state added later should join all three without
+    being named again in each."""
+    return bool(row.get('state'))
+
+
 class RunmanagerQueueWidget(ShotQueueWidget):
     """Shot queue widget configured for runmanager-owned shot records."""
 
@@ -131,6 +143,17 @@ class RunmanagerQueueWidget(ShotQueueWidget):
             }
         row_info = self._row_info(path_info)
         row_info['rule_below'] = True
+        if path_info['state'] == 'running':
+            # Not selectable, so Delete cannot even be aimed at it. The queue
+            # refuses to remove it anyway, but saying so afterwards means
+            # printing into the output box on another tab, which an operator
+            # looking at the queue never sees. Refusing the selection says it
+            # where they are, before they try, and the tooltip says why.
+            row_info['selectable'] = False
+            row_info['tooltip'] = (
+                '%s\nBLACS is running this shot. It cannot be deleted until it '
+                'is done.' % path_info['path']
+            )
         return row_info
 
     def set_queue_paths(self, paths):
@@ -138,7 +161,7 @@ class RunmanagerQueueWidget(ShotQueueWidget):
         paths = list(paths)
         # Only the head can have been sent: it is the row that gets offered,
         # and an outcome either retires it or leaves it there with a state.
-        sent = paths[0] if paths and paths[0].get('state') else None
+        sent = paths[0] if paths and sent_to_blacs(paths[0]) else None
         waiting = paths[1:] if sent is not None else paths
         row_infos = [self._sent_to_blacs_row(sent)]
         for path_info in waiting:
@@ -295,15 +318,24 @@ class QueueController(object):
             return removed_paths, protected_paths
 
     def clear(self):
-        """Empty the queue apart from the shot BLACS is running.
+        """Empty the queue, leaving whatever has been sent to BLACS.
 
-        That row and its file are kept for the reason delete_rows gives, which
-        is also why the two replacement submission modes replace only the work
-        behind a running shot. Returns ``(removed_paths, protected_paths)``."""
+        Clear is reached only by the two replacement submission modes, whose
+        offer is to empty the queue and submit a batch in its place. The queue
+        is the work still waiting; a shot that has gone to BLACS has left it,
+        and sits in the row the display reserves above the rest. Replacing the
+        queue therefore replaces what is behind that row and nothing else --
+        running, so that a file being written is not pulled away, and failed,
+        because a shot that came back needing attention is not what an operator
+        meant to discard by submitting different work.
+
+        Discarding a failed row is still possible, and still explicit: select
+        it and delete it. That is what delete_rows is for, and it is the only
+        thing that does it. Returns ``(removed_paths, protected_paths)``."""
         with self._lock:
-            kept = [item for item in self._items if item['state'] == 'running']
+            kept = [item for item in self._items if sent_to_blacs(item)]
             removed_paths = [
-                item['path'] for item in self._items if item['state'] != 'running'
+                item['path'] for item in self._items if not sent_to_blacs(item)
             ]
             self._items = kept
             return removed_paths, [item['path'] for item in kept]

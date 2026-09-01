@@ -802,9 +802,14 @@ class QueueEditingTests(unittest.TestCase):
         self.assertFalse(os.path.exists(waiting))
         self.assertTrue(self.app.output_box.said('shot_a.h5', 'running'))
 
-    def test_clear_removes_a_failed_row_like_any_other(self):
-        # Only the running row is protected. A red row is work that is not
-        # under way, so Clear takes it and its file along with everything else.
+    def test_clear_leaves_a_failed_row_alone_with_the_running_one(self):
+        # Clear is what the two replacement submission modes offer: empty the
+        # queue and submit a batch in its place. A shot that has gone to BLACS
+        # has left the queue -- it sits in the row reserved above the rest --
+        # so replacing the queue replaces what is behind it. A shot that came
+        # back needing attention is not what an operator meant to discard by
+        # submitting different work; deleting it is still explicit, and still
+        # possible.
         failed = self.enqueue('shot_a.h5')
         waiting = self.enqueue('shot_b.h5')
         offered = self.app.offer_shot()
@@ -815,10 +820,28 @@ class QueueEditingTests(unittest.TestCase):
 
         removed = self.app.queue_manager.clear()
 
-        self.assertEqual(sorted(removed), sorted([failed, waiting]))
+        self.assertEqual(removed, [waiting], 'only the waiting work is replaced')
+        rows = self.rows()
+        self.assertEqual([row['path'] for row in rows], [failed])
+        self.assertEqual(rows[0]['state'], 'failed', 'and it is still red')
+        self.assertTrue(os.path.exists(failed), 'its file survives with it')
+        self.assertFalse(os.path.exists(waiting))
+
+    def test_a_failed_row_can_still_be_deleted_outright(self):
+        # The other half of the rule above: Clear leaves it, an explicit delete
+        # discards it. That is what makes the queue move on past a bad shot.
+        failed = self.enqueue('shot_a.h5')
+        offered = self.app.offer_shot()
+        self.app.queue_exchange(
+            outcome={'shot_id': offered['shot_id'], 'status': 'aborted'},
+            request_shot=False,
+        )
+
+        removed = self.app.queue_manager.delete_rows(self.selection(failed))
+
+        self.assertEqual(removed, [failed])
         self.assertEqual(self.rows(), [])
         self.assertFalse(os.path.exists(failed))
-        self.assertFalse(os.path.exists(waiting))
 
     def test_deleting_a_failed_row_uncovers_the_next_waiting_shot(self):
         # Deleting the red row is the only way to discard a shot BLACS could
@@ -1234,6 +1257,21 @@ class SentToBlacsRowTests(unittest.TestCase):
             widget.queue_model.item(0, widget.path_column).isSelectable(),
             'a failed shot has to be deletable: it is how the queue moves on',
         )
+
+    def test_the_running_row_cannot_be_selected_and_says_why(self):
+        # Delete is refused by the queue whatever happens, but refusing it
+        # afterwards means a line in the output box on another tab, which an
+        # operator looking at the queue never sees. Refuse the selection
+        # instead, and explain it where they are.
+        controller = QueueController()
+        controller.enqueue([queued_shot('/tmp/shot_a.h5')])
+        controller.offer_next()
+
+        widget = self.widget_for(controller)
+
+        item = widget.queue_model.item(0, widget.path_column)
+        self.assertFalse(item.isSelectable())
+        self.assertIn('cannot be deleted', item.toolTip())
 
     def test_the_reserved_row_is_ruled_off_from_the_work_below_it(self):
         controller = QueueController()
