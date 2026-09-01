@@ -1426,8 +1426,14 @@ class OutcomeAppliedOnceTests(unittest.TestCase):
     The offer half is answered rather than raised, because BLACS cannot tell an
     exception handed back from a runmanager it never reached, and would hold the
     outcome and resend it once a second forever. The outcome half had no such
-    guard -- and it is the half that has already retired the row when it raises,
-    so no resend can put the analysis submission back.
+    guard, and answering it too closed only half the problem: being answered is
+    what lets BLACS drop the outcome, so nothing resends it, and a row already
+    retired when the submission raised left nothing behind to try again with.
+
+    So the completion is reported first and the row retired after. The guard
+    stays -- BLACS is answered normally either way -- and a submission that
+    falls over now costs a second run of the shot, which the apparatus can do,
+    rather than the data, which nothing can recover later.
 
     The dedupe beside it has a hole of the same shape and is deliberately left
     alone: it compares the row's displayed state against the one reported, and
@@ -1452,6 +1458,49 @@ class OutcomeAppliedOnceTests(unittest.TestCase):
             'message': message,
             'path': '/tmp/shot_a.h5',
         }
+
+    def rows(self, app):
+        return app.queue_manager.controller.get_queue_display_items()
+
+    def test_a_submission_that_falls_over_leaves_the_shot_to_be_run_again(self):
+        app, shot_id = self.app_with_shot()
+
+        def explode(path):
+            raise RuntimeError('lyse submission fell over')
+
+        app.analysis_submission.notify_shot_complete = explode
+
+        app.queue_exchange(self.outcome(shot_id, 'completed'), False)
+
+        self.assertEqual(
+            [os.path.basename(row['path']) for row in self.rows(app)],
+            ['shot_a.h5'],
+            'the row is the only thing left that names this shot, and the '
+            'answer BLACS was given means nothing will report it again',
+        )
+        reoffered = app.queue_exchange(request_shot=True)
+        self.assertEqual(
+            reoffered['shot_id'],
+            shot_id,
+            'so the next request reclaims it and the shot is run again',
+        )
+
+    def test_a_completion_that_named_no_file_is_reported_under_the_rows_own(self):
+        # The path comes from BLACS, which names the file it actually ran. When
+        # it names none the row's own path is all there is -- and reporting the
+        # completion before the row is retired means that path has to be read
+        # while the row is still in the queue.
+        app, shot_id = self.app_with_shot()
+        outcome = self.outcome(shot_id, 'completed')
+        del outcome['path']
+
+        app.queue_exchange(outcome, False)
+
+        self.assertEqual(
+            app.analysis_submission.submitted,
+            [shared_drive.path_to_agnostic(os.path.abspath('/tmp/shot_a.h5'))],
+        )
+        self.assertEqual(self.rows(app), [], 'and the row is retired as usual')
 
     def test_a_failure_while_applying_an_outcome_is_answered_not_raised(self):
         app, shot_id = self.app_with_shot()

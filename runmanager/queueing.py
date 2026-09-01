@@ -380,6 +380,17 @@ class QueueController(object):
                 if include_default_shots or not item['default_shot']
             ]
 
+    def get_shot_path(self, shot_id):
+        """Return the path recorded for one queued shot, or None for no row.
+
+        A read that leaves the row where it is, for a caller that needs the
+        path of a row it is about to retire before it retires it."""
+        with self._lock:
+            for item in self._items:
+                if item['shot_id'] == shot_id:
+                    return item['path']
+            return None
+
     def get_queue_display_items(self):
         with self._lock:
             items = []
@@ -949,6 +960,9 @@ class QueueManager(QtCore.QObject):
 
     def get_queue_paths(self, include_default_shots=True):
         return self.controller.get_queue_paths(include_default_shots)
+
+    def get_shot_path(self, shot_id):
+        return self.controller.get_shot_path(shot_id)
 
     def get_queue_state(self):
         return self.controller.get_queue_state()

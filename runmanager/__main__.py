@@ -4519,12 +4519,13 @@ class RunManager(LabscriptApplication):
         actually ran, which is not the queued one when it made a fresh copy to
         re-run a shot that already held data.
 
-        A shot reaches lyse because a row was retired, not because the message
-        said so. BLACS lets go of an outcome only once runmanager has taken it,
-        so a lost reply makes it send the same completed outcome again; the
-        repeat finds no row, analyses nothing, and says so. That works only
-        because every offered shot is a row of the queue, runmanager's own
-        default shots included.
+        The completion is reported before the row is retired, and not the other
+        way round. Both happen under queue_exchange's guard, which answers
+        BLACS normally rather than raising: BLACS then drops the outcome, so no
+        resend can arrive to make good a submission that failed. Retiring the
+        row last means such a failure leaves it in the queue, where BLACS's
+        next request reclaims it and the shot is run again -- which costs a run
+        of the apparatus, and not the data, which nothing can recover later.
 
         An outcome runmanager cannot read -- one that is not a mapping, names
         no shot, or reports a status runmanager does not know -- is refused and
@@ -4547,11 +4548,22 @@ class RunManager(LabscriptApplication):
             )
             return
         message = str(fields.get('message', ''))
-        record = self.queue_manager.shot_finished(shot_id, status, message)
         if status != 'completed':
+            self.queue_manager.shot_finished(shot_id, status, message)
             return
         agnostic_path = fields.get('path')
         agnostic_path = str(agnostic_path) if agnostic_path else ''
+        if not agnostic_path:
+            # BLACS named no file, so the row's own path is the only one there
+            # is -- and there is none at all if no row matches, which leaves
+            # nothing to analyse. Read while the row is still in the queue, for
+            # the same reason the submission below happens while it is.
+            queued_path = self.queue_manager.get_shot_path(shot_id)
+            if queued_path:
+                agnostic_path = shared_drive.path_to_agnostic(queued_path)
+        if agnostic_path:
+            self.analysis_submission.notify_shot_complete(agnostic_path)
+        record = self.queue_manager.shot_finished(shot_id, status, message)
         if record is None:
             # A completed shot that matched no row. The row can be gone for
             # ordinary reasons -- the operator loaded a queue configuration, or
@@ -4561,22 +4573,16 @@ class RunManager(LabscriptApplication):
             #
             # There is nothing to do to the queue either way, and nothing
             # here needs to know which case it was. The shot ran and wrote
-            # data, so the completion is passed on: reporting one is
-            # runmanager's part, and whether the far end has already seen this
-            # file is the far end's to decide, not something to be guessed at
-            # from here. Say which shot it was, since the queue shows nothing
-            # of it.
+            # data, so the completion has already gone on above: reporting one
+            # is runmanager's part, and whether the far end has already seen
+            # this file is the far end's to decide, not something to be guessed
+            # at from here. Say which shot it was, since the queue shows
+            # nothing of it.
             self.output_box.output(
                 'BLACS reported shot %s as completed, but no queued shot has '
                 'that id; the queue is unchanged.\n' % shot_id,
                 red=True,
             )
-        elif not agnostic_path:
-            agnostic_path = shared_drive.path_to_agnostic(record['path'])
-        if agnostic_path:
-            # With no row there is no second place to look for the file, so an
-            # outcome that named none has nothing to analyse.
-            self.analysis_submission.notify_shot_complete(agnostic_path)
 
     def offer_shot(self):
         """Offer BLACS a shot, if this runmanager has one to run.
