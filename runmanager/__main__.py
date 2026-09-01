@@ -2322,10 +2322,10 @@ class RunManager(LabscriptApplication):
             )
         )
         self.engage_replace_queue_action.setToolTip(
-            'Delete the remaining queued shots, then submit the replacement batch as a new shot sequence.'
+            'Delete the queued shots BLACS is not running, then submit the replacement batch as a new shot sequence.'
         )
         self.engage_replace_queue_action.setStatusTip(
-            'Delete the remaining queued shots, then submit the replacement batch as a new shot sequence.'
+            'Delete the queued shots BLACS is not running, then submit the replacement batch as a new shot sequence.'
         )
         self.engage_add_clear_action = self.engage_submission_menu.addAction(
             'Empty queue, then add shots to last sequence'
@@ -2336,17 +2336,17 @@ class RunManager(LabscriptApplication):
             )
         )
         self.engage_add_clear_action.setToolTip(
-            'Delete the remaining queued shots, then submit the replacement batch onto the same shot sequence.'
+            'Delete the queued shots BLACS is not running, then submit the replacement batch onto the same shot sequence.'
         )
         self.engage_add_clear_action.setStatusTip(
-            'Delete the remaining queued shots, then submit the replacement batch onto the same shot sequence.'
+            'Delete the queued shots BLACS is not running, then submit the replacement batch onto the same shot sequence.'
         )
         self.engage_submission_menu.aboutToShow.connect(
             self.update_engage_submission_menu_actions
         )
         button.setMenu(self.engage_submission_menu)
         button.setToolTip(
-            """<html><head/><body><p>Compile pending shots, submit them to BLACS if "run shots" is checked, and send them to runviewer if "view shots" is checked.</p><p>Press and hold to choose alternate queue submission modes.</p><p><span style="font-style:italic;">Empty queue, then add shots to new sequence</span> and <span style="font-style:italic;">Empty queue, then add shots to last sequence</span> delete the remaining queued shots before submitting the replacement batch. With lazy compile enabled, later compile failures are still possible when BLACS requests those shots.</p></body></html>"""
+            """<html><head/><body><p>Compile pending shots, submit them to BLACS if "run shots" is checked, and send them to runviewer if "view shots" is checked.</p><p>Press and hold to choose alternate queue submission modes.</p><p><span style="font-style:italic;">Empty queue, then add shots to new sequence</span> and <span style="font-style:italic;">Empty queue, then add shots to last sequence</span> delete the queued shots BLACS is not running before submitting the replacement batch. With lazy compile enabled, later compile failures are still possible when BLACS requests those shots.</p></body></html>"""
         )
 
     def get_queue_append_filepath(self):

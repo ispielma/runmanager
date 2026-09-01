@@ -215,9 +215,25 @@ class QueueController(object):
 
         The path identifies the shot the user actually selected. Rows whose
         path no longer matches have shifted since the queue widget was drawn,
-        so they are skipped rather than deleting the wrong shot. Returns the
-        paths of the shots that were removed."""
+        so they are skipped rather than deleting the wrong shot.
+
+        The row BLACS is running is skipped as well, and its file is kept:
+        deleting either would take the shot file out from under hardware that
+        is executing it, and editing the queue is not a way to interfere with
+        the apparatus. Nothing else is protected -- a red failed row is
+        deletable, which is the only way to discard one.
+
+        So a row stuck marked running cannot be deleted. Ordinarily none needs
+        to be: the next request from BLACS is offered that row again under the
+        same id, so the state clears itself (see offer_next). If BLACS stays
+        unavailable, restarting runmanager clears it without losing the queue,
+        because export_state never writes 'running' out and restore_state gives
+        every row back waiting.
+
+        Returns ``(removed_paths, protected_paths)``: the shots that were
+        removed, and the running one that was selected and kept."""
         removed_paths = []
+        protected_paths = []
         with self._lock:
             for entry in sorted(rows, key=lambda entry: entry[0], reverse=True):
                 row, path = entry[0], entry[1]
@@ -225,14 +241,25 @@ class QueueController(object):
                     continue
                 if self._items[row]['path'] != os.path.abspath(str(path)):
                     continue
+                if self._items[row]['state'] == 'running':
+                    protected_paths.append(self._items[row]['path'])
+                    continue
                 removed_paths.append(self._items.pop(row)['path'])
-            return removed_paths
+            return removed_paths, protected_paths
 
     def clear(self):
+        """Empty the queue apart from the shot BLACS is running.
+
+        That row and its file are kept for the reason delete_rows gives, which
+        is also why the two replacement submission modes replace only the work
+        behind a running shot. Returns ``(removed_paths, protected_paths)``."""
         with self._lock:
-            removed_paths = [item['path'] for item in self._items]
-            self._items = []
-            return removed_paths
+            kept = [item for item in self._items if item['state'] == 'running']
+            removed_paths = [
+                item['path'] for item in self._items if item['state'] != 'running'
+            ]
+            self._items = kept
+            return removed_paths, [item['path'] for item in kept]
 
     def get_queue_paths(self, include_default_shots=True):
         """Return the paths of the queued shots.
@@ -616,19 +643,28 @@ class QueueManager(QtCore.QObject):
         self.controller.set_paused(value)
         self.queueChanged.emit()
 
-    def delete_rows(self, rows):
-        removed_paths = self.controller.delete_rows(list(rows))
+    def _remove_from_queue(self, removed_paths, protected_paths):
+        """Delete the files of the rows that went, and say which one stayed.
+
+        The operator either selected the protected row or asked for a Clear
+        that would have taken it, so a line in the output box says why it is
+        still there -- a line rather than a dialog, because the rest of what
+        they asked for has happened. Returns the paths that were removed."""
+        for path in protected_paths:
+            self.output(
+                'Kept queued shot %s: BLACS is running it.\n' % os.path.basename(path),
+                red=True,
+            )
         if removed_paths:
             self._delete_queue_files(removed_paths)
             self.queueChanged.emit()
         return removed_paths
 
+    def delete_rows(self, rows):
+        return self._remove_from_queue(*self.controller.delete_rows(list(rows)))
+
     def clear(self):
-        removed_paths = self.controller.clear()
-        if removed_paths:
-            self._delete_queue_files(removed_paths)
-            self.queueChanged.emit()
-        return removed_paths
+        return self._remove_from_queue(*self.controller.clear())
 
     def offer_next(self):
         item = self.controller.offer_next()

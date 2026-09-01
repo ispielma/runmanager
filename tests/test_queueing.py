@@ -354,6 +354,8 @@ class FakeRunManager(object):
     apply_shot_outcome = RunManager.apply_shot_outcome
     offer_shot = RunManager.offer_shot
     get_queue_append_filepath = RunManager.get_queue_append_filepath
+    get_last_sent_from_queue_filepath = RunManager.get_last_sent_from_queue_filepath
+    reindex_run_file_infos = RunManager.reindex_run_file_infos
 
     def __init__(self, default_shot_file=None):
         self.output_box = FakeOutputBox()
@@ -487,9 +489,16 @@ class DefaultShotTests(unittest.TestCase):
         self.assertEqual(self.rows(app), [], 'nothing is queued until there is a shot')
 
     def test_deleting_the_default_shot_row_discards_it_like_any_other(self):
+        # A default shot is in the queue only because it was offered, so it is
+        # deletable once BLACS has reported on it -- exactly as an engaged shot
+        # is, and protected the same way while it is running.
         app = self.make_runmanager(default_shot_file=self.default_shot)
         open(self.default_shot, 'w').close()
-        app.offer_shot()
+        offered = app.offer_shot()
+        app.queue_exchange(
+            outcome={'shot_id': offered['shot_id'], 'status': 'failed'},
+            request_shot=False,
+        )
 
         removed = app.queue_manager.delete_rows([(0, self.default_shot)])
 
@@ -589,6 +598,198 @@ class DefaultShotTests(unittest.TestCase):
         restored.restore_state(saved)
         self.assertEqual(
             [row['path'] for row in restored.get_queue_display_items()], [engaged]
+        )
+
+
+class QueueEditingTests(unittest.TestCase):
+    """Delete and Clear around the shot BLACS is running.
+
+    The shot BLACS is executing is an ordinary row of the queue now, which puts
+    it, and the file it is running, within reach of Delete and of the Clear
+    that the replacement submission modes do. Either would take the file out
+    from under a shot that is on the hardware, so that one row is kept and
+    everything else the operation asked for still goes.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.app = FakeRunManager()
+        self.addCleanup(self.app.queue_manager.shutdown)
+
+    def enqueue(self, name):
+        path = os.path.join(self.directory, name)
+        open(path, 'w').close()
+        self.app.queue_manager.enqueue([queued_shot(path)])
+        return path
+
+    def rows(self):
+        return self.app.queue_manager.controller.get_queue_display_items()
+
+    def selection(self, *paths):
+        """The (row, path) pairs the queue widget emits for these shots."""
+        queued = [row['path'] for row in self.rows()]
+        return [(queued.index(path), path) for path in paths]
+
+    def test_delete_keeps_the_shot_blacs_is_running_and_its_file(self):
+        running = self.enqueue('shot_a.h5')
+        self.app.offer_shot()
+
+        removed = self.app.queue_manager.delete_rows(self.selection(running))
+
+        self.assertEqual(removed, [])
+        rows = self.rows()
+        self.assertEqual([row['path'] for row in rows], [running])
+        self.assertEqual(rows[0]['state'], 'running')
+        self.assertTrue(
+            os.path.exists(running), 'the file BLACS is running is still there'
+        )
+        self.assertTrue(
+            self.app.output_box.said('shot_a.h5', 'running'),
+            'and the operator is told why the row they selected is still there',
+        )
+
+    def test_delete_removes_the_rest_of_the_selection_around_it(self):
+        # Selecting the whole queue and pressing Delete is the ordinary way to
+        # discard the work behind the shot in progress: all of that goes, and
+        # the row BLACS is running is what is left.
+        running = self.enqueue('shot_a.h5')
+        waiting = self.enqueue('shot_b.h5')
+        also_waiting = self.enqueue('shot_c.h5')
+        self.app.offer_shot()
+
+        removed = self.app.queue_manager.delete_rows(
+            self.selection(running, waiting, also_waiting)
+        )
+
+        self.assertEqual(sorted(removed), sorted([waiting, also_waiting]))
+        self.assertEqual([row['path'] for row in self.rows()], [running])
+        self.assertFalse(os.path.exists(waiting), 'a waiting row takes its file')
+        self.assertFalse(os.path.exists(also_waiting))
+        self.assertTrue(os.path.exists(running))
+        self.assertEqual(
+            len(self.app.output_box.said('shot_a.h5', 'running')),
+            1,
+            'the one row that was kept is named once',
+        )
+
+    def test_clear_keeps_the_shot_blacs_is_running_and_removes_the_rest(self):
+        # Clear is also what both replacement submission modes do to the queue
+        # before the replacement batch is compiled into it, so protecting it
+        # here is what keeps an Engage from emptying the queue out from under a
+        # running shot.
+        running = self.enqueue('shot_a.h5')
+        waiting = self.enqueue('shot_b.h5')
+        self.app.offer_shot()
+
+        removed = self.app.queue_manager.clear()
+
+        self.assertEqual(removed, [waiting])
+        rows = self.rows()
+        self.assertEqual([row['path'] for row in rows], [running])
+        self.assertEqual(rows[0]['state'], 'running')
+        self.assertTrue(os.path.exists(running), 'with the file it is running')
+        self.assertFalse(os.path.exists(waiting))
+        self.assertTrue(self.app.output_box.said('shot_a.h5', 'running'))
+
+    def test_clear_removes_a_failed_row_like_any_other(self):
+        # Only the running row is protected. A red row is work that is not
+        # under way, so Clear takes it and its file along with everything else.
+        failed = self.enqueue('shot_a.h5')
+        waiting = self.enqueue('shot_b.h5')
+        offered = self.app.offer_shot()
+        self.app.queue_exchange(
+            outcome={'shot_id': offered['shot_id'], 'status': 'aborted'},
+            request_shot=False,
+        )
+
+        removed = self.app.queue_manager.clear()
+
+        self.assertEqual(sorted(removed), sorted([failed, waiting]))
+        self.assertEqual(self.rows(), [])
+        self.assertFalse(os.path.exists(failed))
+        self.assertFalse(os.path.exists(waiting))
+
+    def test_deleting_a_failed_row_uncovers_the_next_waiting_shot(self):
+        # Deleting the red row is the only way to discard a shot BLACS could
+        # not run, and it is an edit of runmanager's queue and nothing more:
+        # the only thing runmanager can tell BLACS is what it has to offer, and
+        # after the deletion that is simply the next shot.
+        failed = self.enqueue('shot_a.h5')
+        waiting = self.enqueue('shot_b.h5')
+        offered = self.app.offer_shot()
+        self.app.queue_exchange(
+            outcome={
+                'shot_id': offered['shot_id'],
+                'status': 'failed',
+                'message': 'Device(s) in error state',
+            },
+            request_shot=False,
+        )
+
+        removed = self.app.queue_manager.delete_rows(self.selection(failed))
+
+        self.assertEqual(removed, [failed])
+        self.assertFalse(os.path.exists(failed), 'a red row takes its file with it')
+        self.assertFalse(
+            self.app.queue_manager.get_queue_state()['paused'],
+            'editing the queue is not a way to stop BLACS asking for work',
+        )
+        response = self.app.queue_exchange(request_shot=True)
+        self.assertEqual(response['state'], PROVIDER_SHOT)
+        rows = self.rows()
+        self.assertEqual([row['path'] for row in rows], [waiting])
+        self.assertEqual(rows[0]['state'], 'running')
+
+    def test_a_row_still_marked_running_can_be_deleted_after_a_restart(self):
+        # The protection leaves no way to delete a row stuck marked running.
+        # Ordinarily none is needed, because BLACS's next request is offered
+        # that row again; if BLACS stays away, restarting runmanager is the way
+        # out, and it costs nothing but the marking.
+        running = self.enqueue('shot_a.h5')
+        self.app.offer_shot()
+
+        restarted = QueueController()
+        restarted.restore_state(self.app.queue_manager.export_state())
+
+        rows = restarted.get_queue_display_items()
+        self.assertEqual([row['path'] for row in rows], [running])
+        self.assertEqual([row['state'] for row in rows], [''])
+        self.assertEqual(
+            restarted.delete_rows([(0, running)]),
+            ([running], []),
+            'and the row a previous session left running is deletable again',
+        )
+
+    def test_a_replacement_batch_is_numbered_around_the_shot_that_is_running(self):
+        # What "empty queue, then add shots to last sequence" does: clear the
+        # queue, then write the replacement batch onto the same sequence from
+        # index 0 again, taking back the numbers the deleted shots gave up. The
+        # running shot's number is not one of them, because its file is still
+        # there -- so the batch is written around it rather than over the file
+        # BLACS is executing.
+        running = self.enqueue('sequence_00.h5')
+        self.enqueue('sequence_01.h5')
+        self.app.offer_shot()
+        self.app.queue_manager.clear()
+
+        anchor = self.app.get_last_sent_from_queue_filepath()
+        replacements = self.app.reindex_run_file_infos(
+            [{}, {}],
+            self.directory,
+            'sequence',
+            indexed_path_base=anchor,
+            index_start=0,
+        )
+
+        self.assertEqual(anchor, running, 'the sequence added to is the running shot')
+        self.assertEqual(
+            [info['path'] for info in replacements],
+            [
+                os.path.join(self.directory, 'sequence_01.h5'),
+                os.path.join(self.directory, 'sequence_02.h5'),
+            ],
+            'index 0 is the file BLACS is running and is left alone',
         )
 
 
@@ -943,7 +1144,10 @@ class LostRowTests(unittest.TestCase):
         self.addCleanup(app.queue_manager.shutdown)
         app.queue_manager.enqueue([queued_shot('/tmp/shot_a.h5')])
         offered = app.queue_exchange(request_shot=True)
-        app.queue_manager.clear()
+        # Neither Delete nor Clear can take the running row now, but loading a
+        # configuration replaces the whole queue, and the shot BLACS is running
+        # can still go that way.
+        app.queue_manager.restore_state({})
 
         app.queue_exchange(
             outcome={
