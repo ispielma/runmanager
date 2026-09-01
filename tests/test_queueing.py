@@ -8,6 +8,8 @@ import os
 import shutil
 import tempfile
 import threading
+import time
+import types
 import unittest
 
 from qtutils.qt.QtCore import Qt
@@ -15,6 +17,7 @@ from qtutils.qt.QtWidgets import QApplication
 
 from runmanager.__main__ import RunManager
 from runmanager.queueing import (
+    COMPILE_MODE_LAZY,
     EMPTY_QUEUE_DEFAULT_LABSCRIPT,
     FAILED_ROW_BACKGROUND,
     PROVIDER_NONE,
@@ -339,11 +342,16 @@ class FakeRunManager(object):
     get_last_sent_from_queue_filepath = RunManager.get_last_sent_from_queue_filepath
     reindex_run_file_infos = RunManager.reindex_run_file_infos
 
-    def __init__(self, default_shot_file=None):
+    def __init__(self, default_shot_file=None, compiles=True):
         self.output_box = FakeOutputBox()
+        # What the compiler does: True as though the shot compiled, False as it
+        # reports a bad labscript file, or an exception for a failure to get
+        # that far. Recorded so a test can say how many times it was asked.
+        self.compiles = compiles
+        self.compiled = []
         self.queue_manager = QueueManager(
             lambda item: None,
-            lambda labscript_file, path: True,
+            self.compile_run_file,
             lambda path: None,
             self.output_box.output,
             threading.Event(),
@@ -352,6 +360,17 @@ class FakeRunManager(object):
         self.analysis_submission = FakeAnalysisSubmission()
         self.default_shot_file = default_shot_file
         self.default_shots_taken = 0
+        # Read only when a compile actually starts, and read on this thread
+        # before the compile thread is started, so no event loop is needed:
+        self.ui = types.SimpleNamespace(
+            checkBox_view_shots=types.SimpleNamespace(isChecked=lambda: False)
+        )
+
+    def compile_run_file(self, labscript_file, path):
+        self.compiled.append(path)
+        if isinstance(self.compiles, Exception):
+            raise self.compiles
+        return self.compiles
 
     def take_default_shot(self, labscript_file):
         self.default_shots_taken += 1
@@ -581,6 +600,112 @@ class DefaultShotTests(unittest.TestCase):
         self.assertEqual(
             [row['path'] for row in restored.get_queue_display_items()], [engaged]
         )
+
+
+class LazyCompileFailureTests(unittest.TestCase):
+    """A queued shot that cannot be compiled must not just disappear.
+
+    It used to be dropped. That is indistinguishable from the queue draining
+    normally, which is exactly what one broken labscript file looked like: rows
+    vanishing one per request with no shot ever running and nothing in the
+    queue to say why. A shot that never compiled did not complete, so the row
+    stays where it is and goes red with the reason, like any other failure.
+
+    It is not compiled again either. A compile that fails partway leaves data
+    in the shot file that stops labscript compiling into it ever again, so
+    retrying the same row cannot succeed however often it is asked for.
+    """
+
+    def make_runmanager(self, compiles):
+        app = FakeRunManager(compiles=compiles)
+        self.addCleanup(app.queue_manager.shutdown)
+        app.queue_manager.enqueue(
+            [
+                {'path': '/tmp/lazy_a.h5', 'labscript_file': '/tmp/e.py',
+                 'compile_mode': COMPILE_MODE_LAZY, 'compiled': False},
+                queued_shot('/tmp/shot_b.h5'),
+            ]
+        )
+        return app
+
+    def ask_until_settled(self, app, requests=3):
+        """Ask for a shot a few times, letting the compile thread finish."""
+        responses = []
+        for _ in range(requests):
+            responses.append(app.offer_shot())
+            for _ in range(100):
+                if not app.queue_manager.controller._items[0]['compiling']:
+                    break
+                time.sleep(0.01)
+            time.sleep(0.01)
+        return responses
+
+    def rows(self, app):
+        return app.queue_manager.controller.get_queue_display_items()
+
+    def test_a_shot_that_cannot_be_compiled_stays_red_at_the_head(self):
+        app = self.make_runmanager(compiles=False)
+
+        self.ask_until_settled(app)
+
+        rows = self.rows(app)
+        self.assertEqual(
+            [os.path.basename(row['path']) for row in rows],
+            ['lazy_a.h5', 'shot_b.h5'],
+            'it is still there, and still first',
+        )
+        self.assertEqual(rows[0]['state'], 'failed')
+        self.assertIn('Could not be compiled', rows[0]['tooltip'])
+
+    def test_the_reason_a_compile_raised_is_on_the_row(self):
+        app = self.make_runmanager(compiles=RuntimeError('no such labscript file'))
+
+        self.ask_until_settled(app)
+
+        self.assertIn('no such labscript file', self.rows(app)[0]['tooltip'])
+
+    def test_it_is_not_compiled_over_and_over(self):
+        app = self.make_runmanager(compiles=False)
+
+        self.ask_until_settled(app, requests=4)
+
+        self.assertEqual(
+            app.compiled,
+            ['/tmp/lazy_a.h5'],
+            'the same row cannot compile twice, so it is only tried once',
+        )
+
+    def test_nothing_is_offered_while_it_is_held(self):
+        app = self.make_runmanager(compiles=False)
+
+        responses = self.ask_until_settled(app, requests=3)
+
+        self.assertEqual(
+            [response['state'] for response in responses],
+            [PROVIDER_NONE] * 3,
+            'the shot behind it waits rather than overtaking it',
+        )
+
+    def test_deleting_it_lets_the_queue_go_on(self):
+        app = self.make_runmanager(compiles=False)
+        self.ask_until_settled(app)
+
+        app.queue_manager.delete_rows([(0, '/tmp/lazy_a.h5')])
+        response = app.offer_shot()
+
+        self.assertEqual(response['state'], PROVIDER_SHOT)
+        self.assertTrue(response['path'].endswith('shot_b.h5'))
+
+    def test_a_shot_that_compiles_is_offered_with_no_reason_on_it(self):
+        app = self.make_runmanager(compiles=True)
+
+        responses = self.ask_until_settled(app, requests=2)
+
+        self.assertEqual(responses[-1]['state'], PROVIDER_SHOT)
+        self.assertTrue(responses[-1]['path'].endswith('lazy_a.h5'))
+        row = self.rows(app)[0]
+        self.assertEqual(row['state'], 'running')
+        self.assertEqual(row['tooltip'], row['path'], 'nothing to explain')
 
 
 class QueueEditingTests(unittest.TestCase):

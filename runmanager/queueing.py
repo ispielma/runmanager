@@ -475,32 +475,51 @@ class QueueController(object):
             item = self._items[0]
             if item['compiled']:
                 return None, False
+            if item['state'] == 'failed':
+                # Already tried, and it went red. Not claimed again, and not
+                # merely to save the work: a compile that fails partway leaves
+                # the devices and calibrations groups in the shot file, and
+                # labscript refuses to compile into a file that has them. This
+                # row can never compile, however often it is asked for.
+                # Deleting it -- which takes its file with it -- is the way on.
+                return None, False
             if item['compiling']:
                 return None, True
             item['compiling'] = True
             return item, True
 
-    def finish_compile(self, item, success):
+    def finish_compile(self, item, success, message=''):
         """Record the outcome of a background compile.
 
-        A shot that failed to compile is dropped, as documented for lazy
-        compilation. Returns ``(changed, still_queued)``: whether the queue
-        changed, and whether the shot was still queued at all — it may have
-        been deleted by the operator while it was compiling."""
+        A shot that failed to compile stays where it is and goes red with the
+        reason, like a shot that failed to run: only completion or an explicit
+        deletion takes a row out of the queue, and a shot that never compiled
+        did not complete. It used to be dropped, which was quiet enough to be
+        mistaken for the queue draining normally — a queue emptying with no
+        shot ever running is exactly what one broken labscript file produced.
+
+        It is not compiled again, though. See claim_next_for_compile: the
+        failed compile leaves data in the shot file that stops labscript ever
+        compiling into it, so the row is a dead end until it is deleted.
+
+        Returns ``(changed, still_queued)``: whether the queue changed, and
+        whether the shot is still queued — it may have been deleted by the
+        operator while it was compiling."""
         with self._lock:
             item['compiling'] = False
             item['compiled'] = bool(success)
-            index = None
-            for position, queued in enumerate(self._items):
+            for queued in self._items:
                 if queued is item:
-                    index = position
                     break
-            if index is None:
+            else:
                 return False, False
             if success:
-                return True, True
-            del self._items[index]
-            return True, False
+                item['state'] = ''
+                item['message'] = ''
+            else:
+                item['state'] = 'failed'
+                item['message'] = str(message)
+            return True, True
 
 
 class QueueManager(QtCore.QObject):
@@ -589,22 +608,31 @@ class QueueManager(QtCore.QObject):
 
     def _background_compile(self, item, send_to_runviewer):
         success = False
+        # What the row will say it went red for. A failure in the user's script
+        # reaches us only as False, the compiler having written the traceback to
+        # the output box, so there is nothing to quote here but a pointer to it.
+        # A failure to get even that far arrives as an exception and can say
+        # what happened.
+        message = 'Could not be compiled. See the output for the reason.'
         try:
             success = self._compile_shot(item, send_to_runviewer=send_to_runviewer)
         except Exception as exc:
+            message = 'Could not be compiled: %s' % str(exc)
             self.output(
                 'Could not compile queued shot %s: %s\n'
                 % (os.path.basename(item['path']), str(exc)),
                 red=True,
             )
-        changed, still_queued = self.controller.finish_compile(item, success)
+        changed, still_queued = self.controller.finish_compile(item, success, message)
         if success and not still_queued:
             # The shot was deleted from the queue while it was compiling, which
             # deleted its file. Remove the one this compile just wrote.
             self._delete_queue_files([item['path']])
         elif not success and changed:
             self.output(
-                'Dropped queued shot %s.\n' % os.path.basename(item['path']),
+                'Queued shot %s could not be compiled. It is held at the head '
+                'of the queue; delete it to go on.\n'
+                % os.path.basename(item['path']),
                 red=True,
             )
         if changed:
