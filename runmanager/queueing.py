@@ -44,14 +44,13 @@ PROVIDER_NONE = 'none'
 # How BLACS may say a shot it was offered turned out. Every one but 'completed'
 # leaves the row at the head of the queue in red; see shot_finished():
 SHOT_OUTCOME_STATUSES = ('completed', 'aborted', 'failed', 'rejected')
-# The colours of the reserved first row -- the shot that was sent to BLACS --
-# and of nothing else. Green while BLACS is running it, red once it has come
-# back not having run. The rows below it are work still waiting and are never
-# tinted, so the queue reads as a list of outstanding work with the shot that
-# left it set apart above:
-RUNNING_ROW_BACKGROUND = QtGui.QColor('#ccffcc')
+# One colour, for the one thing a colour is needed for. The reserved first row
+# is above the rule, which is what says BLACS was sent that shot, so running is
+# simply what that row looks like and needs no colour of its own. Red marks the
+# exception: it came back without running, and is waiting for an operator. The
+# rows below the rule are work still waiting and are never tinted.
 FAILED_ROW_BACKGROUND = QtGui.QColor('#ffcccc')
-ROW_BACKGROUNDS = {'running': RUNNING_ROW_BACKGROUND, 'failed': FAILED_ROW_BACKGROUND}
+ROW_BACKGROUNDS = {'failed': FAILED_ROW_BACKGROUND}
 # Set with either of them, and not left to the theme. Both fills are pale, so
 # on a dark theme the palette's own near-white text sits on them unreadably;
 # naming the text colour alongside the fill is what keeps the pair legible

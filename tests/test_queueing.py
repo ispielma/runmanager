@@ -23,7 +23,6 @@ from runmanager.queueing import (
     FAILED_ROW_BACKGROUND,
     PROVIDER_NONE,
     PROVIDER_SHOT,
-    RUNNING_ROW_BACKGROUND,
     TINTED_ROW_FOREGROUND,
     QueueController,
     QueueManager,
@@ -1202,11 +1201,14 @@ class SentToBlacsRowTests(unittest.TestCase):
             ['shot_a.h5', 'shot_b.h5'],
             'the sent shot is the reserved row, and is not listed twice',
         )
-        for brush in row_backgrounds(widget, 0):
-            self.assertEqual(brush.color(), RUNNING_ROW_BACKGROUND)
+        self.assertTrue(
+            all(brush is None for brush in row_backgrounds(widget, 0)),
+            'running needs no colour: the rule above the queue already says '
+            'BLACS was sent this shot',
+        )
         self.assertTrue(
             all(brush is None for brush in row_backgrounds(widget, 1)),
-            'waiting work is never tinted',
+            'waiting work is never tinted either',
         )
 
     def test_a_failed_shot_stays_in_the_reserved_row_in_red(self):
@@ -1263,38 +1265,29 @@ class SentToBlacsRowTests(unittest.TestCase):
 
 
 class QueueDisplayTests(unittest.TestCase):
-    """What a row's state looks like in the queue: green, red, or nothing.
+    """What a row's state looks like in the queue: red, or nothing.
+
+    One colour, for the one thing that needs one. The reserved row's position
+    above the rule is what says BLACS was sent that shot, so running needs no
+    colour; red marks the exception, a shot that came back without running.
 
     Only the mapping from a row's state to its appearance is here. Which state
     a row is in after an offer, a failure, a retry or a completion is the
     controller's rule, and is covered against the controller above.
     """
 
-    def test_running_row_is_shown_green_and_waiting_rows_are_not(self):
-        controller = QueueController()
-        controller.enqueue(
-            [queued_shot('/tmp/shot_a.h5'), queued_shot('/tmp/shot_b.h5')]
-        )
-        controller.offer_next()
-        widget = make_queue_widget()
-        widget.set_queue_paths(controller.get_queue_display_items())
-        running = row_backgrounds(widget, 0)
-        self.assertTrue(all(brush is not None for brush in running))
-        for brush in running:
-            colour = brush.color()
-            self.assertEqual(colour, RUNNING_ROW_BACKGROUND)
-            self.assertGreater(colour.green(), max(colour.red(), colour.blue()))
-        self.assertTrue(all(brush is None for brush in row_backgrounds(widget, 1)))
-
     def test_a_tinted_row_names_its_text_colour_too(self):
-        # A background alone leaves the theme's own text colour on it. Both
-        # fills are pale, so on a dark theme that is near-white text on
-        # near-white -- the row became unreadable exactly when it mattered.
+        # A background alone leaves the theme's own text colour on it. The fill
+        # is pale, so on a dark theme that is near-white text on near-white --
+        # the row became unreadable exactly when it mattered.
         controller = QueueController()
         controller.enqueue(
             [queued_shot('/tmp/shot_a.h5'), queued_shot('/tmp/shot_b.h5')]
         )
-        controller.offer_next()
+        offered = controller.offer_next()
+        controller.shot_finished(
+            offered['shot_id'], 'failed', 'Device(s) in error state'
+        )
         widget = make_queue_widget()
         widget.set_queue_paths(controller.get_queue_display_items())
 
