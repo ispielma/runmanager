@@ -4616,7 +4616,17 @@ class RunManager(LabscriptApplication):
                 or queue_state['n_items']
             ):
                 self.discard_default_shot()
-                self.queue_manager.set_last_sent_from_queue(None)
+                if not queue_state['n_items']:
+                    # Only when there is genuinely nothing queued. This branch
+                    # is also reached with work still in the queue that simply
+                    # cannot be offered yet -- a rejected head, or one whose
+                    # compile failed -- and the anchor is about the shot last
+                    # sent to BLACS, not about whether a default shot was called
+                    # for. Clearing it there sent the next "add shots to last
+                    # sequence" batch to the folder of the last shot queued
+                    # instead, which is a different sequence as soon as two
+                    # batches have been engaged.
+                    self.queue_manager.set_last_sent_from_queue(None)
                 return no_shot
             if not os.path.isfile(labscript_file):
                 raise RuntimeError(

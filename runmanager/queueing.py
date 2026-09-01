@@ -474,6 +474,31 @@ class QueueController(object):
                 'n_items': len(self._items),
             }
 
+    def drop_overtaken_default_shots(self):
+        """Forget default shots that real work has got in front of.
+
+        A default shot exists only because the queue was empty when it was
+        asked for. Deciding that and enqueueing it are two lock acquisitions on
+        the request thread, and batches are enqueued from another, so a batch
+        landing in between leaves the default shot parked behind work that was
+        engaged after its globals were frozen. The discard that exists to stop
+        that being offered is never reached, because it is on the branch this
+        ordering skips.
+
+        So correct it where it shows rather than holding the lock across the
+        decision: the lock would then be held across a filesystem check on the
+        request thread, and BLACS's exchange would wait behind runmanager's own
+        work. Returns the paths whose files should go with them."""
+        with self._lock:
+            if not self._items or self._items[0]['default_shot']:
+                return []
+            dropped = [item for item in self._items[1:] if item['default_shot']]
+            if dropped:
+                self._items = [self._items[0]] + [
+                    item for item in self._items[1:] if not item['default_shot']
+                ]
+            return [item['path'] for item in dropped]
+
     def offer_next(self):
         """Offer the shot at the head of the queue if it is ready to hand over.
 
@@ -842,6 +867,9 @@ class QueueManager(QtCore.QObject):
         return self._remove_from_queue(*self.controller.clear())
 
     def offer_next(self):
+        overtaken = self.controller.drop_overtaken_default_shots()
+        if overtaken:
+            self._delete_queue_files(overtaken)
         item = self.controller.offer_next()
         if item is not None:
             if item['reclaimed']:

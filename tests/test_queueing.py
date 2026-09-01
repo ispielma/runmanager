@@ -16,6 +16,7 @@ from labscript_utils.qtwidgets.shotqueue import RULE_BELOW_ROLE
 from qtutils.qt.QtCore import Qt
 from qtutils.qt.QtWidgets import QApplication
 
+from labscript_utils import shared_drive
 from runmanager.__main__ import RunManager
 from runmanager.queueing import (
     COMPILE_MODE_EAGER,
@@ -1468,6 +1469,93 @@ class OutcomeAppliedOnceTests(unittest.TestCase):
         self.assertTrue(
             app.output_box.said('shot_a.h5', 'aborted'),
             'a genuinely new outcome for the retried row still gets through',
+        )
+
+
+class QueueBookkeepingUnderSubmissionTests(unittest.TestCase):
+    """Two things the queue records that a concurrent submission can spoil.
+
+    The anchor that "add shots to last sequence" writes alongside is the last
+    shot actually sent to BLACS. It used to be cleared only when the queue was
+    genuinely empty. A later condition made the same branch reachable with work
+    still queued -- a head that cannot be offered, because it was rejected or
+    its compile failed -- and the clearing came along with it, so the next
+    replacement batch was written beside the last shot *queued* instead, which
+    is a different sequence folder as soon as two batches have been engaged.
+
+    And the default shot is made because the queue is empty, on a different
+    thread from the one that fills it. A batch landing in between leaves the
+    default shot parked behind real work with globals frozen minutes earlier,
+    where the discard that exists to prevent exactly that is never reached.
+    """
+
+    def app_with(self, *items):
+        app = FakeRunManager()
+        self.addCleanup(app.queue_manager.shutdown)
+        app.queue_manager.enqueue(list(items))
+        return app
+
+    def test_the_anchor_survives_a_head_that_cannot_be_offered(self):
+        app = self.app_with(
+            queued_shot('/tmp/seq_00.h5'), queued_shot('/tmp/seq_01.h5')
+        )
+        offered = app.queue_manager.offer_next()
+        app.queue_manager.controller.set_last_sent_from_queue(
+            shared_drive.path_to_agnostic(offered['path'])
+        )
+        app.queue_manager.shot_finished(offered['shot_id'], 'rejected', 'no such file')
+
+        app.offer_shot()
+
+        self.assertIsNotNone(
+            app.get_last_sent_from_queue_filepath(),
+            'both rows are still queued, so the sequence the operator last sent '
+            'to is still the one to add shots alongside',
+        )
+
+    def test_the_anchor_goes_when_the_queue_is_genuinely_empty(self):
+        app = self.app_with(queued_shot('/tmp/seq_00.h5'))
+        offered = app.queue_manager.offer_next()
+        app.queue_manager.controller.set_last_sent_from_queue(
+            shared_drive.path_to_agnostic(offered['path'])
+        )
+        app.queue_manager.shot_finished(offered['shot_id'], 'completed')
+
+        app.offer_shot()
+
+        self.assertIsNone(
+            app.get_last_sent_from_queue_filepath(),
+            'nothing queued and nothing sent: there is no sequence to add to',
+        )
+
+    def test_a_default_shot_behind_real_work_is_discarded_with_its_file(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        default_path = os.path.join(directory, 'default.h5')
+        with open(default_path, 'w') as f:
+            f.write('')
+        app = self.app_with(queued_shot('/tmp/seq_00.h5'))
+        app.queue_manager.enqueue(
+            [{'path': default_path, 'compiled': True, 'default_shot': True}]
+        )
+
+        offered = app.queue_manager.offer_next()
+
+        self.assertTrue(
+            offered['path'].endswith('seq_00.h5'), 'the real work is offered'
+        )
+        self.assertEqual(
+            [
+                row['path']
+                for row in app.queue_manager.controller.get_queue_display_items()
+                if row['path'] == default_path
+            ],
+            [],
+            'and the default shot, made only because the queue looked empty, '
+            'does not sit behind it with globals frozen before that work arrived',
+        )
+        self.assertFalse(
+            os.path.exists(default_path), 'its file goes with it rather than leaking'
         )
 
 
