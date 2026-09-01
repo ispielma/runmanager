@@ -288,12 +288,20 @@ class PollingTests(unittest.TestCase):
             if len(reported) > 2:
                 break
             time.sleep(0.02)
+        polls_while_running = len(reported)
         monitor.shutdown()
-        polls_before = len(reported)
+        # shutdown() deliberately does not wait for the poller -- joining it
+        # from the GUI thread is what used to deadlock the quit -- so a poll
+        # already past its own stopped check can still report once. Let that
+        # land before asking whether the loop stopped.
+        time.sleep(0.05)
+        polls_after_stopping = len(reported)
         time.sleep(0.05)
 
-        self.assertGreater(polls_before, 2, 'the loop keeps asking')
-        self.assertEqual(len(reported), polls_before, 'and stops when told to')
+        self.assertGreater(polls_while_running, 2, 'the loop keeps asking')
+        self.assertEqual(
+            len(reported), polls_after_stopping, 'and stops when told to'
+        )
 
 
 class ClientTests(unittest.TestCase):

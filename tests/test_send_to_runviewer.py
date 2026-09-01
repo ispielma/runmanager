@@ -44,7 +44,11 @@ class SendToRunviewerTests(unittest.TestCase):
         self.saved = {
             'zmq_get': main_module.zmq_get,
             'Popen': main_module.subprocess.Popen,
-            'fork': os.fork,
+            # Absent on Windows, which is where BLACS usually runs and what
+            # the creationflags branch of the launch exists for. Reading it
+            # unconditionally made the one test that is not skipped there error
+            # in setUp instead of running.
+            'fork': getattr(os, 'fork', None),
             'logger': getattr(main_module, 'logger', None),
         }
         # Assigned only inside the module's __main__ block, so it does not
@@ -57,7 +61,8 @@ class SendToRunviewerTests(unittest.TestCase):
         main_module.subprocess.Popen = self.popen
         # A fork here is the bug. Fail loudly rather than actually forking the
         # test runner, which is what made this hard to see in the first place.
-        os.fork = self.forbidden_fork
+        if self.saved['fork'] is not None:
+            os.fork = self.forbidden_fork
         self.addCleanup(self.restore)
 
         self.app = types.SimpleNamespace(
@@ -68,7 +73,8 @@ class SendToRunviewerTests(unittest.TestCase):
     def restore(self):
         self.main_module.zmq_get = self.saved['zmq_get']
         self.main_module.subprocess.Popen = self.saved['Popen']
-        os.fork = self.saved['fork']
+        if self.saved['fork'] is not None:
+            os.fork = self.saved['fork']
         if self.saved['logger'] is None:
             del self.main_module.logger
         else:
