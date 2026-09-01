@@ -72,6 +72,70 @@ class QueueIdentityTests(unittest.TestCase):
         )
 
 
+class QueuePauseTests(unittest.TestCase):
+    """Pause is this runmanager's policy on its own queue.
+
+    Whether a paused runmanager withholds the shot is decided in offer_shot(),
+    which lives in runmanager.__main__ and cannot be imported here. What is
+    checked here is the half that can be: that pause is a saved queue setting,
+    and that pausing does nothing to the queue itself.
+    """
+
+    def test_a_new_queue_is_not_paused(self):
+        self.assertFalse(QueueController().get_queue_state()['paused'])
+
+    def test_pause_is_saved_and_restored_with_the_queue(self):
+        controller = QueueController()
+        controller.enqueue([queued_shot('/tmp/shot_a.h5')])
+        controller.set_paused(True)
+        restored = QueueController()
+        restored.restore_state(controller.export_state())
+        self.assertTrue(restored.get_queue_state()['paused'])
+
+    def test_a_saved_queue_with_no_pause_state_loads_unpaused(self):
+        # An older configuration was written before there was a pause control,
+        # and must not open with the queue silently stopped.
+        controller = QueueController()
+        controller.set_paused(True)
+        controller.restore_state({'items': [queued_shot('/tmp/shot_a.h5')]})
+        self.assertFalse(controller.get_queue_state()['paused'])
+
+    def test_pausing_does_not_disturb_the_shot_that_is_running(self):
+        # Pause withholds the next shot; it does not stop the one in hand. The
+        # row BLACS is running stays running, and its outcome still retires it.
+        controller = QueueController()
+        controller.enqueue(
+            [queued_shot('/tmp/shot_a.h5'), queued_shot('/tmp/shot_b.h5')]
+        )
+        offered = controller.offer_next()
+        controller.set_paused(True)
+        self.assertEqual(controller.get_queue_display_items()[0]['state'], 'running')
+        controller.shot_finished(offered['shot_id'], 'completed')
+        self.assertEqual(
+            [row['path'] for row in controller.get_queue_display_items()],
+            [os.path.abspath('/tmp/shot_b.h5')],
+            'the shot that was under way completed normally',
+        )
+
+    def test_resuming_leaves_the_head_of_the_queue_where_it_was(self):
+        controller = QueueController()
+        controller.enqueue(
+            [queued_shot('/tmp/shot_a.h5'), queued_shot('/tmp/shot_b.h5')]
+        )
+        before = controller.get_queue_display_items()
+        controller.set_paused(True)
+        self.assertEqual(controller.get_queue_display_items(), before)
+        controller.set_paused(False)
+
+        offered = controller.offer_next()
+        self.assertEqual(offered['path'], os.path.abspath('/tmp/shot_a.h5'))
+        self.assertEqual(
+            [item['shot_id'] for item in controller.export_state()['items']][0],
+            offered['shot_id'],
+            'the head is the same shot it was before the pause',
+        )
+
+
 class QueueOfferTests(unittest.TestCase):
     def test_offered_shot_stays_at_the_head_of_the_queue(self):
         controller = QueueController()

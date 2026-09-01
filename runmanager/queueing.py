@@ -35,9 +35,9 @@ EMPTY_QUEUE_DEFAULT_LABSCRIPT = 'default_labscript'
 COMPILE_MODE_EAGER = 'eager'
 COMPILE_MODE_LAZY = 'lazy'
 # What an exchange tells BLACS about this runmanager: it offered a shot, its
-# queue is paused, or it has nothing to offer right now. Paused is not used
-# until runmanager owns a pause control, but the three states are the whole
-# protocol vocabulary, so BLACS can tell them apart from the outset:
+# queue is paused, or it has nothing to offer right now. Paused is told apart
+# from having nothing so that BLACS can show an operator why no queued work is
+# arriving; neither is a reason for BLACS to stop:
 PROVIDER_SHOT = 'shot'
 PROVIDER_PAUSED = 'paused'
 PROVIDER_NONE = 'none'
@@ -121,6 +121,11 @@ class QueueController(object):
         self.empty_queue_policy = EMPTY_QUEUE_NOTHING
         self.default_labscript_file = ''
         self.compile_mode = COMPILE_MODE_EAGER
+        # Whether this runmanager is offering the work it holds. A setting of
+        # the queue rather than of any row in it: pausing withholds the next
+        # shot without touching the queue, so the row BLACS is running is
+        # unaffected and resuming offers the same head again.
+        self.paused = False
         self.last_sent_from_queue = None
         self._items = []
         self._lock = threading.RLock()
@@ -186,6 +191,10 @@ class QueueController(object):
             raise ValueError('Invalid compile mode: %s' % value)
         with self._lock:
             self.compile_mode = value
+
+    def set_paused(self, value):
+        with self._lock:
+            self.paused = bool(value)
 
     def enqueue(self, items):
         records = [self._normalise_item(item) for item in items]
@@ -256,6 +265,7 @@ class QueueController(object):
                 'empty_queue_policy': self.empty_queue_policy,
                 'default_labscript_file': self.default_labscript_file,
                 'compile_mode': self.compile_mode,
+                'paused': self.paused,
                 # Without what this session made of each row: a saved queue is
                 # a list of work still to do, so writing out that BLACS was
                 # running a row, or the paragraph explaining why it could not,
@@ -293,6 +303,9 @@ class QueueController(object):
             if compile_mode not in (COMPILE_MODE_EAGER, COMPILE_MODE_LAZY):
                 compile_mode = COMPILE_MODE_EAGER
             self.compile_mode = compile_mode
+            # A configuration written before there was a pause control opens
+            # with the queue running, rather than silently stopped:
+            self.paused = bool(state.get('paused', False))
             self.last_sent_from_queue = None
             self._items = [self._normalise_item(item) for item in state.get('items', [])]
 
@@ -302,6 +315,7 @@ class QueueController(object):
                 'empty_queue_policy': self.empty_queue_policy,
                 'default_labscript_file': self.default_labscript_file,
                 'compile_mode': self.compile_mode,
+                'paused': self.paused,
                 'last_sent_from_queue': self.last_sent_from_queue,
                 'n_items': len(self._items),
             }
@@ -536,6 +550,10 @@ class QueueManager(QtCore.QObject):
 
     def set_compile_mode(self, value):
         self.controller.set_compile_mode(value)
+        self.queueChanged.emit()
+
+    def set_paused(self, value):
+        self.controller.set_paused(value)
         self.queueChanged.emit()
 
     def delete_rows(self, rows):

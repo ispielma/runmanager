@@ -79,6 +79,7 @@ from runmanager.queueing import (
     EMPTY_QUEUE_DEFAULT_LABSCRIPT,
     EMPTY_QUEUE_NOTHING,
     PROVIDER_NONE,
+    PROVIDER_PAUSED,
     PROVIDER_SHOT,
     QueueManager,
     RunmanagerQueueWidget,
@@ -1984,6 +1985,16 @@ class RunManager(LabscriptApplication):
             'Send default shot', EMPTY_QUEUE_DEFAULT_LABSCRIPT
         )
         controls_layout.addWidget(self.queue_empty_policy_combo)
+        self.queue_pause_checkbox = QtWidgets.QCheckBox('Pause queue', self.tab_queue)
+        self.queue_pause_checkbox.setToolTip(
+            'Stop this runmanager offering shots to BLACS, including the '
+            'default shot.\n'
+            'This does not stop BLACS: the shot it is running finishes '
+            'normally, and it goes on\nrunning its local override shot while '
+            'the queue is paused. The queue is left as it\nis, so resuming '
+            'offers the same shot at its head.'
+        )
+        controls_layout.addWidget(self.queue_pause_checkbox)
         controls_layout.addStretch(1)
         self.queue_widget = RunmanagerQueueWidget(self.tab_queue)
         self.queue_widget.setSizePolicy(
@@ -2087,6 +2098,7 @@ class RunManager(LabscriptApplication):
         self.queue_empty_policy_combo.currentIndexChanged.connect(
             self.on_queue_empty_policy_changed
         )
+        self.queue_pause_checkbox.toggled.connect(self.on_queue_paused_changed)
         self.queue_widget.deleteRowsRequested.connect(self.on_queue_delete_rows_requested)
         
         # Keyboard shortcuts:
@@ -2140,6 +2152,9 @@ class RunManager(LabscriptApplication):
         if compile_mode is None:
             return
         self.queue_manager.set_compile_mode(compile_mode)
+
+    def on_queue_paused_changed(self, checked):
+        self.queue_manager.set_paused(checked)
 
     @inmain_decorator()
     def refresh_queue_tab(self):
@@ -3949,6 +3964,7 @@ class RunManager(LabscriptApplication):
             )
             if index != -1:
                 self.queue_empty_policy_combo.setCurrentIndex(index)
+            self.queue_pause_checkbox.setChecked(restored_queue_state['paused'])
 
         self.analysis_submission.restore_configuration_data(
             runmanager_config.get('analysis_submission')
@@ -4407,6 +4423,18 @@ class RunManager(LabscriptApplication):
         Returns the exchange response: the provider state, plus the stable id
         and shared-drive-agnostic path of the shot when one is offered."""
         no_shot = {'state': PROVIDER_NONE, 'shot_id': None, 'path': None}
+        if self.queue_manager.get_queue_state()['paused']:
+            # Pause is this runmanager's policy about its own queue, not
+            # authority over the apparatus: a second runmanager sharing one
+            # BLACS must not be able to stop it by pausing its own queue. So
+            # this says "I have nothing for you", not "stop" -- BLACS keeps
+            # requesting and runs its local override shot meanwhile.
+            #
+            # The check comes before anything is chosen, so that it withholds a
+            # runmanager-generated default shot as well as a queued row, and
+            # before a row is marked running, so that pausing changes nothing
+            # in the queue and does not touch the shot already under way.
+            return {'state': PROVIDER_PAUSED, 'shot_id': None, 'path': None}
         item = self.queue_manager.offer_next()
         if item is None:
             # A queued shot that is not compiled yet stays at the head of the
