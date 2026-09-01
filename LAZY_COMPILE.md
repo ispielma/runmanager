@@ -1,5 +1,17 @@
 # Lazy Compile Queue In `RunmanagerQueueSimple`
 
+> **This is the design note as written, not a description of the code today.**
+> Two things in it have since changed, on the `RunmanagerControl` branch, and
+> the note says "dropped" in four places that are now wrong:
+>
+> * `queue_request_next()` is gone; `queue_exchange()` reaches
+>   `RunManager.offer_shot()`. See the callout under "BLACS request path".
+> * **A lazy shot that fails to compile is no longer dropped.** It stays at the
+>   head of the queue and goes red with the reason, and it is not compiled
+>   again. Same callout.
+>
+> Everything else still holds.
+
 ## Summary
 Add a queue compile-mode selector to runmanager so queued shots can be submitted in either:
 - `Eager compile`: current behavior
@@ -25,6 +37,27 @@ Queued lazy shots keep the skeleton filepath created at Engage time. If a lazy s
 - Do not introduce a second queueing pipeline. Reuse the current compile/queue flow and branch only at the “compile now vs queue skeleton now” decision point.
 
 ### BLACS request path
+
+> **Later change.** `queue_request_next()` no longer exists. It, and the
+> acceptance, rejection and completion calls that went with it, were replaced
+> on the `RunmanagerControl` branch by one `queue_exchange(outcome,
+> request_shot)`, which reaches `RunManager.offer_shot()`. Read
+> `queue_request_next()` below as `offer_shot()`.
+>
+> **A lazy shot that fails to compile is no longer dropped.** The rest of this
+> section still holds — it is still compiled off the request thread when BLACS
+> asks for it, and still keeps its Engage-time filepath — but the row now stays
+> at the head of the queue and goes red with the reason, which is what every
+> other kind of failure does there since Retry/Drop was removed. Dropping it
+> was indistinguishable from the queue draining normally, and that is exactly
+> what a labscript file that could not compile looked like: rows vanishing one
+> per request with no shot ever running.
+>
+> It is not compiled again either. A compile that fails partway leaves the
+> `devices` and `calibrations` groups in the shot file, and labscript refuses to
+> compile into a file that has them, so the same row can never succeed. Deleting
+> it — which takes the half-written file with it — is the way on.
+
 - Extend the existing `queue_request_next()` logic in runmanager.
 - When the next queue item is eager, keep the current behavior and return its agnostic path immediately.
 - When the next queue item is lazy:

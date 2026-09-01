@@ -45,15 +45,16 @@ QPushButton:hover {
  }
 
 QPushButton:checked {
-     background-color: palette(window);
+     background-color: palette(highlight);
+     color: palette(highlighted-text);
      border: 1px solid palette(dark);
      border-radius: 3px;
  }
 
 QPushButton:hover:checked {
-     background-color: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                                       stop: 0 palette(window), stop: 1 palette(light));
-     border: 1px solid palette(dark);
+     background-color: palette(highlight);
+     color: palette(highlighted-text);
+     border: 1px solid palette(highlighted-text);
      border-radius: 3px;
  }
 
@@ -150,7 +151,7 @@ QToolButton:hover:checked {
             <enum>Qt::NoFocus</enum>
            </property>
            <property name="toolTip">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Compile pending shots, submit them to BLACS if &quot;run shots&quot; is checked, and send them to runviewer if &quot;view shots&quot; is checked.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Compile pending shots, put them in the queue for BLACS if the &quot;BLACS&quot; checkbox is checked, and send them to runviewer if &quot;view shots&quot; is checked.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="autoFillBackground">
             <bool>false</bool>
@@ -255,17 +256,80 @@ subprocess</string>
           <enum>QLayout::SetDefaultConstraint</enum>
          </property>
          <item>
-          <widget class="QCheckBox" name="checkBox_run_shots">
-           <property name="toolTip">
-            <string>Send the shot files to BLACS after compilation</string>
+          <layout class="QHBoxLayout" name="horizontalLayout_blacs">
+           <property name="spacing">
+            <number>4</number>
            </property>
-           <property name="text">
-            <string>Run shot(s)</string>
-           </property>
-           <property name="checked">
-            <bool>true</bool>
-           </property>
-          </widget>
+           <item>
+            <widget class="QCheckBox" name="checkBox_run_shots">
+             <property name="toolTip">
+              <string>Put the shots compiled by Engage into the runmanager queue, for BLACS to run.
+Unticked, they are compiled and left alone.
+
+This is not Pause queue, which withholds shots already in the queue;
+not BLACS's Request shots, which is what lets BLACS run anything at all;
+and not Abort, which stops the shot BLACS is running.</string>
+             </property>
+             <property name="text">
+              <string/>
+             </property>
+             <property name="checked">
+              <bool>true</bool>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QLabel" name="checkBox_run_shots_icon">
+             <property name="text">
+              <string/>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QLabel" name="checkBox_run_shots_text">
+             <property name="toolTip">
+              <string>Put the shots compiled by Engage into the runmanager queue, for BLACS to run.
+Unticked, they are compiled and left alone.
+
+This is not Pause queue, which withholds shots already in the queue;
+not BLACS's Request shots, which is what lets BLACS run anything at all;
+and not Abort, which stops the shot BLACS is running.</string>
+             </property>
+             <property name="text">
+              <string>BLACS</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QLabel" name="blacs_status_indicator">
+             <property name="toolTip">
+              <string>Checking BLACS...</string>
+             </property>
+             <property name="text">
+              <string/>
+             </property>
+             <property name="pixmap">
+              <pixmap>:/qtutils/fugue/hourglass.png</pixmap>
+             </property>
+             <property name="scaledContents">
+              <bool>false</bool>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <spacer name="horizontalSpacer_blacs">
+             <property name="orientation">
+              <enum>Qt::Horizontal</enum>
+             </property>
+             <property name="sizeHint" stdset="0">
+              <size>
+               <width>0</width>
+               <height>0</height>
+              </size>
+             </property>
+            </spacer>
+           </item>
+          </layout>
          </item>
          <item>
           <widget class="QCheckBox" name="checkBox_view_shots">

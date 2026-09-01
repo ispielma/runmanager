@@ -71,16 +71,28 @@ from labscript_utils import dedent
 from zprocess import raise_exception_in_thread
 import runmanager
 import runmanager.remote
-from runmanager.analysis_submission import AnalysisSubmission
+from runmanager.analysis_submission import (
+    AnalysisSubmission,
+    art_dir,
+    set_icon_label_pixmap,
+)
+from runmanager.blacs_status import (
+    LINK_ICONS,
+    BlacsStatusMonitor,
+    blacs_activity_display,
+    blacs_link_display,
+)
 from runmanager.queueing import (
-    FAILURE_POLICY_DROP,
-    FAILURE_POLICY_RETRY,
     COMPILE_MODE_EAGER,
     COMPILE_MODE_LAZY,
     EMPTY_QUEUE_DEFAULT_LABSCRIPT,
     EMPTY_QUEUE_NOTHING,
+    PROVIDER_NONE,
+    PROVIDER_PAUSED,
+    PROVIDER_SHOT,
     QueueManager,
     RunmanagerQueueWidget,
+    SHOT_OUTCOME_STATUSES,
 )
 
 from qtutils import (
@@ -396,7 +408,15 @@ class TabToolButton(QtWidgets.QToolButton):
 
 class FingerTabWidget(QtWidgets.QTabWidget):
 
-    """A QTabWidget equivalent which uses our FingerTabBarWidget"""
+    """A QTabWidget equivalent which uses our FingerTabBarWidget.
+
+    Not labscript_utils.qtwidgets.fingertab.FingerTabWidget, which shares the
+    name and the gist both are credited to, and nothing else: that one is the
+    gist as written, and this one has grown closable tabs, per-tab movability
+    and a tab bar to match. labscript_utils' is what the settings dialog every
+    app opens uses; this one is only ever promoted from runmanager's main.ui.
+    Import the wrong one and the interface still loads, so say which.
+    """
 
     def __init__(self, parent, *args):
         QtWidgets.QTabWidget.__init__(self, parent, *args)
@@ -1785,6 +1805,22 @@ class RunManager(LabscriptApplication):
         self.setup_queue_tab()
         run_view_layout = self.ui.findChild(QtWidgets.QLayout, 'verticalLayout_2')
         self.analysis_submission = AnalysisSubmission(self, run_view_layout)
+        # Watching BLACS runs on its own thread, independently of the shot
+        # exchange and of the destination checkbox it reports beside, so that
+        # the indicator is live whether or not shots are being queued and a
+        # BLACS that has stopped answering cannot hold up this GUI:
+        # The destination control wears the BLACS logo for the same reason the
+        # one below it wears lyse's: three checkboxes in a column that name
+        # three different applications are told apart by their logos faster
+        # than by reading them.
+        set_icon_label_pixmap(
+            self.ui.checkBox_run_shots_icon, art_dir / 'blacs_22x22.png'
+        )
+        self.blacs_status_monitor = BlacsStatusMonitor(
+            on_status=self.update_blacs_status
+        )
+        self.update_blacs_status(None)
+        self.blacs_status_monitor.start()
         self.connect_signals()
 
         # The last location from which a labscript file was selected, defaults
@@ -1976,18 +2012,6 @@ class RunManager(LabscriptApplication):
         self.queue_compile_mode_combo.addItem('Eager compile', COMPILE_MODE_EAGER)
         self.queue_compile_mode_combo.addItem('Lazy compile', COMPILE_MODE_LAZY)
         controls_layout.addWidget(self.queue_compile_mode_combo)
-        controls_layout.addWidget(
-            QtWidgets.QLabel('When a shot does not run', self.tab_queue)
-        )
-        self.queue_failure_policy_combo = QtWidgets.QComboBox(self.tab_queue)
-        self.queue_failure_policy_combo.addItem('Retry', FAILURE_POLICY_RETRY)
-        self.queue_failure_policy_combo.addItem('Drop', FAILURE_POLICY_DROP)
-        self.queue_failure_policy_combo.setToolTip(
-            'What to do with a shot BLACS could not run. Retry returns it to '
-            'the head of the queue; Drop discards it. A shot BLACS refused to '
-            'accept at all is never offered again.'
-        )
-        controls_layout.addWidget(self.queue_failure_policy_combo)
         controls_layout.addWidget(QtWidgets.QLabel('When queue is empty', self.tab_queue))
         self.queue_empty_policy_combo = QtWidgets.QComboBox(self.tab_queue)
         self.queue_empty_policy_combo.addItem('Send nothing', EMPTY_QUEUE_NOTHING)
@@ -1995,22 +2019,52 @@ class RunManager(LabscriptApplication):
             'Send default shot', EMPTY_QUEUE_DEFAULT_LABSCRIPT
         )
         controls_layout.addWidget(self.queue_empty_policy_combo)
+        # A button rather than a checkbox, matching BLACS's Request shots: the
+        # two are the pair of controls that decide whether shots run, they are
+        # read from across the room, and a filled button says which way it is
+        # set at a glance. The icon follows the state Qt is in, as that one's
+        # does -- running when the queue is offering work, paused when it is
+        # not.
+        self.queue_pause_button = QtWidgets.QPushButton('Pause queue', self.tab_queue)
+        self.queue_pause_button.setCheckable(True)
+        self.queue_pause_button.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        pause_icon = QtGui.QIcon()
+        pause_icon.addPixmap(
+            QtGui.QPixmap(':/qtutils/fugue/control.png'),
+            QtGui.QIcon.Mode.Normal,
+            QtGui.QIcon.State.Off,
+        )
+        pause_icon.addPixmap(
+            QtGui.QPixmap(':/qtutils/fugue/control-pause.png'),
+            QtGui.QIcon.Mode.Normal,
+            QtGui.QIcon.State.On,
+        )
+        self.queue_pause_button.setIcon(pause_icon)
+        self.queue_pause_button.setToolTip(
+            'Stop this runmanager offering shots to BLACS, including the '
+            'default shot.\n'
+            'This does not stop BLACS: the shot it is running finishes '
+            'normally, and it goes on\nrunning its local override shot while '
+            'the queue is paused. The queue is left as it\nis, so resuming '
+            'offers the same shot at its head.'
+        )
+        controls_layout.addWidget(self.queue_pause_button)
+        # What BLACS is doing sits next to the control that decides whether it
+        # is offered anything, because the two are read together: a paused
+        # queue and a BLACS running its own override shot is a different
+        # situation from a paused queue and a BLACS that has stopped.
+        self.queue_blacs_activity_label = QtWidgets.QLabel(self.tab_queue)
+        self.queue_blacs_activity_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        controls_layout.addWidget(self.queue_blacs_activity_label)
         controls_layout.addStretch(1)
         self.queue_widget = RunmanagerQueueWidget(self.tab_queue)
         self.queue_widget.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
         )
-        self.queue_last_sent_label = QtWidgets.QLabel(self.tab_queue)
-        self.queue_last_sent_label.setSizePolicy(
-            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
-        )
-        self.queue_last_sent_label.setAlignment(
-            QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
-        )
-        self.queue_last_sent_label.setWordWrap(True)
         self.verticalLayout_queue_tab.addLayout(controls_layout)
         self.verticalLayout_queue_tab.addWidget(self.queue_widget)
-        self.verticalLayout_queue_tab.addWidget(self.queue_last_sent_label)
         self.ui.tabWidget.insertTab(0, self.tab_queue, 'Queue')
         queue_tab_index = self.ui.tabWidget.indexOf(self.tab_queue)
         self.ui.tabWidget.tabBar().setMovable(False, index=queue_tab_index)
@@ -2092,15 +2146,13 @@ class RunManager(LabscriptApplication):
             self.groups_model.itemChanged, self.on_groups_model_item_changed)
 
         self.queue_manager.queueChanged.connect(self.refresh_queue_tab)
-        self.queue_failure_policy_combo.currentIndexChanged.connect(
-            self.on_queue_failure_policy_changed
-        )
         self.queue_compile_mode_combo.currentIndexChanged.connect(
             self.on_queue_compile_mode_changed
         )
         self.queue_empty_policy_combo.currentIndexChanged.connect(
             self.on_queue_empty_policy_changed
         )
+        self.queue_pause_button.toggled.connect(self.on_queue_paused_changed)
         self.queue_widget.deleteRowsRequested.connect(self.on_queue_delete_rows_requested)
         
         # Keyboard shortcuts:
@@ -2123,6 +2175,7 @@ class RunManager(LabscriptApplication):
             if reply == QtWidgets.QMessageBox.Yes:
                 self.save_configuration(self.last_save_config_file)
         self.analysis_submission.shutdown()
+        self.blacs_status_monitor.shutdown()
         self.queue_manager.shutdown()
         self.to_child.put(['quit', None])
         self.output_box.shutdown()
@@ -2140,8 +2193,8 @@ class RunManager(LabscriptApplication):
         new_index = (current_index + change) % n_tabs
         self.ui.tabWidget.setCurrentIndex(new_index)
 
-    def on_queue_delete_rows_requested(self, rows):
-        self.queue_manager.delete_rows(rows)
+    def on_queue_delete_rows_requested(self, shot_ids):
+        self.queue_manager.delete_rows(shot_ids)
 
     def on_queue_empty_policy_changed(self, index):
         empty_queue_policy = self.queue_empty_policy_combo.itemData(index)
@@ -2155,37 +2208,51 @@ class RunManager(LabscriptApplication):
             return
         self.queue_manager.set_compile_mode(compile_mode)
 
-    def on_queue_failure_policy_changed(self, index):
-        failure_policy = self.queue_failure_policy_combo.itemData(index)
-        if failure_policy is None:
+    def on_queue_paused_changed(self, checked):
+        self.queue_manager.set_paused(checked)
+
+    @inmain_decorator()
+    def update_blacs_status(self, status):
+        """Show what BLACS last said, in the two places it belongs.
+
+        Whether BLACS is answering goes beside the destination checkbox, where
+        it means what the lyse light on the row below means and nothing more.
+        What BLACS is doing with the queue goes beside Pause queue, in words,
+        because that is the control it is about and none of it is a yes or a
+        no.
+
+        Both are independent of the destination checkbox: what the apparatus
+        is doing with work already queued is worth seeing whether or not newly
+        engaged shots are being added to it. Informational only -- there is
+        nothing here to enable BLACS, clear what stopped it, or abort a shot;
+        those stay with the operator standing at the apparatus."""
+        if self.blacs_status_monitor.stopped.is_set():
+            # Runmanager is closing. The poller checks this too, but it checks
+            # before handing the answer over, and this body is what runs after
+            # -- on the GUI thread, once the queued call comes up. An answer
+            # that passed that check can still be sitting here when the window
+            # starts coming down, and painting a QLabel that has been deleted
+            # raises, which the operator meets as a dialog on the way out.
             return
-        self.queue_manager.set_failure_policy(failure_policy)
+        state, tooltip = blacs_link_display(
+            status, host=self.blacs_status_monitor.client.host
+        )
+        icon = QtGui.QIcon(LINK_ICONS.get(state, ':/qtutils/fugue/exclamation-red'))
+        self.ui.blacs_status_indicator.setPixmap(icon.pixmap(QtCore.QSize(16, 16)))
+        self.ui.blacs_status_indicator.setToolTip(tooltip)
+
+        activity, activity_tooltip = blacs_activity_display(status)
+        self.queue_blacs_activity_label.setText(activity)
+        self.queue_blacs_activity_label.setToolTip(activity_tooltip)
 
     @inmain_decorator()
     def refresh_queue_tab(self):
-        controller = self.queue_manager.controller
-        self.queue_widget.set_queue_paths(controller.get_queue_display_items())
-        state = controller.get_queue_state()
-        last_sent_from_queue = state['last_sent_from_queue']
-        if last_sent_from_queue:
-            text = 'Last sent from queue: %s' % last_sent_from_queue
-            tooltip = last_sent_from_queue
-        else:
-            text = 'Last sent from queue: nothing'
-            tooltip = ''
-        # In-flight shots are shown here rather than as queue rows, so that row
-        # indices keep addressing queued shots only:
-        for shot in state['in_flight']:
-            if shot['state'] == 'running':
-                text += ' (running in BLACS)'
-                if shot['running_path'] and shot['running_path'] != shot['path']:
-                    text += ', as %s' % os.path.basename(shot['running_path'])
-            elif shot['state'] == 'rejected':
-                text += ' (rejected by BLACS: %s)' % shot['message']
-            else:
-                text += ' (awaiting BLACS)'
-        self.queue_last_sent_label.setText(text)
-        self.queue_last_sent_label.setToolTip(tooltip)
+        # The widget reserves its first row for the shot that went to BLACS and
+        # lays the waiting work out beneath it, so there is nothing to divide
+        # up here.
+        self.queue_widget.set_queue_paths(
+            self.queue_manager.controller.get_queue_display_items()
+        )
 
     def on_output_popout_button_clicked(self):
         if self.output_box_is_popped_out:
@@ -2336,10 +2403,10 @@ class RunManager(LabscriptApplication):
             )
         )
         self.engage_replace_queue_action.setToolTip(
-            'Delete the remaining queued shots, then submit the replacement batch as a new shot sequence.'
+            'Delete the queued shots BLACS is not running, then submit the replacement batch as a new shot sequence.'
         )
         self.engage_replace_queue_action.setStatusTip(
-            'Delete the remaining queued shots, then submit the replacement batch as a new shot sequence.'
+            'Delete the queued shots BLACS is not running, then submit the replacement batch as a new shot sequence.'
         )
         self.engage_add_clear_action = self.engage_submission_menu.addAction(
             'Empty queue, then add shots to last sequence'
@@ -2350,21 +2417,25 @@ class RunManager(LabscriptApplication):
             )
         )
         self.engage_add_clear_action.setToolTip(
-            'Delete the remaining queued shots, then submit the replacement batch onto the same shot sequence.'
+            'Delete the queued shots BLACS is not running, then submit the replacement batch onto the same shot sequence.'
         )
         self.engage_add_clear_action.setStatusTip(
-            'Delete the remaining queued shots, then submit the replacement batch onto the same shot sequence.'
+            'Delete the queued shots BLACS is not running, then submit the replacement batch onto the same shot sequence.'
         )
         self.engage_submission_menu.aboutToShow.connect(
             self.update_engage_submission_menu_actions
         )
         button.setMenu(self.engage_submission_menu)
         button.setToolTip(
-            """<html><head/><body><p>Compile pending shots, submit them to BLACS if "run shots" is checked, and send them to runviewer if "view shots" is checked.</p><p>Press and hold to choose alternate queue submission modes.</p><p><span style="font-style:italic;">Empty queue, then add shots to new sequence</span> and <span style="font-style:italic;">Empty queue, then add shots to last sequence</span> delete the remaining queued shots before submitting the replacement batch. With lazy compile enabled, later compile failures are still possible when BLACS requests those shots.</p></body></html>"""
+            """<html><head/><body><p>Compile pending shots, put them in the queue for BLACS if the "BLACS" checkbox is checked, and send them to runviewer if "view shots" is checked.</p><p>Press and hold to choose alternate queue submission modes.</p><p><span style="font-style:italic;">Empty queue, then add shots to new sequence</span> and <span style="font-style:italic;">Empty queue, then add shots to last sequence</span> delete the queued shots BLACS is not running before submitting the replacement batch. With lazy compile enabled, later compile failures are still possible when BLACS requests those shots.</p></body></html>"""
         )
 
     def get_queue_append_filepath(self):
-        queue_paths = self.queue_manager.get_queue_paths()
+        # Runmanager's own default shots are passed over: a default shot is not
+        # part of a sequence, so the next batch must not be numbered alongside
+        # it, and a queue holding nothing else is one there is nothing to add
+        # shots to. See offer_shot().
+        queue_paths = self.queue_manager.get_queue_paths(include_default_shots=False)
         if not queue_paths:
             return None
         return os.path.abspath(queue_paths[-1])
@@ -2422,7 +2493,7 @@ class RunManager(LabscriptApplication):
             send_to_runviewer = self.ui.checkBox_view_shots.isChecked()
             if not send_to_BLACS and not send_to_runviewer:
                 self.output_box.output(
-                    "Warning: neither 'Run shot(s)' nor 'View shot(s)' is selected.\n\n",
+                    "Warning: neither 'BLACS' nor 'View shot(s)' is selected.\n\n",
                     red=True,
                 )
                 return
@@ -2431,7 +2502,7 @@ class RunManager(LabscriptApplication):
                 queue_append_filepath = self.get_queue_append_filepath()
                 if not send_to_BLACS:
                     self.output_box.output(
-                        "Warning: alternate queue submission modes require 'Run shot(s)' to be selected.\n\n",
+                        "Warning: alternate queue submission modes require 'BLACS' to be selected.\n\n",
                         red=True,
                     )
                     return
@@ -3978,11 +4049,7 @@ class RunManager(LabscriptApplication):
             )
             if index != -1:
                 self.queue_empty_policy_combo.setCurrentIndex(index)
-            index = self.queue_failure_policy_combo.findData(
-                restored_queue_state['failure_policy']
-            )
-            if index != -1:
-                self.queue_failure_policy_combo.setCurrentIndex(index)
+            self.queue_pause_button.setChecked(restored_queue_state['paused'])
 
         self.analysis_submission.restore_configuration_data(
             runmanager_config.get('analysis_submission')
@@ -4296,12 +4363,24 @@ class RunManager(LabscriptApplication):
                                  creationflags=creationflags, stdout=None, stderr=None,
                                  close_fds=True)
             else:
-                devnull = open(os.devnull, 'w')
-                if not os.fork():
-                    os.setsid()
-                    subprocess.Popen([sys.executable, '-m', 'runviewer'],
-                                     stdin=devnull, stdout=devnull, stderr=devnull, close_fds=True)
-                    os._exit(0)
+                # start_new_session does the setsid this used to fork to reach,
+                # and reaches it without running Python in a forked child.
+                # os.fork() here was unsafe and did not work: runmanager runs
+                # half a dozen threads, so the child got only this one, holding
+                # whatever locks the others held at the instant of the fork --
+                # including the allocator's, which subprocess needs. It
+                # deadlocked before starting anything, silently, and Python 3.12
+                # started warning about it. Worse, had Popen raised instead, the
+                # os._exit(0) below it would never have run and the child would
+                # have carried on as a second copy of runmanager.
+                subprocess.Popen(
+                    [sys.executable, '-m', 'runviewer'],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    close_fds=True,
+                )
             try:
                 zmq_get(runviewer_port, 'localhost', data='hello', timeout=15)
             except Exception as e:
@@ -4405,11 +4484,133 @@ class RunManager(LabscriptApplication):
                 self._default_shot_ready = run_file
                 self._default_shot_preparing = False
 
-    def queue_request_next(self):
-        # BLACS acknowledges a shot before running it, on this same thread, so
-        # anything still unacknowledged when it asks again never reached it:
-        self.queue_manager.reclaim_unaccepted()
-        item = self.queue_manager.pop_next()
+    def queue_exchange(self, outcome=None, request_shot=True):
+        """Apply BLACS's outcome for the shot it was offered, then offer one.
+
+        The outcome is applied first, so that a single exchange can retire the
+        row BLACS has just finished and offer the next one in the same reply.
+        That order is also what lets offer_shot() reclaim a row still marked
+        running: by the time it looks, a row BLACS has just reported on has
+        already been retired or reddened, so anything still marked running is a
+        row this BLACS is demonstrably not executing."""
+        no_shot = {'state': PROVIDER_NONE, 'shot_id': None, 'path': None}
+        try:
+            if outcome is not None:
+                self.apply_shot_outcome(outcome)
+            if not request_shot:
+                return no_shot
+            return self.offer_shot()
+        except Exception as exc:
+            # Answered rather than raised, for the same reason an unreadable
+            # outcome is. RemoteServer.handler hands an exception back to
+            # BLACS, which cannot tell it from not having reached runmanager,
+            # so it would hold the outcome it has already delivered here and
+            # send it again for ever -- once a second, showing "Runmanager
+            # unavailable" the whole time, for what is a fault on this side.
+            # Report it where an operator will see it and answer normally.
+            #
+            # This covers applying the outcome as well as choosing the offer.
+            # It used to cover only the offer, which was the wrong half: by the
+            # time applying an outcome can raise, the row it retired is already
+            # gone, so the resend it provokes can never put the analysis
+            # submission back.
+            self.output_box.output(
+                'Runmanager could not answer BLACS: %s\n' % str(exc), red=True
+            )
+            return no_shot
+
+    def apply_shot_outcome(self, outcome):
+        """Record how BLACS says the shot it was offered turned out.
+
+        Only completed shots are submitted for analysis; the others are
+        recorded and shown, but not analysed. Analysis gets the file BLACS
+        actually ran, which is not the queued one when it made a fresh copy to
+        re-run a shot that already held data.
+
+        The completion is reported before the row is retired, and not the other
+        way round. Both happen under queue_exchange's guard, which answers
+        BLACS normally rather than raising: BLACS then drops the outcome, so no
+        resend can arrive to make good a submission that failed. Retiring the
+        row last means such a failure leaves it in the queue, where BLACS's
+        next request reclaims it and the shot is run again -- which costs a run
+        of the apparatus, and not the data, which nothing can recover later.
+
+        An outcome runmanager cannot read -- one that is not a mapping, names
+        no shot, or reports a status runmanager does not know -- is refused and
+        reported, leaving the queue as it was."""
+        fields = outcome if isinstance(outcome, dict) else {}
+        shot_id = str(fields.get('shot_id') or '')
+        status = str(fields.get('status', ''))
+        if not shot_id or status not in SHOT_OUTCOME_STATUSES:
+            # Refused rather than raised. RemoteServer.handler hands an
+            # exception back to BLACS, which cannot tell it apart from not
+            # having reached runmanager at all -- and BLACS holds an outcome
+            # until it knows runmanager took it, so it would send the same
+            # unreadable message for ever. Saying so and answering the exchange
+            # normally lets BLACS move on, and no row is reddened on the
+            # strength of a message runmanager did not understand.
+            self.output_box.output(
+                'BLACS sent a shot outcome runmanager could not read: %s\n'
+                % (outcome,),
+                red=True,
+            )
+            return
+        message = str(fields.get('message', ''))
+        if status != 'completed':
+            self.queue_manager.shot_finished(shot_id, status, message)
+            return
+        agnostic_path = fields.get('path')
+        agnostic_path = str(agnostic_path) if agnostic_path else ''
+        if not agnostic_path:
+            # BLACS named no file, so the row's own path is the only one there
+            # is -- and there is none at all if no row matches, which leaves
+            # nothing to analyse. Read while the row is still in the queue, for
+            # the same reason the submission below happens while it is.
+            queued_path = self.queue_manager.get_shot_path(shot_id)
+            if queued_path:
+                agnostic_path = shared_drive.path_to_agnostic(queued_path)
+        if agnostic_path:
+            self.analysis_submission.notify_shot_complete(agnostic_path)
+        record = self.queue_manager.shot_finished(shot_id, status, message)
+        if record is None:
+            # A completed shot that matched no row. The row can be gone for
+            # ordinary reasons -- the operator loaded a queue configuration, or
+            # restarted runmanager, while BLACS was running the shot it had
+            # been given -- and it can also be a lost reply being sent again
+            # for a row already retired. The two are indistinguishable here.
+            #
+            # There is nothing to do to the queue either way, and nothing
+            # here needs to know which case it was. The shot ran and wrote
+            # data, so the completion has already gone on above: reporting one
+            # is runmanager's part, and whether the far end has already seen
+            # this file is the far end's to decide, not something to be guessed
+            # at from here. Say which shot it was, since the queue shows
+            # nothing of it.
+            self.output_box.output(
+                'BLACS reported shot %s as completed, but no queued shot has '
+                'that id; the queue is unchanged.\n' % shot_id,
+                red=True,
+            )
+
+    def offer_shot(self):
+        """Offer BLACS a shot, if this runmanager has one to run.
+
+        Returns the exchange response: the provider state, plus the stable id
+        and shared-drive-agnostic path of the shot when one is offered."""
+        no_shot = {'state': PROVIDER_NONE, 'shot_id': None, 'path': None}
+        if self.queue_manager.get_queue_state()['paused']:
+            # Pause is this runmanager's policy about its own queue, not
+            # authority over the apparatus: a second runmanager sharing one
+            # BLACS must not be able to stop it by pausing its own queue. So
+            # this says "I have nothing for you", not "stop" -- BLACS keeps
+            # requesting and runs its local override shot meanwhile.
+            #
+            # The check comes before anything is chosen, so that it withholds a
+            # runmanager-generated default shot as well as a queued row, and
+            # before a row is marked running, so that pausing changes nothing
+            # in the queue and does not touch the shot already under way.
+            return {'state': PROVIDER_PAUSED, 'shot_id': None, 'path': None}
+        item = self.queue_manager.offer_next()
         if item is None:
             # A queued shot that is not compiled yet stays at the head of the
             # queue and is compiled off this thread, so that a slow compile
@@ -4420,17 +4621,36 @@ class RunManager(LabscriptApplication):
             if self.queue_manager.compile_next_in_background(
                 lambda: inmain(self.ui.checkBox_view_shots.isChecked)
             ):
-                return None
+                return no_shot
             queue_state = self.queue_manager.get_queue_state()
-            if queue_state['empty_queue_policy'] != EMPTY_QUEUE_DEFAULT_LABSCRIPT:
-                self.discard_default_shot()
-                self.queue_manager.set_last_sent_from_queue(None)
-                return None
             labscript_file = queue_state['default_labscript_file']
-            if not labscript_file:
+            # No default shot is called for: the policy does not ask for one,
+            # there is no labscript file to make it from, or the queue is not
+            # empty after all. A row still marked running is no longer a reason
+            # -- offer_next() reclaims that one rather than leaving it
+            # unoffered -- but the queue can still gain work, or finish
+            # compiling its head, between the offer attempt above and this
+            # check. Either way runmanager has work rather than nothing to
+            # offer, and a default shot made now would only be queued behind
+            # something that is about to be offered.
+            if (
+                queue_state['empty_queue_policy'] != EMPTY_QUEUE_DEFAULT_LABSCRIPT
+                or not labscript_file
+                or queue_state['n_items']
+            ):
                 self.discard_default_shot()
-                self.queue_manager.set_last_sent_from_queue(None)
-                return None
+                if not queue_state['n_items']:
+                    # Only when there is genuinely nothing queued. This branch
+                    # is also reached with work still in the queue that simply
+                    # cannot be offered yet -- a rejected head, or one whose
+                    # compile failed -- and the anchor is about the shot last
+                    # sent to BLACS, not about whether a default shot was called
+                    # for. Clearing it there sent the next "add shots to last
+                    # sequence" batch to the folder of the last shot queued
+                    # instead, which is a different sequence as soon as two
+                    # batches have been engaged.
+                    self.queue_manager.set_last_sent_from_queue(None)
+                return no_shot
             if not os.path.isfile(labscript_file):
                 raise RuntimeError(
                     'Default-shot labscript file does not exist: %s' % labscript_file
@@ -4441,20 +4661,38 @@ class RunManager(LabscriptApplication):
             # the remote server, nor finish into a client that stopped waiting.
             run_file = self.take_default_shot(labscript_file)
             if run_file is None:
-                return None
+                return no_shot
+            # The default shot joins the queue as an ordinary row and is then
+            # offered like one. That is the whole of its lifecycle: it is
+            # visible while it runs, goes red with its reason if it does not,
+            # is retried by the next request, can be deleted by the operator,
+            # and is removed and sent for analysis when it completes -- all by
+            # rules the queue already has, with no second lifecycle to keep in
+            # step. It is also what stops a second default shot being made
+            # while the first still needs attention: a red row is the head of
+            # the queue, so it is what the next request is offered.
+            self.queue_manager.enqueue(
+                [{'path': run_file, 'compiled': True, 'default_shot': True}]
+            )
+            item = self.queue_manager.offer_next()
+            if item is None:
+                return no_shot
         else:
             # The queue has taken over, so any default shot prepared while it
             # was empty is now out of date:
             self.discard_default_shot()
-            run_file = item['path']
-        agnostic_path = shared_drive.path_to_agnostic(run_file)
-        if item is not None:
-            # Only shots that came from the queue are recorded here. A default
-            # shot is not part of a sequence, and lives in the daily default
+        agnostic_path = shared_drive.path_to_agnostic(item['path'])
+        if not item['default_shot']:
+            # Only shots a user engaged are recorded here. A default shot is
+            # not part of a sequence, and lives in the daily default
             # directory, so it must not become the anchor that "add shots to
             # last sequence" writes the next batch alongside:
             self.queue_manager.set_last_sent_from_queue(agnostic_path)
-        return agnostic_path
+        return {
+            'state': PROVIDER_SHOT,
+            'shot_id': item['shot_id'],
+            'path': agnostic_path,
+        }
 
 
 class RemoteServer(ZMQServer):
@@ -4725,30 +4963,8 @@ class RemoteServer(ZMQServer):
     def handle_reset_shot_output_folder(self):
         app.on_reset_shot_output_folder_clicked(None)
 
-    def handle_queue_request_next(self):
-        return app.queue_request_next()
-
-    def handle_shot_accepted(self, filepath, running_filepath=''):
-        return app.queue_manager.shot_accepted(
-            shared_drive.path_to_local(str(filepath)),
-            shared_drive.path_to_local(str(running_filepath)) if running_filepath else '',
-        )
-
-    def handle_shot_rejected(self, filepath, message=''):
-        return app.queue_manager.shot_rejected(
-            shared_drive.path_to_local(str(filepath)), message
-        )
-
-    def handle_notify_shot_complete(self, filepath, status='completed', message=''):
-        app.queue_manager.shot_finished(
-            shared_drive.path_to_local(str(filepath)), status, message
-        )
-        if status != 'completed':
-            # Only completed shots are submitted for analysis. Before this,
-            # BLACS reported nothing at all for a shot that failed, so lyse
-            # never saw one; that must not change here.
-            return 'noted'
-        return app.analysis_submission.notify_shot_complete(filepath)
+    def handle_queue_exchange(self, outcome=None, request_shot=True):
+        return app.queue_exchange(outcome, bool(request_shot))
 
     def handler(self, request_data):
         cmd, args, kwargs = request_data
