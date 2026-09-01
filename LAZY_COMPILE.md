@@ -25,6 +25,16 @@ Queued lazy shots keep the skeleton filepath created at Engage time. If a lazy s
 - Do not introduce a second queueing pipeline. Reuse the current compile/queue flow and branch only at the “compile now vs queue skeleton now” decision point.
 
 ### BLACS request path
+
+> **Later change.** `queue_request_next()` no longer exists. It, and the
+> acceptance, rejection and completion calls that went with it, were replaced
+> on the `RunmanagerControl` branch by one `queue_exchange(outcome,
+> request_shot)`, which reaches `RunManager.offer_shot()`. The lazy-compile
+> rules in this section are unchanged and still hold — a lazy shot is still
+> compiled off the request thread when BLACS asks for it, still keeps its
+> Engage-time filepath, and a compile failure still drops that queue item — but
+> read `queue_request_next()` below as `offer_shot()`.
+
 - Extend the existing `queue_request_next()` logic in runmanager.
 - When the next queue item is eager, keep the current behavior and return its agnostic path immediately.
 - When the next queue item is lazy:

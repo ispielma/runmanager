@@ -2375,7 +2375,7 @@ class RunManager(LabscriptApplication):
         )
         button.setMenu(self.engage_submission_menu)
         button.setToolTip(
-            """<html><head/><body><p>Compile pending shots, submit them to BLACS if "run shots" is checked, and send them to runviewer if "view shots" is checked.</p><p>Press and hold to choose alternate queue submission modes.</p><p><span style="font-style:italic;">Empty queue, then add shots to new sequence</span> and <span style="font-style:italic;">Empty queue, then add shots to last sequence</span> delete the queued shots BLACS is not running before submitting the replacement batch. With lazy compile enabled, later compile failures are still possible when BLACS requests those shots.</p></body></html>"""
+            """<html><head/><body><p>Compile pending shots, put them in the queue for BLACS if the "BLACS" checkbox is checked, and send them to runviewer if "view shots" is checked.</p><p>Press and hold to choose alternate queue submission modes.</p><p><span style="font-style:italic;">Empty queue, then add shots to new sequence</span> and <span style="font-style:italic;">Empty queue, then add shots to last sequence</span> delete the queued shots BLACS is not running before submitting the replacement batch. With lazy compile enabled, later compile failures are still possible when BLACS requests those shots.</p></body></html>"""
         )
 
     def get_queue_append_filepath(self):

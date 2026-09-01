@@ -150,7 +150,7 @@ QToolButton:hover:checked {
             <enum>Qt::NoFocus</enum>
            </property>
            <property name="toolTip">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Compile pending shots, submit them to BLACS if &quot;run shots&quot; is checked, and send them to runviewer if &quot;view shots&quot; is checked.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Compile pending shots, put them in the queue for BLACS if the &quot;BLACS&quot; checkbox is checked, and send them to runviewer if &quot;view shots&quot; is checked.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="autoFillBackground">
             <bool>false</bool>
