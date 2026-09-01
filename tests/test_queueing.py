@@ -1297,12 +1297,13 @@ class ReplayTests(unittest.TestCase):
         # lost reply makes it send the same completed outcome again. The queue
         # is changed once: the second finds no row and leaves it alone.
         #
-        # The file is submitted both times, and that is deliberate. Runmanager
-        # cannot tell a resend from a shot whose row went while BLACS was
-        # running it -- an operator loading a configuration, or restarting --
-        # and of the two mistakes available, submitting a file twice is one
-        # lyse absorbs by ignoring a duplicate filepath, while dropping a shot
-        # that ran and wrote data is not recoverable afterwards.
+        # The completion is passed on both times, and that is deliberate.
+        # Runmanager cannot tell a resend from a shot whose row went while
+        # BLACS was running it -- an operator loading a configuration, or
+        # restarting -- and it does not need to. Reporting that a shot
+        # completed is its part; what the far end makes of a file it has
+        # already seen belongs to the far end, and withholding a real
+        # completion to spare it the trouble is the assumption to avoid.
         self.enqueue('shot_a.h5')
         offered = self.app.queue_exchange(request_shot=True)
         outcome = {
@@ -1318,7 +1319,8 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(
             self.app.analysis_submission.submitted,
             [offered['path'], offered['path']],
-            'the same filepath twice, which lyse ignores the second time',
+            'reported twice, because it completed twice as far as this side '
+            'can tell, and reporting it is what this side does',
         )
 
     def test_a_repeated_outcome_cannot_reach_a_later_shot_of_the_same_file(self):
@@ -1347,10 +1349,9 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(
             self.app.analysis_submission.submitted,
             [first['path'], first['path']],
-            'the resend submits the file that ran a second time, which lyse '
-            'ignores by filepath; what must not happen is the second row being '
-            'analysed on the strength of the first shot finishing, and it is '
-            'the same file either way",'.replace('",', '"'),
+            'the resend reports the file that ran a second time; what must '
+            'not happen is the second row being retired on the strength of the '
+            'first shot finishing, and it is not',
         )
 
     def test_a_repeated_failed_outcome_keeps_one_red_row_and_one_reason(self):
@@ -1491,10 +1492,11 @@ class OutcomeWithNoRowTests(unittest.TestCase):
     in its queue under that id.
 
     The queue is left alone -- there is nothing there to change -- but the shot
-    still ran and still wrote data, so it goes to lyse. It used to be dropped,
+    ran and wrote data, so the completion is passed on. It used to be dropped,
     on the grounds that a resent outcome for a row already retired would be
-    submitted twice. lyse ignores a duplicate filepath and says so, which is a
-    far smaller thing than a real shot nothing ever analyses.
+    reported twice. That was runmanager deciding what the far end could cope
+    with, which is not its to decide: reporting a completion is its part, and
+    one it has withheld is one nothing downstream can ask for later.
     """
 
     def app(self):
@@ -1518,8 +1520,8 @@ class OutcomeWithNoRowTests(unittest.TestCase):
         self.assertEqual(
             app.analysis_submission.submitted,
             ['/tmp/gone.h5'],
-            'the shot ran and wrote data; losing it to analysis is the one '
-            'outcome that cannot be undone later',
+            'the shot ran and wrote data, and reporting that is this side\'s '
+            'part whether or not a row is left to tick off',
         )
 
     def test_the_operator_is_told_the_queue_was_not_touched(self):
@@ -2005,8 +2007,8 @@ class LostRowTests(unittest.TestCase):
         self.assertEqual(
             app.analysis_submission.submitted,
             ['/tmp/shot_a.h5'],
-            'the queue lost the row, but the shot ran and wrote data: dropping '
-            'it here is the one loss nothing later can undo',
+            'the queue lost the row, but the shot ran and wrote data, and a '
+            'completion withheld here is one nothing downstream can ask for',
         )
         self.assertTrue(
             app.output_box.said(offered['shot_id'], 'queue is unchanged')

@@ -4559,11 +4559,13 @@ class RunManager(LabscriptApplication):
             # been given -- and it can also be a lost reply being sent again
             # for a row already retired. The two are indistinguishable here.
             #
-            # There is nothing to do to the queue either way. But the shot ran
-            # and wrote data, so it still goes to lyse: a duplicate is ignored
-            # there by filepath, with a line saying so, while a real shot that
-            # nothing analyses is not recoverable later. Say which shot it was,
-            # since the queue shows nothing of it.
+            # There is nothing to do to the queue either way, and nothing
+            # here needs to know which case it was. The shot ran and wrote
+            # data, so the completion is passed on: reporting one is
+            # runmanager's part, and whether the far end has already seen this
+            # file is the far end's to decide, not something to be guessed at
+            # from here. Say which shot it was, since the queue shows nothing
+            # of it.
             self.output_box.output(
                 'BLACS reported shot %s as completed, but no queued shot has '
                 'that id; the queue is unchanged.\n' % shot_id,
