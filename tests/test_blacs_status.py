@@ -1,0 +1,417 @@
+"""Behavioural tests for what runmanager shows about a remote BLACS.
+
+The indicator state and its tooltip are worked out from the status BLACS sent,
+so they are tested against snapshots rather than against a running apparatus or
+a constructed RunManager.
+"""
+import os
+import time
+import unittest
+from xml.etree import ElementTree
+
+from qtutils import UiLoader
+from qtutils.qt.QtWidgets import QApplication, QCheckBox, QLabel, QLayout
+from labscript_utils.qtwidgets.fingertab import FingerTabWidget
+
+import runmanager
+import runmanager.remote
+from runmanager.__main__ import RemoteServer, RunManager, TreeView
+from runmanager.blacs_status import (
+    BlacsStatusMonitor,
+    Client,
+    blacs_status_display,
+)
+
+
+def snapshot(**fields):
+    """A status of the shape BLACS's get_status command answers with."""
+    status = {
+        'requesting_shots': False,
+        'status': 'Idle',
+        'shot_id': None,
+        'shot_path': None,
+        'error': None,
+    }
+    status.update(fields)
+    return status
+
+
+def answered(**fields):
+    """The same, as the poller passes it on: BLACS was reached."""
+    return dict(snapshot(**fields), reachable=True)
+
+
+class IndicatorStateTests(unittest.TestCase):
+    def test_a_blacs_asking_for_work_is_shown_as_requesting(self):
+        state, tooltip = blacs_status_display(
+            answered(requesting_shots=True, status='Idle')
+        )
+        self.assertEqual(state, 'requesting')
+        self.assertIn('requesting shots', tooltip)
+
+    def test_nothing_heard_from_blacs_yet_is_shown_as_checking(self):
+        state, tooltip = blacs_status_display(None)
+        self.assertEqual(state, 'checking')
+        self.assertIn('Checking', tooltip)
+
+    def test_a_blacs_that_did_not_answer_is_shown_as_unreachable(self):
+        state, tooltip = blacs_status_display(
+            {'reachable': False, 'reason': 'Timed out waiting for BLACS'}
+        )
+        self.assertEqual(state, 'unreachable')
+        self.assertIn('not responding', tooltip)
+        self.assertIn(
+            'Timed out waiting for BLACS',
+            tooltip,
+            'why runmanager could not reach BLACS is worth reading',
+        )
+
+    def test_a_blacs_that_is_up_but_not_asking_is_shown_as_locally_disabled(self):
+        state, tooltip = blacs_status_display(
+            answered(requesting_shots=False, status='Not requesting shots')
+        )
+        self.assertEqual(state, 'disabled')
+        self.assertIn('not requesting shots', tooltip)
+
+    def test_a_blacs_running_a_shot_names_the_shot(self):
+        state, tooltip = blacs_status_display(
+            answered(
+                requesting_shots=True,
+                status='Running (program time: 0.100s)...',
+                shot_id='shot-1',
+                shot_path='/data/2026/shot_a.h5',
+            )
+        )
+        self.assertEqual(state, 'running')
+        self.assertIn('shot_a.h5', tooltip)
+        self.assertIn('/data/2026/shot_a.h5', tooltip, 'the whole path is available')
+        self.assertIn('shot-1', tooltip, 'which queued row this is')
+        self.assertIn('Running (program time: 0.100s)...', tooltip)
+
+    def test_a_shot_blacs_ran_on_its_own_is_told_apart_from_queue_work(self):
+        # BLACS runs its local override shot when this runmanager has nothing
+        # for it. That shot is in nobody's queue and has no id, and saying so
+        # is how a user sees why their queue is not moving.
+        state, tooltip = blacs_status_display(
+            answered(
+                requesting_shots=True,
+                status='Running (program time: 0.100s)...',
+                shot_path='/data/override.h5',
+            )
+        )
+        self.assertEqual(state, 'running')
+        self.assertIn('override.h5', tooltip)
+        self.assertIn('local override', tooltip)
+
+    def test_a_shot_path_from_another_machine_still_names_the_shot(self):
+        # BLACS sends the path shared-drive-agnostic, so a BLACS on Windows
+        # and a runmanager on anything else still agree which file it is.
+        state, tooltip = blacs_status_display(
+            answered(requesting_shots=True, shot_path='Z:\\2026\\shot_a.h5')
+        )
+        self.assertEqual(state, 'running')
+        self.assertIn('BLACS is running shot_a.h5', tooltip)
+        self.assertIn(
+            os.path.join('2026', 'shot_a.h5'),
+            tooltip,
+            'and shows the path the way this machine writes it',
+        )
+
+    def test_the_reason_blacs_stopped_reads_as_an_error(self):
+        state, tooltip = blacs_status_display(
+            answered(
+                requesting_shots=False,
+                status='Device(s) in error state\nRequests stopped',
+                error='Device(s) in error state',
+            )
+        )
+        self.assertEqual(state, 'error')
+        self.assertIn(
+            'Device(s) in error state',
+            tooltip,
+            'the reason is readable here rather than only at the apparatus',
+        )
+
+
+class FakeBlacs(object):
+    """A BLACS server that answers whatever it has been told to answer."""
+
+    def __init__(self, *answers):
+        self.answers = list(answers)
+        self.requests = []
+
+    def request(self, command, *args, **kwargs):
+        self.requests.append(command)
+        answer = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    def get_status(self):
+        return self.request('get_status')
+
+
+class PollingTests(unittest.TestCase):
+    def poll_all(self, *answers):
+        """Poll a BLACS giving each answer in turn, and collect the states."""
+        blacs = FakeBlacs(*answers)
+        reported = []
+        monitor = BlacsStatusMonitor(on_status=reported.append, client=blacs)
+        for _ in answers:
+            monitor.poll()
+        return blacs, [blacs_status_display(status)[0] for status in reported]
+
+    def test_polling_reports_what_blacs_answered(self):
+        _, states = self.poll_all(
+            {
+                'requesting_shots': True,
+                'status': 'Idle',
+                'shot_id': None,
+                'shot_path': None,
+                'error': None,
+            }
+        )
+        self.assertEqual(states, ['requesting'])
+
+    def test_a_blacs_that_comes_back_is_shown_as_back(self):
+        # Losing BLACS is not final: polling goes on, and the indicator
+        # follows it back without anything being restarted or reconnected.
+        _, states = self.poll_all(
+            TimeoutError('BLACS did not answer'),
+            snapshot(requesting_shots=True),
+        )
+        self.assertEqual(states, ['unreachable', 'requesting'])
+
+    def test_the_indicator_follows_a_shot_from_running_to_failed(self):
+        _, states = self.poll_all(
+            snapshot(requesting_shots=True),
+            snapshot(
+                requesting_shots=True,
+                status='Running (program time: 0.100s)...',
+                shot_id='shot-1',
+                shot_path='/data/shot_a.h5',
+            ),
+            snapshot(
+                requesting_shots=False,
+                status='Device(s) in error state\nRequests stopped',
+                error='Device(s) in error state',
+            ),
+        )
+        self.assertEqual(states, ['requesting', 'running', 'error'])
+
+    def test_polling_asks_blacs_for_nothing_but_its_status(self):
+        # Monitoring only: recovering the apparatus stays with the operator
+        # standing at it, so runmanager never sends BLACS anything else.
+        blacs, _ = self.poll_all(snapshot(), snapshot(requesting_shots=True))
+        self.assertEqual(set(blacs.requests), {'get_status'})
+
+    def test_an_answer_that_is_not_a_status_is_not_shown_as_one(self):
+        # A BLACS old enough not to know the question answers its old direct
+        # submission refusal instead, and a server that failed hands back the
+        # exception. Neither says anything about the apparatus.
+        _, states = self.poll_all(
+            'Error: BLACS no longer accepts direct shot submissions\n'
+        )
+        self.assertEqual(states, ['unreachable'])
+        _, states = self.poll_all(RuntimeError('BLACS server returned an exception'))
+        self.assertEqual(states, ['unreachable'])
+
+    def test_an_answer_arriving_after_shutdown_is_not_reported(self):
+        # Runmanager closing waits for this thread, and reporting goes to the
+        # GUI thread doing the waiting. An answer that arrives once shutdown
+        # has begun is dropped rather than sent into a window being torn down.
+        blacs = FakeBlacs(snapshot(requesting_shots=True))
+        reported = []
+        monitor = BlacsStatusMonitor(on_status=reported.append, client=blacs)
+
+        monitor.shutdown()
+        monitor.poll()
+
+        self.assertEqual(reported, [])
+
+    def test_polling_goes_on_until_it_is_shut_down(self):
+        blacs = FakeBlacs(snapshot(requesting_shots=True))
+        reported = []
+        monitor = BlacsStatusMonitor(
+            on_status=reported.append, client=blacs, interval=0
+        )
+        self.addCleanup(monitor.shutdown)
+
+        monitor.start()
+        for _ in range(50):
+            if len(reported) > 2:
+                break
+            time.sleep(0.02)
+        monitor.shutdown()
+        polls_before = len(reported)
+        time.sleep(0.05)
+
+        self.assertGreater(polls_before, 2, 'the loop keeps asking')
+        self.assertEqual(len(reported), polls_before, 'and stops when told to')
+
+
+class ClientTests(unittest.TestCase):
+    def test_the_client_asks_the_configured_blacs_in_the_shape_it_answers(self):
+        # BLACS dispatches a [command, args, kwargs] request the same way
+        # runmanager's own server does. That shape, and the configured host
+        # and port, are the whole contract between the two.
+        client = Client(host='blacs-pc', port=4242, timeout=3)
+        sent = []
+        client.get = lambda port, host, data=None, timeout=None: sent.append(
+            (port, host, data, timeout)
+        )
+
+        client.get_status()
+        client.say_hello()
+
+        self.assertEqual(
+            sent,
+            [
+                (4242, 'blacs-pc', ['get_status', (), {}], 3),
+                (4242, 'blacs-pc', ['hello', (), {}], 3),
+            ],
+        )
+
+
+class FakeLabel(object):
+    def __init__(self):
+        self.tooltip = ''
+        self.pixmaps = []
+
+    def setPixmap(self, pixmap):
+        self.pixmaps.append(pixmap)
+
+    def setToolTip(self, tooltip):
+        self.tooltip = str(tooltip)
+
+
+class FakeCheckBox(object):
+    def __init__(self, checked):
+        self.checked = checked
+
+    def isChecked(self):
+        return self.checked
+
+
+class FakeUi(object):
+    def __init__(self, run_shots_checked):
+        self.blacs_status_indicator = FakeLabel()
+        self.checkBox_run_shots = FakeCheckBox(run_shots_checked)
+
+
+class FakeRunManager(object):
+    """Runmanager's indicator, over only the surface it uses."""
+
+    update_blacs_status = RunManager.update_blacs_status
+
+    def __init__(self, run_shots_checked=True):
+        self.ui = FakeUi(run_shots_checked)
+
+
+class DestinationControlTests(unittest.TestCase):
+    """The BLACS destination checkbox, and the status light beside it."""
+
+    def setUp(self):
+        main_ui = os.path.join(os.path.dirname(runmanager.__file__), 'main.ui')
+        self.layouts = ElementTree.parse(main_ui).getroot().iter('layout')
+        self.checkbox = None
+        for widget in ElementTree.parse(main_ui).getroot().iter('widget'):
+            if widget.get('name') == 'checkBox_run_shots':
+                self.checkbox = widget
+
+    def property_of_checkbox(self, name):
+        for prop in self.checkbox.iter('property'):
+            if prop.get('name') == name:
+                return prop.find('string').text
+        return None
+
+    def test_the_destination_control_is_labelled_blacs(self):
+        self.assertEqual(self.property_of_checkbox('text'), 'BLACS')
+
+    def test_the_destination_control_keeps_the_name_other_programs_use(self):
+        # Only the label changed. What it means, what it is called, and the
+        # remote methods that read and set it are a public interface.
+        self.assertIsNotNone(self.checkbox, 'checkBox_run_shots is the object name')
+        self.assertTrue(hasattr(runmanager.remote.Client, 'get_run_shots'))
+        self.assertTrue(hasattr(runmanager.remote.Client, 'set_run_shots'))
+        self.assertTrue(hasattr(RemoteServer, 'handle_get_run_shots'))
+        self.assertTrue(hasattr(RemoteServer, 'handle_set_run_shots'))
+
+    def test_the_tooltip_says_what_the_checkbox_is_not(self):
+        tooltip = self.property_of_checkbox('toolTip')
+        self.assertIn('queue', tooltip, 'what ticking it does')
+        for not_this in ['Pause queue', 'Request shots', 'Abort']:
+            self.assertIn(
+                not_this, tooltip, 'the controls it is not must be named'
+            )
+
+    def test_the_interface_still_loads_with_the_status_light_in_it(self):
+        # The indicator went into a layout of its own beside the checkbox, and
+        # a main.ui that will not load is a runmanager that will not start --
+        # which reading the file as text cannot tell us. Load it the way
+        # RunManager.__init__ does, and check the widgets both halves of this
+        # feature reach for by name are still there: AnalysisSubmission is
+        # given verticalLayout_2, and Engage reads the two checkboxes.
+        if QApplication.instance() is None:
+            self.__class__._qapplication = QApplication([])
+        loader = UiLoader()
+        loader.registerCustomWidget(FingerTabWidget)
+        loader.registerCustomWidget(TreeView)
+        ui = loader.load(
+            os.path.join(os.path.dirname(runmanager.__file__), 'main.ui')
+        )
+
+        self.assertIsNotNone(ui.findChild(QLayout, 'verticalLayout_2'))
+        checkbox = ui.findChild(QCheckBox, 'checkBox_run_shots')
+        self.assertEqual(checkbox.text(), 'BLACS')
+        self.assertTrue(checkbox.isChecked(), 'engaged shots are queued by default')
+        self.assertIsNotNone(ui.findChild(QCheckBox, 'checkBox_view_shots'))
+        indicator = ui.findChild(QLabel, 'blacs_status_indicator')
+        self.assertIsNotNone(indicator)
+        self.assertFalse(
+            indicator.pixmap().isNull(), 'the light shows something before the first poll'
+        )
+
+    def test_the_status_light_sits_beside_the_destination_control(self):
+        together = [
+            {
+                widget.get('name')
+                for item in layout.findall('item')
+                for widget in item.findall('widget')
+            }
+            for layout in self.layouts
+        ]
+        self.assertTrue(
+            any(
+                {'checkBox_run_shots', 'blacs_status_indicator'} <= names
+                for names in together
+            ),
+            'the indicator belongs beside the checkbox, not in a new dock',
+        )
+
+    def test_the_status_light_says_the_same_whatever_the_checkbox_says(self):
+        # Watching BLACS is not a consequence of sending it shots: an operator
+        # who has unticked the destination still needs to see what the
+        # apparatus is doing with the work already queued.
+        status = answered(
+            requesting_shots=True,
+            status='Running (program time: 0.100s)...',
+            shot_id='shot-1',
+            shot_path='/data/shot_a.h5',
+        )
+        shown = {}
+        for checked in [True, False]:
+            app = FakeRunManager(run_shots_checked=checked)
+            app.update_blacs_status(status)
+            self.assertTrue(
+                app.ui.blacs_status_indicator.pixmaps, 'the light is always set'
+            )
+            shown[checked] = app.ui.blacs_status_indicator.tooltip
+
+        self.assertIn('shot_a.h5', shown[False])
+        self.assertEqual(shown[True], shown[False])
+
+    def test_the_status_light_says_it_is_checking_before_blacs_answers(self):
+        app = FakeRunManager()
+        app.update_blacs_status(None)
+        self.assertIn('Checking', app.ui.blacs_status_indicator.tooltip)

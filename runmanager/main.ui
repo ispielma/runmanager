@@ -255,17 +255,55 @@ subprocess</string>
           <enum>QLayout::SetDefaultConstraint</enum>
          </property>
          <item>
-          <widget class="QCheckBox" name="checkBox_run_shots">
-           <property name="toolTip">
-            <string>Send the shot files to BLACS after compilation</string>
-           </property>
-           <property name="text">
-            <string>Run shot(s)</string>
-           </property>
-           <property name="checked">
-            <bool>true</bool>
-           </property>
-          </widget>
+          <layout class="QHBoxLayout" name="horizontalLayout_blacs">
+           <item>
+            <widget class="QCheckBox" name="checkBox_run_shots">
+             <property name="toolTip">
+              <string>Put the shots compiled by Engage into the runmanager queue, for BLACS to run.
+Unticked, they are compiled and left alone.
+
+This is not Pause queue, which withholds shots already in the queue;
+not BLACS's Request shots, which is what lets BLACS run anything at all;
+and not Abort, which stops the shot BLACS is running.</string>
+             </property>
+             <property name="text">
+              <string>BLACS</string>
+             </property>
+             <property name="checked">
+              <bool>true</bool>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QLabel" name="blacs_status_indicator">
+             <property name="toolTip">
+              <string>Checking BLACS...</string>
+             </property>
+             <property name="text">
+              <string/>
+             </property>
+             <property name="pixmap">
+              <pixmap>:/qtutils/fugue/hourglass.png</pixmap>
+             </property>
+             <property name="scaledContents">
+              <bool>false</bool>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <spacer name="horizontalSpacer_blacs">
+             <property name="orientation">
+              <enum>Qt::Horizontal</enum>
+             </property>
+             <property name="sizeHint" stdset="0">
+              <size>
+               <width>0</width>
+               <height>0</height>
+              </size>
+             </property>
+            </spacer>
+           </item>
+          </layout>
          </item>
          <item>
           <widget class="QCheckBox" name="checkBox_view_shots">

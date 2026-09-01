@@ -72,6 +72,11 @@ from zprocess import raise_exception_in_thread
 import runmanager
 import runmanager.remote
 from runmanager.analysis_submission import AnalysisSubmission
+from runmanager.blacs_status import (
+    STATUS_ICONS,
+    BlacsStatusMonitor,
+    blacs_status_display,
+)
 from runmanager.queueing import (
     COMPILE_MODE_EAGER,
     COMPILE_MODE_LAZY,
@@ -1787,6 +1792,15 @@ class RunManager(LabscriptApplication):
         self.setup_queue_tab()
         run_view_layout = self.ui.findChild(QtWidgets.QLayout, 'verticalLayout_2')
         self.analysis_submission = AnalysisSubmission(self, run_view_layout)
+        # Watching BLACS runs on its own thread, independently of the shot
+        # exchange and of the destination checkbox it reports beside, so that
+        # the indicator is live whether or not shots are being queued and a
+        # BLACS that has stopped answering cannot hold up this GUI:
+        self.blacs_status_monitor = BlacsStatusMonitor(
+            on_status=self.update_blacs_status
+        )
+        self.update_blacs_status(None)
+        self.blacs_status_monitor.start()
         self.connect_signals()
 
         # The last location from which a labscript file was selected, defaults
@@ -2121,6 +2135,7 @@ class RunManager(LabscriptApplication):
             if reply == QtWidgets.QMessageBox.Yes:
                 self.save_configuration(self.last_save_config_file)
         self.analysis_submission.shutdown()
+        self.blacs_status_monitor.shutdown()
         self.queue_manager.shutdown()
         self.to_child.put(['quit', None])
         self.output_box.shutdown()
@@ -2155,6 +2170,20 @@ class RunManager(LabscriptApplication):
 
     def on_queue_paused_changed(self, checked):
         self.queue_manager.set_paused(checked)
+
+    @inmain_decorator()
+    def update_blacs_status(self, status):
+        """Show what BLACS last said it was doing, beside the BLACS checkbox.
+
+        Deliberately independent of that checkbox: what the apparatus is doing
+        with the work already queued is worth seeing whether or not newly
+        engaged shots are being added to it. Informational only -- there is
+        nothing here to enable BLACS, clear what stopped it, or abort a shot;
+        those stay with the operator standing at the apparatus."""
+        state, tooltip = blacs_status_display(status)
+        icon = QtGui.QIcon(STATUS_ICONS.get(state, ':/qtutils/fugue/exclamation-red'))
+        self.ui.blacs_status_indicator.setPixmap(icon.pixmap(QtCore.QSize(16, 16)))
+        self.ui.blacs_status_indicator.setToolTip(tooltip)
 
     @inmain_decorator()
     def refresh_queue_tab(self):
@@ -2412,7 +2441,7 @@ class RunManager(LabscriptApplication):
             send_to_runviewer = self.ui.checkBox_view_shots.isChecked()
             if not send_to_BLACS and not send_to_runviewer:
                 self.output_box.output(
-                    "Warning: neither 'Run shot(s)' nor 'View shot(s)' is selected.\n\n",
+                    "Warning: neither 'BLACS' nor 'View shot(s)' is selected.\n\n",
                     red=True,
                 )
                 return
@@ -2421,7 +2450,7 @@ class RunManager(LabscriptApplication):
                 queue_append_filepath = self.get_queue_append_filepath()
                 if not send_to_BLACS:
                     self.output_box.output(
-                        "Warning: alternate queue submission modes require 'Run shot(s)' to be selected.\n\n",
+                        "Warning: alternate queue submission modes require 'BLACS' to be selected.\n\n",
                         red=True,
                     )
                     return

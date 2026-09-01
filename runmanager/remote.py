@@ -92,11 +92,18 @@ class Client(ZMQClient):
         return self.request('abort')
 
     def get_run_shots(self):
-        """Get boolean state of 'Run shot(s)' checkbox"""
+        """Get boolean state of the 'BLACS' checkbox.
+
+        Whether shots compiled by Engage are put into the runmanager queue for
+        BLACS to run. The method name is from when that checkbox was labelled
+        'Run shot(s)'; only the label changed."""
         return self.request('get_run_shots')
 
     def set_run_shots(self, value):
-        """Set boolean state of 'Run shot(s)' checkbox"""
+        """Set boolean state of the 'BLACS' checkbox.
+
+        This decides only where newly engaged shots go. It is not the queue's
+        pause, and it is not BLACS's own gate on running anything."""
         return self.request('set_run_shots', value)
 
     def get_view_shots(self):
