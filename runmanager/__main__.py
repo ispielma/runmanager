@@ -85,6 +85,7 @@ from runmanager.blacs_status import (
 from runmanager.queueing import (
     COMPILE_MODE_EAGER,
     COMPILE_MODE_LAZY,
+    CURRENT_SHOT_STYLES,
     EMPTY_QUEUE_DEFAULT_LABSCRIPT,
     EMPTY_QUEUE_NOTHING,
     PROVIDER_NONE,
@@ -93,6 +94,7 @@ from runmanager.queueing import (
     QueueManager,
     RunmanagerQueueWidget,
     SHOT_OUTCOME_STATUSES,
+    current_shot_display,
 )
 
 from qtutils import (
@@ -2063,17 +2065,21 @@ class RunManager(LabscriptApplication):
         self.queue_widget.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
         )
-        self.queue_last_sent_label = QtWidgets.QLabel(self.tab_queue)
-        self.queue_last_sent_label.setSizePolicy(
+        # The shot BLACS has, in a slot of its own above the queue rather than
+        # as a coloured row inside it. That row is always the head, so its
+        # position tells an operator nothing; what helps is one place to look,
+        # and words rather than only a colour. The slot is here whether or not
+        # BLACS has anything, so the queue below it never shifts.
+        self.queue_current_shot_label = QtWidgets.QLabel(self.tab_queue)
+        self.queue_current_shot_label.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
         )
-        self.queue_last_sent_label.setAlignment(
+        self.queue_current_shot_label.setAlignment(
             QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
         )
-        self.queue_last_sent_label.setWordWrap(True)
         self.verticalLayout_queue_tab.addLayout(controls_layout)
+        self.verticalLayout_queue_tab.addWidget(self.queue_current_shot_label)
         self.verticalLayout_queue_tab.addWidget(self.queue_widget)
-        self.verticalLayout_queue_tab.addWidget(self.queue_last_sent_label)
         self.ui.tabWidget.insertTab(0, self.tab_queue, 'Queue')
         queue_tab_index = self.ui.tabWidget.indexOf(self.tab_queue)
         self.ui.tabWidget.tabBar().setMovable(False, index=queue_tab_index)
@@ -2249,19 +2255,15 @@ class RunManager(LabscriptApplication):
     @inmain_decorator()
     def refresh_queue_tab(self):
         controller = self.queue_manager.controller
-        self.queue_widget.set_queue_paths(controller.get_queue_display_items())
-        state = controller.get_queue_state()
-        last_sent_from_queue = state['last_sent_from_queue']
-        if last_sent_from_queue:
-            text = 'Last sent from queue: %s' % last_sent_from_queue
-            tooltip = last_sent_from_queue
-        else:
-            text = 'Last sent from queue: nothing'
-            tooltip = ''
-        # A shot BLACS is running is not named here: it keeps its place in the
-        # queue, where its row is coloured to show it is under way.
-        self.queue_last_sent_label.setText(text)
-        self.queue_last_sent_label.setToolTip(tooltip)
+        rows = controller.get_queue_display_items()
+        self.queue_widget.set_queue_paths(rows)
+        # Only the head can be with BLACS: it is the row that gets offered, and
+        # an outcome either retires it or reddens it where it is.
+        head = rows[0] if rows and rows[0]['state'] else None
+        text, tooltip, state = current_shot_display(head)
+        self.queue_current_shot_label.setText(text)
+        self.queue_current_shot_label.setToolTip(tooltip)
+        self.queue_current_shot_label.setStyleSheet(CURRENT_SHOT_STYLES[state])
 
     def on_output_popout_button_clicked(self):
         if self.output_box_is_popped_out:

@@ -18,14 +18,17 @@ from qtutils.qt.QtWidgets import QApplication
 from runmanager.__main__ import RunManager
 from runmanager.queueing import (
     COMPILE_MODE_LAZY,
+    CURRENT_SHOT_STYLES,
     EMPTY_QUEUE_DEFAULT_LABSCRIPT,
     FAILED_ROW_BACKGROUND,
     PROVIDER_NONE,
     PROVIDER_SHOT,
     RUNNING_ROW_BACKGROUND,
+    TINTED_ROW_FOREGROUND,
     QueueController,
     QueueManager,
     RunmanagerQueueWidget,
+    current_shot_display,
 )
 
 
@@ -1126,6 +1129,66 @@ def row_backgrounds(widget, row):
     ]
 
 
+class CurrentShotSlotTests(unittest.TestCase):
+    """The slot above the queue, holding whichever shot BLACS has.
+
+    A stable place to look, saying the state in words. The row it names keeps a
+    tint of the same colour, but the tint answers a different question -- which
+    row Delete will refuse -- and a colour on its own says nothing to a
+    colour-blind operator.
+    """
+
+    def head(self, controller):
+        rows = controller.get_queue_display_items()
+        return rows[0] if rows and rows[0]['state'] else None
+
+    def test_it_says_so_when_blacs_has_nothing(self):
+        # Empty is a state, not a blank: a slot that disappears is one nobody
+        # keeps looking at, and the queue below would shift when it returned.
+        text, tooltip, state = current_shot_display(None)
+        self.assertEqual(state, '')
+        self.assertIn('No shot', text)
+
+    def test_a_waiting_queue_puts_nothing_in_the_slot(self):
+        controller = QueueController()
+        controller.enqueue([queued_shot('/tmp/shot_a.h5')])
+        self.assertIsNone(self.head(controller), 'nothing has been offered yet')
+
+    def test_it_names_the_shot_blacs_is_running(self):
+        controller = QueueController()
+        controller.enqueue([queued_shot('/tmp/shot_a.h5')])
+        controller.offer_next()
+
+        text, tooltip, state = current_shot_display(self.head(controller))
+
+        self.assertEqual(state, 'running')
+        self.assertIn('shot_a.h5', text)
+        self.assertIn('Running', text)
+        self.assertIn('cannot be deleted', tooltip, 'why Delete will refuse it')
+
+    def test_it_says_why_a_failed_shot_failed_on_its_face(self):
+        # On the face of it and not only in the tooltip: a queue that is not
+        # moving because the apparatus stopped is what a user most needs to see
+        # without hunting for it.
+        controller = QueueController()
+        controller.enqueue([queued_shot('/tmp/shot_a.h5')])
+        offered = controller.offer_next()
+        controller.shot_finished(
+            offered['shot_id'], 'failed', 'Device(s) in error state'
+        )
+
+        text, tooltip, state = current_shot_display(self.head(controller))
+
+        self.assertEqual(state, 'failed')
+        self.assertIn('shot_a.h5', text)
+        self.assertIn('Device(s) in error state', text)
+        self.assertIn('Device(s) in error state', tooltip)
+
+    def test_every_state_has_a_style_to_show_it_in(self):
+        for state in ('', 'running', 'failed'):
+            self.assertIn(state, CURRENT_SHOT_STYLES)
+
+
 class QueueDisplayTests(unittest.TestCase):
     """What a row's state looks like in the queue: green, red, or nothing.
 
@@ -1149,6 +1212,35 @@ class QueueDisplayTests(unittest.TestCase):
             self.assertEqual(colour, RUNNING_ROW_BACKGROUND)
             self.assertGreater(colour.green(), max(colour.red(), colour.blue()))
         self.assertTrue(all(brush is None for brush in row_backgrounds(widget, 1)))
+
+    def test_a_tinted_row_names_its_text_colour_too(self):
+        # A background alone leaves the theme's own text colour on it. Both
+        # fills are pale, so on a dark theme that is near-white text on
+        # near-white -- the row became unreadable exactly when it mattered.
+        controller = QueueController()
+        controller.enqueue(
+            [queued_shot('/tmp/shot_a.h5'), queued_shot('/tmp/shot_b.h5')]
+        )
+        controller.offer_next()
+        widget = make_queue_widget()
+        widget.set_queue_paths(controller.get_queue_display_items())
+
+        model = widget.queue_model
+        for column in range(model.columnCount()):
+            item = model.item(0, column)
+            self.assertEqual(item.foreground().color(), TINTED_ROW_FOREGROUND)
+            self.assertGreater(
+                abs(
+                    item.foreground().color().lightness()
+                    - item.background().color().lightness()
+                ),
+                100,
+                'the text has to stand off the fill it sits on',
+            )
+        self.assertIsNone(
+            model.item(1, 0).data(Qt.ForegroundRole),
+            'an untinted row is left to the theme',
+        )
 
     def test_failed_row_is_shown_red_with_its_reason_in_the_tooltip(self):
         controller = QueueController()

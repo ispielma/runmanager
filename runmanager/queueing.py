@@ -51,6 +51,51 @@ SHOT_OUTCOME_STATUSES = ('completed', 'aborted', 'failed', 'rejected')
 RUNNING_ROW_BACKGROUND = QtGui.QColor('#ccffcc')
 FAILED_ROW_BACKGROUND = QtGui.QColor('#ffcccc')
 ROW_BACKGROUNDS = {'running': RUNNING_ROW_BACKGROUND, 'failed': FAILED_ROW_BACKGROUND}
+# Set with either of them, and not left to the theme. Both fills are pale, so
+# on a dark theme the palette's own near-white text sits on them unreadably;
+# naming the text colour alongside the fill is what keeps the pair legible
+# whichever theme is in use.
+TINTED_ROW_FOREGROUND = QtGui.QColor('#202020')
+# The slot above the queue, holding whichever shot BLACS has. Its position is
+# fixed and it is always there, empty or not, so that an operator looks in one
+# place rather than hunting a coloured row -- and it says the state in words,
+# because a colour alone tells a colour-blind operator nothing. The row in the
+# table keeps a tint of the same colour, which answers a different question:
+# which row Delete will refuse to remove.
+CURRENT_SHOT_STYLES = {
+    '': 'border: 1px solid palette(dark); border-radius: 3px; padding: 3px;',
+    'running': 'border: 1px solid palette(dark); border-radius: 3px; '
+               'padding: 3px; background-color: %s; color: %s;'
+               % (RUNNING_ROW_BACKGROUND.name(), TINTED_ROW_FOREGROUND.name()),
+    'failed': 'border: 1px solid palette(dark); border-radius: 3px; '
+              'padding: 3px; background-color: %s; color: %s;'
+              % (FAILED_ROW_BACKGROUND.name(), TINTED_ROW_FOREGROUND.name()),
+}
+
+
+def current_shot_display(row):
+    """Return the ``(text, tooltip, state)`` for the slot above the queue.
+
+    ``row`` is the head display item when BLACS has that shot, or None when it
+    has none of this runmanager's work. Empty is a normal state and says so
+    rather than going blank, since a slot that vanishes is one an operator
+    stops looking at."""
+    if row is None:
+        return 'No shot with BLACS', '', ''
+    name = os.path.basename(row['path'])
+    if row['state'] == 'failed':
+        reason = row['message'] or 'did not run'
+        return (
+            'Failed: %s - %s' % (name, reason),
+            '%s\n%s\nStays here until it is retried or deleted.'
+            % (row['path'], reason),
+            'failed',
+        )
+    return (
+        'Running in BLACS: %s' % name,
+        '%s\nBLACS is executing this shot. It cannot be deleted.' % row['path'],
+        'running',
+    )
 # What a shot record says about this session's attempt at it rather than about
 # the shot: assigned by _normalise_item, and left out of a saved queue:
 SESSION_ONLY_FIELDS = ('compiling', 'state', 'message', 'reclaimed')
@@ -102,6 +147,7 @@ class RunmanagerQueueWidget(ShotQueueWidget):
                 background = ROW_BACKGROUNDS.get(path_info.get('state'))
                 if background is not None:
                     row_info['background'] = background
+                    row_info['foreground'] = TINTED_ROW_FOREGROUND
                 row_infos.append(row_info)
             else:
                 row_infos.append(path_info)
@@ -290,6 +336,9 @@ class QueueController(object):
                         'mode': mode_label,
                         'tooltip': '%s\n%s' % (path, message) if message else path,
                         'state': item['state'],
+                        # Separately from the tooltip it is folded into, because
+                        # the slot above the queue says the reason on its face:
+                        'message': message,
                     }
                 )
             return items
