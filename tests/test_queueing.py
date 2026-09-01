@@ -68,6 +68,38 @@ class QueueIdentityTests(unittest.TestCase):
         controller.shot_finished(offered['shot_id'], 'failed', 'Device error')
         self.assertEqual(controller.export_state(), before)
 
+    def test_a_restored_record_without_an_id_is_given_one_and_keeps_the_rest(self):
+        # A queue saved before shot ids existed still has to open, and its
+        # shots still have to be offerable: an id is minted on the way in, is
+        # saved with the row from then on, and nothing else is lost with it.
+        legacy = {
+            'path': '/tmp/shot_a.h5',
+            'labscript_file': '/tmp/experiment.py',
+            'compile_mode': 'lazy',
+            'compiled': True,
+            'frozen_globals': {'x': '1', 'y': 'linspace(0, 1, 3)'},
+            'run_no': 2,
+            'n_runs': 5,
+        }
+        controller = QueueController()
+        controller.restore_state({'items': [legacy]})
+
+        offered = controller.offer_next()
+
+        self.assertTrue(offered['shot_id'], 'a restored shot can be offered')
+        self.assertEqual(offered['path'], os.path.abspath('/tmp/shot_a.h5'))
+        self.assertEqual(
+            offered['labscript_file'], os.path.abspath('/tmp/experiment.py')
+        )
+        self.assertEqual(offered['compile_mode'], 'lazy')
+        self.assertEqual(offered['frozen_globals'], legacy['frozen_globals'])
+        self.assertEqual((offered['run_no'], offered['n_runs']), (2, 5))
+        self.assertEqual(
+            controller.export_state()['items'][0]['shot_id'],
+            offered['shot_id'],
+            'and the id it was given is stable from then on',
+        )
+
     def test_shot_id_survives_save_and_restore(self):
         controller = QueueController()
         controller.enqueue([queued_shot('/tmp/shot_a.h5')])
@@ -161,11 +193,20 @@ class QueueOfferTests(unittest.TestCase):
         self.assertEqual(rows[1]['state'], '')
 
 
-    def test_running_row_is_not_offered_again(self):
+    def test_row_still_marked_running_is_offered_again_under_the_same_id(self):
+        # BLACS asks for a shot only when it is idle, so a request that has no
+        # outcome for the running row proves the offer never reached it. The
+        # row is handed out again rather than stranding the queue behind it.
         controller = QueueController()
         controller.enqueue([queued_shot('/tmp/shot_a.h5')])
-        self.assertIsNotNone(controller.offer_next())
-        self.assertIsNone(controller.offer_next())
+        offered = controller.offer_next()
+
+        reoffered = controller.offer_next()
+
+        self.assertEqual(reoffered['shot_id'], offered['shot_id'])
+        self.assertEqual(reoffered['path'], offered['path'])
+        self.assertTrue(reoffered['reclaimed'], 'and it says that it did so')
+        self.assertFalse(offered['reclaimed'], 'the first offer reclaimed nothing')
 
     def test_failed_row_is_offered_again_under_the_same_id(self):
         controller = QueueController()
@@ -284,6 +325,19 @@ class FakeAnalysisSubmission(object):
         self.submitted.append(path)
 
 
+class FakeOutputBox(object):
+    """What runmanager shows its user, which is where protocol trouble shows."""
+
+    def __init__(self):
+        self.lines = []
+
+    def output(self, text, red=False):
+        self.lines.append(text)
+
+    def said(self, *words):
+        return [line for line in self.lines if all(word in line for word in words)]
+
+
 class FakeRunManager(object):
     """Runmanager's own exchange, over only the surface of it that it uses.
 
@@ -302,11 +356,12 @@ class FakeRunManager(object):
     get_queue_append_filepath = RunManager.get_queue_append_filepath
 
     def __init__(self, default_shot_file=None):
+        self.output_box = FakeOutputBox()
         self.queue_manager = QueueManager(
             lambda item: None,
             lambda labscript_file, path: True,
             lambda path: None,
-            lambda text, red=False: None,
+            self.output_box.output,
             threading.Event(),
             lambda enabled: None,
         )
@@ -495,17 +550,19 @@ class DefaultShotTests(unittest.TestCase):
         self.assertEqual(self.rows(app), [])
         self.assertEqual(app.analysis_submission.submitted, [offered['path']])
 
-    def test_no_default_shot_is_produced_while_a_queued_shot_is_out(self):
+    def test_no_default_shot_is_produced_while_the_queue_holds_work(self):
         # The empty-queue policy is for a queue that is empty. A queue whose
-        # head went unoffered has work in flight rather than nothing to offer,
-        # so a default shot must not be made and stacked up behind it.
+        # head BLACS never confirmed has work to hand out rather than nothing
+        # to offer, so that row is offered again and no default shot is made to
+        # stack up behind it.
         app = self.make_runmanager(default_shot_file=self.default_shot)
         app.queue_manager.enqueue([queued_shot(os.path.join(self.directory, 'shot_a.h5'))])
-        app.offer_shot()
+        offered = app.offer_shot()
 
         response = app.offer_shot()
 
-        self.assertEqual(response['state'], PROVIDER_NONE)
+        self.assertEqual(response['state'], PROVIDER_SHOT)
+        self.assertEqual(response['shot_id'], offered['shot_id'])
         self.assertEqual(app.default_shots_taken, 0)
         self.assertEqual(
             [row['path'] for row in self.rows(app)],
@@ -533,6 +590,212 @@ class DefaultShotTests(unittest.TestCase):
         self.assertEqual(
             [row['path'] for row in restored.get_queue_display_items()], [engaged]
         )
+
+
+class ReplayTests(unittest.TestCase):
+    """A message that goes missing must cost a poll, not a shot or the queue.
+
+    Neither side of the exchange can tell a reply that was never sent from one
+    that was never received, so BLACS resends: an outcome runmanager has not
+    taken rides on the next exchange, and a request whose offer never arrived
+    is simply made again. Runmanager has to be able to take either twice.
+    """
+
+    def setUp(self):
+        self.app = FakeRunManager()
+        self.addCleanup(self.app.queue_manager.shutdown)
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+
+    def enqueue(self, name):
+        path = os.path.join(self.directory, name)
+        self.app.queue_manager.enqueue([queued_shot(path)])
+        return path
+
+    def rows(self):
+        return self.app.queue_manager.controller.get_queue_display_items()
+
+    def test_a_lost_offer_reply_leaves_the_same_row_available(self):
+        # BLACS never saw the reply, so it asks again -- with no outcome,
+        # because it never ran anything. It is idle and asking, so it cannot be
+        # running the row, whatever the row still says.
+        self.enqueue('shot_a.h5')
+        offered = self.app.queue_exchange(request_shot=True)
+
+        reoffered = self.app.queue_exchange(request_shot=True)
+
+        self.assertEqual(reoffered['state'], PROVIDER_SHOT)
+        self.assertEqual(reoffered['shot_id'], offered['shot_id'])
+        self.assertEqual(reoffered['path'], offered['path'])
+        self.assertEqual(
+            [row['state'] for row in self.rows()],
+            ['running'],
+            'one row, still the one BLACS is being asked to run',
+        )
+        self.assertTrue(
+            self.app.output_box.said('shot_a.h5', 'again'),
+            'a re-offer the operator would otherwise never see is reported',
+        )
+
+    def test_a_completed_outcome_that_arrives_twice_is_analysed_once(self):
+        # BLACS lets go of an outcome only once runmanager has taken it, so a
+        # lost reply makes it send the same completed outcome again. Analysis
+        # follows the row that was retired, so the repeat finds nothing to do.
+        self.enqueue('shot_a.h5')
+        offered = self.app.queue_exchange(request_shot=True)
+        outcome = {
+            'shot_id': offered['shot_id'],
+            'status': 'completed',
+            'path': offered['path'],
+        }
+
+        self.app.queue_exchange(outcome=outcome, request_shot=False)
+        self.app.queue_exchange(outcome=outcome, request_shot=False)
+
+        self.assertEqual(self.rows(), [], 'the shot is finished with, once')
+        self.assertEqual(
+            self.app.analysis_submission.submitted,
+            [offered['path']],
+            'lyse is not given the same shot to analyse twice',
+        )
+
+    def test_a_repeated_outcome_cannot_reach_a_later_shot_of_the_same_file(self):
+        # The same filepath queued again is a different row with an id of its
+        # own -- the id names the row, not the file -- so a completed outcome
+        # resent for the first cannot retire the second in its place.
+        path = self.enqueue('shot_a.h5')
+        first = self.app.queue_exchange(request_shot=True)
+        outcome = {
+            'shot_id': first['shot_id'],
+            'status': 'completed',
+            'path': first['path'],
+        }
+        self.app.queue_exchange(outcome=outcome, request_shot=False)
+        self.enqueue('shot_a.h5')
+        second = self.app.queue_exchange(request_shot=True)
+        self.assertNotEqual(second['shot_id'], first['shot_id'])
+
+        self.app.queue_exchange(outcome=outcome, request_shot=False)
+
+        rows = self.rows()
+        self.assertEqual([row['path'] for row in rows], [path])
+        self.assertEqual(
+            rows[0]['state'], 'running', 'the shot BLACS is running is untouched'
+        )
+        self.assertEqual(
+            self.app.analysis_submission.submitted,
+            [first['path']],
+            'and it is not analysed on the strength of the first shot finishing',
+        )
+
+    def test_a_repeated_failed_outcome_keeps_one_red_row_and_one_reason(self):
+        # A failure is resent for the same reason a completion is. Recording it
+        # twice must not double the row, its reason, or what the operator is
+        # told: nothing about the shot has changed since the first time.
+        self.enqueue('shot_a.h5')
+        offered = self.app.queue_exchange(request_shot=True)
+        outcome = {
+            'shot_id': offered['shot_id'],
+            'status': 'failed',
+            'message': 'Device(s) in error state',
+        }
+
+        self.app.queue_exchange(outcome=outcome, request_shot=False)
+        self.app.queue_exchange(outcome=outcome, request_shot=False)
+
+        rows = self.rows()
+        self.assertEqual([row['state'] for row in rows], ['failed'])
+        self.assertEqual(rows[0]['tooltip'].count('Device(s) in error state'), 1)
+        self.assertEqual(
+            len(self.app.output_box.said('shot_a.h5', 'failed')),
+            1,
+            'one failure is reported once',
+        )
+
+    def test_a_retry_that_fails_the_same_way_is_still_a_second_failure(self):
+        # The other side of the same rule. An outcome sent twice for one
+        # attempt changes nothing, but an operator's retry that fails again for
+        # the very same reason is a new event, and must be reported: the row
+        # went back to running in between, which is what tells them apart.
+        self.enqueue('shot_a.h5')
+        outcome = {'status': 'failed', 'message': 'Device(s) in error state'}
+
+        for _ in range(2):
+            offered = self.app.queue_exchange(request_shot=True)
+            self.app.queue_exchange(
+                outcome=dict(outcome, shot_id=offered['shot_id']),
+                request_shot=False,
+            )
+
+        self.assertEqual(
+            len(self.app.output_box.said('shot_a.h5', 'failed')),
+            2,
+            'each attempt that failed is reported',
+        )
+
+
+def malformed_outcomes(shot_id):
+    return (
+        ('not a shot outcome at all', shot_id),
+        ('an empty one', {}),
+        ('one that names no shot', {'status': 'completed'}),
+        ('one with no status', {'shot_id': shot_id}),
+        (
+            'one with a status runmanager does not know',
+            {'shot_id': shot_id, 'status': 'partly'},
+        ),
+    )
+
+
+class MalformedOutcomeTests(unittest.TestCase):
+    """An outcome runmanager cannot read must not look like an outage.
+
+    An exception raised here reaches BLACS as an error it cannot tell apart
+    from never having reached runmanager, and BLACS holds an outcome until it
+    knows runmanager took it -- so it would send the same unreadable message
+    for ever. Refusing it, saying so, and answering the exchange normally is
+    what lets BLACS move on.
+    """
+
+    def make_runmanager(self):
+        app = FakeRunManager()
+        self.addCleanup(app.queue_manager.shutdown)
+        app.queue_manager.enqueue([queued_shot('/tmp/shot_a.h5')])
+        return app
+
+    def test_an_outcome_runmanager_cannot_read_is_refused_and_answered(self):
+        for description, outcome in malformed_outcomes('any-id'):
+            with self.subTest(outcome=description):
+                app = self.make_runmanager()
+                offered = app.queue_exchange(request_shot=True)
+
+                response = app.queue_exchange(outcome=outcome, request_shot=True)
+
+                self.assertEqual(
+                    response['state'],
+                    PROVIDER_SHOT,
+                    'a normal reply, so BLACS moves on rather than retrying it',
+                )
+                self.assertEqual(response['shot_id'], offered['shot_id'])
+                self.assertTrue(
+                    app.output_box.said('could not read'),
+                    'and the operator is told the protocol went wrong',
+                )
+
+    def test_an_outcome_runmanager_cannot_read_leaves_the_queue_alone(self):
+        for description, outcome in malformed_outcomes('any-id'):
+            with self.subTest(outcome=description):
+                app = self.make_runmanager()
+                offered = app.queue_exchange(request_shot=True)
+                # The one that could do real damage names a shot that exists:
+                if isinstance(outcome, dict) and 'shot_id' in outcome:
+                    outcome = dict(outcome, shot_id=offered['shot_id'])
+
+                app.queue_exchange(outcome=outcome, request_shot=False)
+
+                rows = app.queue_manager.controller.get_queue_display_items()
+                self.assertEqual([row['state'] for row in rows], ['running'])
+                self.assertEqual(rows[0]['tooltip'], rows[0]['path'])
 
 
 _qapplication = None
@@ -618,6 +881,101 @@ class QueueDisplayTests(unittest.TestCase):
         widget.set_queue_paths(controller.get_queue_display_items())
         self.assertEqual(widget.queue_model.rowCount(), 1)
         self.assertTrue(all(brush is None for brush in row_backgrounds(widget, 0)))
+
+
+class ExchangeFailureTests(unittest.TestCase):
+    """A fault on runmanager's side must not read to BLACS as an outage.
+
+    The outcome is applied before a shot is chosen, so an exchange that raises
+    while choosing has already taken BLACS's outcome. BLACS cannot tell a
+    raised error from never having reached runmanager, and holds an outcome
+    until it knows runmanager took it, so it would send that same outcome again
+    once a second, indefinitely, while showing runmanager as unavailable.
+    """
+
+    def make_runmanager(self):
+        app = FakeRunManager()
+        self.addCleanup(app.queue_manager.shutdown)
+        return app
+
+    def test_a_failure_choosing_a_shot_is_reported_and_answered(self):
+        app = self.make_runmanager()
+        app.queue_manager.enqueue([queued_shot('/tmp/shot_a.h5')])
+        offered = app.queue_exchange(request_shot=True)
+
+        def raise_instead(*args, **kwargs):
+            raise RuntimeError('the default labscript file has moved')
+
+        app.queue_manager.offer_next = raise_instead
+
+        response = app.queue_exchange(
+            outcome={'shot_id': offered['shot_id'], 'status': 'completed'},
+            request_shot=True,
+        )
+
+        self.assertEqual(
+            response['state'],
+            PROVIDER_NONE,
+            'a normal reply, so BLACS knows its outcome landed',
+        )
+        self.assertTrue(
+            app.output_box.said('could not offer a shot', 'moved'),
+            'and the operator is told what went wrong here',
+        )
+        self.assertEqual(
+            app.queue_manager.get_queue_state()['n_items'],
+            0,
+            'the outcome that came with the request was still applied',
+        )
+
+
+class LostRowTests(unittest.TestCase):
+    """A completed shot that matches no row must not vanish quietly.
+
+    Usually it is a lost reply being sent again, which should change nothing.
+    But a row can also go while BLACS is running it, and then a shot really did
+    run and nothing will analyse it. Runmanager cannot tell the two apart, so
+    it says what happened either way.
+    """
+
+    def test_a_completed_shot_with_no_row_is_reported_and_not_analysed(self):
+        app = FakeRunManager()
+        self.addCleanup(app.queue_manager.shutdown)
+        app.queue_manager.enqueue([queued_shot('/tmp/shot_a.h5')])
+        offered = app.queue_exchange(request_shot=True)
+        app.queue_manager.clear()
+
+        app.queue_exchange(
+            outcome={
+                'shot_id': offered['shot_id'],
+                'status': 'completed',
+                'path': '/tmp/shot_a.h5',
+            },
+            request_shot=False,
+        )
+
+        self.assertEqual(app.analysis_submission.submitted, [])
+        self.assertTrue(app.output_box.said(offered['shot_id'], 'not been sent'))
+
+    def test_a_path_runmanager_cannot_use_does_not_reach_analysis_as_it_came(self):
+        app = FakeRunManager()
+        self.addCleanup(app.queue_manager.shutdown)
+        app.queue_manager.enqueue([queued_shot('/tmp/shot_a.h5')])
+        offered = app.queue_exchange(request_shot=True)
+
+        app.queue_exchange(
+            outcome={
+                'shot_id': offered['shot_id'],
+                'status': 'completed',
+                'path': ['/tmp/shot_a.h5'],
+            },
+            request_shot=False,
+        )
+
+        self.assertTrue(
+            all(isinstance(path, str) for path in app.analysis_submission.submitted),
+            'lyse is given a path, whatever shape BLACS sent',
+        )
 
 
 if __name__ == '__main__':

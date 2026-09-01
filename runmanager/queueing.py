@@ -41,6 +41,9 @@ COMPILE_MODE_LAZY = 'lazy'
 PROVIDER_SHOT = 'shot'
 PROVIDER_PAUSED = 'paused'
 PROVIDER_NONE = 'none'
+# How BLACS may say a shot it was offered turned out. Every one but 'completed'
+# leaves the row at the head of the queue in red; see shot_finished():
+SHOT_OUTCOME_STATUSES = ('completed', 'aborted', 'failed', 'rejected')
 # The shot BLACS is executing keeps its place in the queue, and so does one it
 # could not run. Both are coloured rather than given a column of their own, so
 # that the queue reads as a list of outstanding work with one row marked as
@@ -50,7 +53,7 @@ FAILED_ROW_BACKGROUND = QtGui.QColor('#ffcccc')
 ROW_BACKGROUNDS = {'running': RUNNING_ROW_BACKGROUND, 'failed': FAILED_ROW_BACKGROUND}
 # What a shot record says about this session's attempt at it rather than about
 # the shot: assigned by _normalise_item, and left out of a saved queue:
-SESSION_ONLY_FIELDS = ('compiling', 'state', 'message')
+SESSION_ONLY_FIELDS = ('compiling', 'state', 'message', 'reclaimed')
 
 
 class RunmanagerQueueWidget(ShotQueueWidget):
@@ -356,28 +359,50 @@ class QueueController(object):
         running: the row is what BLACS is executing, so it remains visible. A
         failed row is offered again as well as a waiting one -- that is the
         retry, and it is why a shot stays at the head until it completes or the
-        operator deletes it. Only a running row is refused, so the shot BLACS is
-        running is not handed out a second time. Returns a copy of the record,
-        or None.
+        operator deletes it. Returns a copy of the record, or None.
 
-        That refusal has no time limit, and only an outcome or a deletion ends
-        it, so a row whose offer reply never reached BLACS -- or whose BLACS
-        closed while holding it -- stays running for good, and stops the whole
-        queue behind it. Deleting the row is the only way out today. Reclaiming
-        one belongs with the rest of the protocol hardening, and has to come
-        before an active row is protected from deletion."""
+        A row already marked running is offered again too, which is what stops
+        a lost reply stranding the queue behind it. That rests on an ordering
+        rule spanning both applications, recoverable from neither side's source
+        alone: BLACS is sequential, and asks for a shot only when it is idle,
+        carrying the outcome of the shot it has just finished on the same
+        exchange. So a request that arrives without an outcome retiring this
+        row proves BLACS is not running it -- either the offer reply never
+        arrived, or BLACS restarted while holding it. Both make the row ours to
+        hand out again, under the same id. queue_exchange() applies the outcome
+        before offering, so a row BLACS has just reported on has already been
+        retired or reddened by the time this looks at the head, and is never
+        mistaken for a stranded one. Only offer_shot() may call this, because
+        only there does a call mean that BLACS asked for work.
+
+        The inference holds for one BLACS per runmanager, which is what this
+        protocol is for. A second BLACS asking the same runmanager would be
+        handed the row the first is still executing, and would run it again --
+        as it would have been under the acknowledgement handshake this
+        replaced. Sharing one runmanager between apparatuses is deferred with
+        the rest of the multi-provider work.
+
+        Note that running means offered and not yet reported on, not that this
+        particular shot is on the hardware: if the head changes while BLACS is
+        running the old one -- the operator deletes it, or a configuration is
+        loaded -- it is the new head that is offered next.
+
+        The returned copy says in ``reclaimed`` whether it was a row still
+        marked running, so that the caller can report a re-offer that the
+        operator would otherwise never see."""
         with self._lock:
             if not self._items or not self._items[0]['compiled']:
                 return None
             item = self._items[0]
-            if item['state'] == 'running':
-                return None
+            reclaimed = item['state'] == 'running'
             item['state'] = 'running'
             # Whatever went wrong last time is being attempted again, so the
             # row goes back to the running appearance rather than keeping a
             # reason that no longer describes it:
             item['message'] = ''
-            return dict(item)
+            record = dict(item)
+            record['reclaimed'] = reclaimed
+            return record
 
     def shot_finished(self, shot_id, status, message=''):
         """Record how BLACS says the shot it was offered turned out.
@@ -389,16 +414,24 @@ class QueueController(object):
         offered. It keeps its id and gains the reason it did not run, so that
         the same shot is retried when BLACS asks for work again, and until then
         the operator can see which shot needs attention and why. Deleting the
-        row is the only way to discard it. Returns the record the outcome
-        belonged to, or None if no row has that id."""
+        row is the only way to discard it.
+
+        Returns the record if the outcome changed a row, and None if it changed
+        nothing. BLACS lets go of an outcome only once runmanager has taken it,
+        so a lost reply makes it send the same one again; the repeat finds the
+        row gone, or already carrying that same failure, and None is how the
+        caller knows there is nothing to report and nothing to analyse."""
+        message = str(message)
         with self._lock:
             for index, item in enumerate(self._items):
                 if item['shot_id'] != shot_id:
                     continue
                 if status == 'completed':
                     return self._items.pop(index)
+                if item['state'] == 'failed' and item['message'] == message:
+                    return None
                 item['state'] = 'failed'
-                item['message'] = str(message)
+                item['message'] = message
                 return dict(item)
             return None
 
@@ -600,23 +633,38 @@ class QueueManager(QtCore.QObject):
     def offer_next(self):
         item = self.controller.offer_next()
         if item is not None:
+            if item['reclaimed']:
+                # BLACS asked for work while this row was still marked running,
+                # so the offer it was marked running for never got there. Say
+                # so: the row looks no different afterwards, and a reply that
+                # keeps going missing is worth an operator knowing about.
+                self.output(
+                    'Shot %s was still marked as running in the queue; '
+                    'offering it to BLACS again.\n' % os.path.basename(item['path']),
+                    red=True,
+                )
             self.queueChanged.emit()
         return item
 
     def shot_finished(self, shot_id, status, message=''):
         record = self.controller.shot_finished(shot_id, status, message)
+        if record is None:
+            # The outcome changed nothing: it names a row that has gone, or one
+            # already carrying this failure. That is the ordinary shape of an
+            # outcome BLACS sent again because our reply went missing, so it is
+            # neither reported a second time nor allowed to repaint the queue.
+            return None
         if status != 'completed':
             self.output(
                 'BLACS reported shot %s as %s%s\n'
                 % (
-                    os.path.basename(record['path']) if record else shot_id,
+                    os.path.basename(record['path']),
                     status,
                     ': %s' % message if message else '',
                 ),
                 red=True,
             )
-        if record is not None:
-            self.queueChanged.emit()
+        self.queueChanged.emit()
         return record
 
     def get_queue_paths(self, include_default_shots=True):

@@ -82,6 +82,7 @@ from runmanager.queueing import (
     PROVIDER_SHOT,
     QueueManager,
     RunmanagerQueueWidget,
+    SHOT_OUTCOME_STATUSES,
 )
 
 from qtutils import (
@@ -4394,12 +4395,29 @@ class RunManager(LabscriptApplication):
         """Apply BLACS's outcome for the shot it was offered, then offer one.
 
         The outcome is applied first, so that a single exchange can retire the
-        row BLACS has just finished and offer the next one in the same reply."""
-        if outcome:
+        row BLACS has just finished and offer the next one in the same reply.
+        That order is also what lets offer_shot() reclaim a row still marked
+        running: by the time it looks, a row BLACS has just reported on has
+        already been retired or reddened, so anything still marked running is a
+        row this BLACS is demonstrably not executing."""
+        if outcome is not None:
             self.apply_shot_outcome(outcome)
         if not request_shot:
             return {'state': PROVIDER_NONE, 'shot_id': None, 'path': None}
-        return self.offer_shot()
+        try:
+            return self.offer_shot()
+        except Exception as exc:
+            # Answered rather than raised, for the same reason an unreadable
+            # outcome is. RemoteServer.handler hands an exception back to
+            # BLACS, which cannot tell it from not having reached runmanager,
+            # so it would hold the outcome it has already delivered here and
+            # send it again for ever -- once a second, showing "Runmanager
+            # unavailable" the whole time, for what is a fault on this side.
+            # Report it where an operator will see it and answer normally.
+            self.output_box.output(
+                'Runmanager could not offer a shot: %s\n' % str(exc), red=True
+            )
+            return {'state': PROVIDER_NONE, 'shot_id': None, 'path': None}
 
     def apply_shot_outcome(self, outcome):
         """Record how BLACS says the shot it was offered turned out.
@@ -4407,18 +4425,57 @@ class RunManager(LabscriptApplication):
         Only completed shots are submitted for analysis; the others are
         recorded and shown, but not analysed. Analysis gets the file BLACS
         actually ran, which is not the queued one when it made a fresh copy to
-        re-run a shot that already held data."""
-        shot_id = str(outcome.get('shot_id') or '')
-        status = str(outcome.get('status', ''))
-        message = str(outcome.get('message', ''))
+        re-run a shot that already held data.
+
+        A shot reaches lyse because a row was retired, not because the message
+        said so. BLACS lets go of an outcome only once runmanager has taken it,
+        so a lost reply makes it send the same completed outcome again; the
+        repeat finds no row, analyses nothing, and says so. That works only
+        because every offered shot is a row of the queue, runmanager's own
+        default shots included.
+
+        An outcome runmanager cannot read -- one that is not a mapping, names
+        no shot, or reports a status runmanager does not know -- is refused and
+        reported, leaving the queue as it was."""
+        fields = outcome if isinstance(outcome, dict) else {}
+        shot_id = str(fields.get('shot_id') or '')
+        status = str(fields.get('status', ''))
+        if not shot_id or status not in SHOT_OUTCOME_STATUSES:
+            # Refused rather than raised. RemoteServer.handler hands an
+            # exception back to BLACS, which cannot tell it apart from not
+            # having reached runmanager at all -- and BLACS holds an outcome
+            # until it knows runmanager took it, so it would send the same
+            # unreadable message for ever. Saying so and answering the exchange
+            # normally lets BLACS move on, and no row is reddened on the
+            # strength of a message runmanager did not understand.
+            self.output_box.output(
+                'BLACS sent a shot outcome runmanager could not read: %s\n'
+                % (outcome,),
+                red=True,
+            )
+            return
+        message = str(fields.get('message', ''))
         record = self.queue_manager.shot_finished(shot_id, status, message)
         if status != 'completed':
             return
-        agnostic_path = outcome.get('path')
-        if not agnostic_path and record is not None:
+        if record is None:
+            # A completed shot that matched no row. Usually a lost reply being
+            # sent again, which is exactly what should change nothing -- but it
+            # also happens when the row went while BLACS was running it, and
+            # then a shot really did run and nothing will analyse it. The two
+            # are indistinguishable here, so say what happened and let the
+            # operator judge which it was.
+            self.output_box.output(
+                'BLACS reported shot %s as completed, but no queued shot has '
+                'that id; it has not been sent for analysis.\n' % shot_id,
+                red=True,
+            )
+            return
+        agnostic_path = fields.get('path')
+        agnostic_path = str(agnostic_path) if agnostic_path else ''
+        if not agnostic_path:
             agnostic_path = shared_drive.path_to_agnostic(record['path'])
-        if agnostic_path:
-            self.analysis_submission.notify_shot_complete(agnostic_path)
+        self.analysis_submission.notify_shot_complete(agnostic_path)
 
     def offer_shot(self):
         """Offer BLACS a shot, if this runmanager has one to run.
@@ -4454,9 +4511,13 @@ class RunManager(LabscriptApplication):
             labscript_file = queue_state['default_labscript_file']
             # No default shot is called for: the policy does not ask for one,
             # there is no labscript file to make it from, or the queue is not
-            # empty after all -- the only way its head can have gone unoffered
-            # is that BLACS is already running it, so runmanager has work in
-            # flight rather than nothing to offer.
+            # empty after all. A row still marked running is no longer a reason
+            # -- offer_next() reclaims that one rather than leaving it
+            # unoffered -- but the queue can still gain work, or finish
+            # compiling its head, between the offer attempt above and this
+            # check. Either way runmanager has work rather than nothing to
+            # offer, and a default shot made now would only be queued behind
+            # something that is about to be offered.
             if (
                 queue_state['empty_queue_policy'] != EMPTY_QUEUE_DEFAULT_LABSCRIPT
                 or not labscript_file

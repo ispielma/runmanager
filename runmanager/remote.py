@@ -157,6 +157,14 @@ class Client(ZMQClient):
         offered. Runmanager applies the outcome before choosing what to offer,
         so one exchange can finish one shot and take the next.
 
+        Repeating an exchange is safe: an outcome for a row that has gone, or
+        one already carrying that same failure, changes nothing. An outcome
+        runmanager cannot read at all, and a failure on runmanager's side while
+        it chooses what to offer, are both reported in runmanager's output
+        rather than raised, and the exchange still answers normally. A caller
+        that gets an answer has been heard, and must move on rather than
+        sending the same outcome again.
+
         Returns a dict: ``state`` is ``'shot'``, ``'paused'`` or ``'none'``,
         and ``shot_id`` and ``path`` name the offered shot when there is
         one."""
