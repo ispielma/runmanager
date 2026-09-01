@@ -45,15 +45,16 @@ QPushButton:hover {
  }
 
 QPushButton:checked {
-     background-color: palette(window);
+     background-color: palette(highlight);
+     color: palette(highlighted-text);
      border: 1px solid palette(dark);
      border-radius: 3px;
  }
 
 QPushButton:hover:checked {
-     background-color: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                                       stop: 0 palette(window), stop: 1 palette(light));
-     border: 1px solid palette(dark);
+     background-color: palette(highlight);
+     color: palette(highlighted-text);
+     border: 1px solid palette(highlighted-text);
      border-radius: 3px;
  }
 
@@ -256,6 +257,9 @@ subprocess</string>
          </property>
          <item>
           <layout class="QHBoxLayout" name="horizontalLayout_blacs">
+           <property name="spacing">
+            <number>4</number>
+           </property>
            <item>
             <widget class="QCheckBox" name="checkBox_run_shots">
              <property name="toolTip">
@@ -267,10 +271,32 @@ not BLACS's Request shots, which is what lets BLACS run anything at all;
 and not Abort, which stops the shot BLACS is running.</string>
              </property>
              <property name="text">
-              <string>BLACS</string>
+              <string/>
              </property>
              <property name="checked">
               <bool>true</bool>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QLabel" name="checkBox_run_shots_icon">
+             <property name="text">
+              <string/>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QLabel" name="checkBox_run_shots_text">
+             <property name="toolTip">
+              <string>Put the shots compiled by Engage into the runmanager queue, for BLACS to run.
+Unticked, they are compiled and left alone.
+
+This is not Pause queue, which withholds shots already in the queue;
+not BLACS's Request shots, which is what lets BLACS run anything at all;
+and not Abort, which stops the shot BLACS is running.</string>
+             </property>
+             <property name="text">
+              <string>BLACS</string>
              </property>
             </widget>
            </item>

@@ -48,7 +48,7 @@ POLL_TIMEOUT = 1
 # small pixmap on a QLabel, with everything that does not fit in its tooltip.
 STATUS_ICONS = {
     'checking': ':/qtutils/fugue/hourglass',
-    'unreachable': ':/qtutils/fugue/plug-disconnect',
+    'unreachable': ':/qtutils/fugue/plug--exclamation',
     'error': ':/qtutils/fugue/exclamation-red',
     'running': ':/qtutils/fugue/control',
     'requesting': ':/qtutils/fugue/tick',

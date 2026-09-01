@@ -71,7 +71,11 @@ from labscript_utils import dedent
 from zprocess import raise_exception_in_thread
 import runmanager
 import runmanager.remote
-from runmanager.analysis_submission import AnalysisSubmission
+from runmanager.analysis_submission import (
+    AnalysisSubmission,
+    art_dir,
+    set_icon_label_pixmap,
+)
 from runmanager.blacs_status import (
     STATUS_ICONS,
     BlacsStatusMonitor,
@@ -1796,6 +1800,13 @@ class RunManager(LabscriptApplication):
         # exchange and of the destination checkbox it reports beside, so that
         # the indicator is live whether or not shots are being queued and a
         # BLACS that has stopped answering cannot hold up this GUI:
+        # The destination control wears the BLACS logo for the same reason the
+        # one below it wears lyse's: three checkboxes in a column that name
+        # three different applications are told apart by their logos faster
+        # than by reading them.
+        set_icon_label_pixmap(
+            self.ui.checkBox_run_shots_icon, art_dir / 'blacs_22x22.png'
+        )
         self.blacs_status_monitor = BlacsStatusMonitor(
             on_status=self.update_blacs_status
         )
@@ -1999,8 +2010,28 @@ class RunManager(LabscriptApplication):
             'Send default shot', EMPTY_QUEUE_DEFAULT_LABSCRIPT
         )
         controls_layout.addWidget(self.queue_empty_policy_combo)
-        self.queue_pause_checkbox = QtWidgets.QCheckBox('Pause queue', self.tab_queue)
-        self.queue_pause_checkbox.setToolTip(
+        # A button rather than a checkbox, matching BLACS's Request shots: the
+        # two are the pair of controls that decide whether shots run, they are
+        # read from across the room, and a filled button says which way it is
+        # set at a glance. The icon follows the state Qt is in, as that one's
+        # does -- running when the queue is offering work, paused when it is
+        # not.
+        self.queue_pause_button = QtWidgets.QPushButton('Pause queue', self.tab_queue)
+        self.queue_pause_button.setCheckable(True)
+        self.queue_pause_button.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        pause_icon = QtGui.QIcon()
+        pause_icon.addPixmap(
+            QtGui.QPixmap(':/qtutils/fugue/control.png'),
+            QtGui.QIcon.Mode.Normal,
+            QtGui.QIcon.State.Off,
+        )
+        pause_icon.addPixmap(
+            QtGui.QPixmap(':/qtutils/fugue/control-pause.png'),
+            QtGui.QIcon.Mode.Normal,
+            QtGui.QIcon.State.On,
+        )
+        self.queue_pause_button.setIcon(pause_icon)
+        self.queue_pause_button.setToolTip(
             'Stop this runmanager offering shots to BLACS, including the '
             'default shot.\n'
             'This does not stop BLACS: the shot it is running finishes '
@@ -2008,7 +2039,7 @@ class RunManager(LabscriptApplication):
             'the queue is paused. The queue is left as it\nis, so resuming '
             'offers the same shot at its head.'
         )
-        controls_layout.addWidget(self.queue_pause_checkbox)
+        controls_layout.addWidget(self.queue_pause_button)
         controls_layout.addStretch(1)
         self.queue_widget = RunmanagerQueueWidget(self.tab_queue)
         self.queue_widget.setSizePolicy(
@@ -2112,7 +2143,7 @@ class RunManager(LabscriptApplication):
         self.queue_empty_policy_combo.currentIndexChanged.connect(
             self.on_queue_empty_policy_changed
         )
-        self.queue_pause_checkbox.toggled.connect(self.on_queue_paused_changed)
+        self.queue_pause_button.toggled.connect(self.on_queue_paused_changed)
         self.queue_widget.deleteRowsRequested.connect(self.on_queue_delete_rows_requested)
         
         # Keyboard shortcuts:
@@ -3997,7 +4028,7 @@ class RunManager(LabscriptApplication):
             )
             if index != -1:
                 self.queue_empty_policy_combo.setCurrentIndex(index)
-            self.queue_pause_checkbox.setChecked(restored_queue_state['paused'])
+            self.queue_pause_button.setChecked(restored_queue_state['paused'])
 
         self.analysis_submission.restore_configuration_data(
             runmanager_config.get('analysis_submission')

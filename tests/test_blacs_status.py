@@ -6,15 +6,31 @@ a constructed RunManager.
 """
 import os
 import time
+import types
 import unittest
 
 from qtutils import UiLoader
-from qtutils.qt.QtWidgets import QApplication, QCheckBox, QLabel, QLayout
-from labscript_utils.qtwidgets.fingertab import FingerTabWidget
-
+from qtutils.qt.QtCore import QSize
+from qtutils.qt.QtGui import QIcon
+from qtutils.qt.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QLabel,
+    QLayout,
+    QPushButton,
+)
 import runmanager
 import runmanager.remote
-from runmanager.__main__ import RemoteServer, RunManager, TreeView
+# FingerTabWidget is runmanager's own, defined in __main__ beside RunManager --
+# not the labscript_utils widget of the same name. Loading main.ui with the
+# wrong one gives a tab widget whose tab bar the queue tab cannot configure.
+from runmanager.__main__ import (
+    FingerTabWidget,
+    RemoteServer,
+    RunManager,
+    TreeView,
+)
+from runmanager.analysis_submission import art_dir
 from runmanager.blacs_status import (
     BlacsStatusMonitor,
     Client,
@@ -344,9 +360,25 @@ class DestinationControlTests(unittest.TestCase):
         )
 
     def test_the_destination_control_is_labelled_blacs(self):
-        checkbox = self.checkbox()
-        self.assertEqual(checkbox.text(), 'BLACS')
-        self.assertTrue(checkbox.isChecked(), 'engaged shots are queued by default')
+        # The word is a label beside the box rather than the box's own text, so
+        # the BLACS logo can sit between them the way lyse's does on the
+        # Analyse row below. What the operator reads is the same either way.
+        label = self.ui.findChild(QLabel, 'checkBox_run_shots_text')
+        self.assertIsNotNone(label)
+        self.assertEqual(label.text(), 'BLACS')
+        self.assertTrue(
+            self.checkbox().isChecked(), 'engaged shots are queued by default'
+        )
+
+    def test_the_destination_control_wears_the_blacs_logo(self):
+        self.assertIsNotNone(
+            self.ui.findChild(QLabel, 'checkBox_run_shots_icon'),
+            'a label for RunManager.__init__ to set the logo into',
+        )
+        self.assertTrue(
+            (art_dir / 'blacs_22x22.png').is_file(),
+            'the logo it sets into that label has to be there to set',
+        )
 
     def test_the_destination_control_keeps_the_name_other_programs_use(self):
         # Only the label changed. What it means, what it is called, and the
@@ -414,3 +446,50 @@ class IndicatorUpdateTests(unittest.TestCase):
         app = FakeRunManager()
         app.update_blacs_status(None)
         self.assertIn('Checking', app.ui.blacs_status_indicator.tooltip)
+
+
+class PauseQueueControlTests(unittest.TestCase):
+    """The queue's pause control, built the way RunManager builds it.
+
+    A button rather than a checkbox, so that it reads like BLACS's Request
+    shots: those two together are what decide whether shots run, and a filled
+    button says which way each is set from across the room.
+
+    Building the real tab is also the only thing that catches a mistyped Qt
+    enum here -- nothing else would, until runmanager was launched.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        # The real main.ui, because setup_queue_tab inserts its tab into that
+        # tab widget and asks its tab bar not to move it -- which needs the
+        # drag-drop tab bar main.ui sets up, not a bare FingerTabWidget.
+        cls.ui = load_main_ui()
+
+    def build_queue_tab(self):
+        app = types.SimpleNamespace(ui=self.ui, refresh_queue_tab=lambda: None)
+        RunManager.setup_queue_tab(app)
+        return app
+
+    def test_pausing_the_queue_is_a_two_state_button(self):
+        app = self.build_queue_tab()
+
+        button = app.queue_pause_button
+        self.assertIsInstance(button, QPushButton)
+        self.assertTrue(button.isCheckable())
+        self.assertFalse(button.isChecked(), 'a queue starts unpaused')
+        self.assertEqual(button.text(), 'Pause queue')
+
+    def test_the_button_shows_a_different_icon_once_the_queue_is_paused(self):
+        icon = self.build_queue_tab().queue_pause_button.icon()
+
+        running = icon.pixmap(QSize(16, 16), QIcon.Mode.Normal, QIcon.State.Off)
+        paused = icon.pixmap(QSize(16, 16), QIcon.Mode.Normal, QIcon.State.On)
+
+        self.assertFalse(running.isNull())
+        self.assertFalse(paused.isNull())
+        self.assertNotEqual(
+            running.toImage(),
+            paused.toImage(),
+            'the icon has to say which state the button is in',
+        )
