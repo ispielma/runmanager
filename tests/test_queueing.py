@@ -12,13 +12,13 @@ import time
 import types
 import unittest
 
+from labscript_utils.qtwidgets.shotqueue import RULE_BELOW_ROLE
 from qtutils.qt.QtCore import Qt
 from qtutils.qt.QtWidgets import QApplication
 
 from runmanager.__main__ import RunManager
 from runmanager.queueing import (
     COMPILE_MODE_LAZY,
-    CURRENT_SHOT_STYLES,
     EMPTY_QUEUE_DEFAULT_LABSCRIPT,
     FAILED_ROW_BACKGROUND,
     PROVIDER_NONE,
@@ -28,7 +28,6 @@ from runmanager.queueing import (
     QueueController,
     QueueManager,
     RunmanagerQueueWidget,
-    current_shot_display,
 )
 
 
@@ -504,7 +503,9 @@ class DefaultShotTests(unittest.TestCase):
             request_shot=False,
         )
 
-        removed = app.queue_manager.delete_rows([(0, self.default_shot)])
+        removed = app.queue_manager.delete_rows(
+            [self.rows(app)[0]['shot_id']]
+        )
 
         self.assertEqual(removed, [self.default_shot])
         self.assertEqual(self.rows(app), [])
@@ -693,7 +694,7 @@ class LazyCompileFailureTests(unittest.TestCase):
         app = self.make_runmanager(compiles=False)
         self.ask_until_settled(app)
 
-        app.queue_manager.delete_rows([(0, '/tmp/lazy_a.h5')])
+        app.queue_manager.delete_rows([self.rows(app)[0]['shot_id']])
         response = app.offer_shot()
 
         self.assertEqual(response['state'], PROVIDER_SHOT)
@@ -737,9 +738,9 @@ class QueueEditingTests(unittest.TestCase):
         return self.app.queue_manager.controller.get_queue_display_items()
 
     def selection(self, *paths):
-        """The (row, path) pairs the queue widget emits for these shots."""
-        queued = [row['path'] for row in self.rows()]
-        return [(queued.index(path), path) for path in paths]
+        """The shot ids the queue widget emits when these shots are selected."""
+        by_path = {row['path']: row['shot_id'] for row in self.rows()}
+        return [by_path[path] for path in paths]
 
     def test_delete_keeps_the_shot_blacs_is_running_and_its_file(self):
         running = self.enqueue('shot_a.h5')
@@ -866,7 +867,9 @@ class QueueEditingTests(unittest.TestCase):
         self.assertEqual([row['path'] for row in rows], [running])
         self.assertEqual([row['state'] for row in rows], [''])
         self.assertEqual(
-            restarted.delete_rows([(0, running)]),
+            restarted.delete_rows(
+                [restarted.get_queue_display_items()[0]['shot_id']]
+            ),
             ([running], []),
             'and the row a previous session left running is deletable again',
         )
@@ -1129,64 +1132,134 @@ def row_backgrounds(widget, row):
     ]
 
 
-class CurrentShotSlotTests(unittest.TestCase):
-    """The slot above the queue, holding whichever shot BLACS has.
+class SentToBlacsRowTests(unittest.TestCase):
+    """The reserved first row of the queue: the shot that went to BLACS.
 
-    A stable place to look, saying the state in words. The row it names keeps a
-    tint of the same colour, but the tint answers a different question -- which
-    row Delete will refuse -- and a colour on its own says nothing to a
-    colour-blind operator.
+    A row rather than a label above the table, so that it keeps the columns and
+    any column added later describes it too. Set apart from the waiting work
+    below it by a rule and by its colour. Always present, so the queue below
+    never shifts, and saying so when nothing has been sent.
+
+    "Sent to BLACS" is any state at all: the empty string is a row that has
+    never been handed over, so a state added later belongs here without the
+    widget having to learn its name.
     """
 
-    def head(self, controller):
-        rows = controller.get_queue_display_items()
-        return rows[0] if rows and rows[0]['state'] else None
+    def widget_for(self, controller):
+        widget = make_queue_widget()
+        widget.set_queue_paths(controller.get_queue_display_items())
+        return widget
 
-    def test_it_says_so_when_blacs_has_nothing(self):
-        # Empty is a state, not a blank: a slot that disappears is one nobody
-        # keeps looking at, and the queue below would shift when it returned.
-        text, tooltip, state = current_shot_display(None)
-        self.assertEqual(state, '')
-        self.assertIn('No shot', text)
+    def labels(self, widget):
+        model = widget.queue_model
+        return [
+            model.item(row, widget.path_column).text()
+            for row in range(model.rowCount())
+        ]
 
-    def test_a_waiting_queue_puts_nothing_in_the_slot(self):
+    def test_it_says_so_when_nothing_has_been_sent(self):
+        controller = QueueController()
+        controller.enqueue(
+            [queued_shot('/tmp/shot_a.h5'), queued_shot('/tmp/shot_b.h5')]
+        )
+
+        widget = self.widget_for(controller)
+
+        labels = self.labels(widget)
+        self.assertIn('Nothing sent', labels[0])
+        self.assertEqual(
+            labels[1:],
+            ['shot_a.h5', 'shot_b.h5'],
+            'and every queued shot is still listed below it',
+        )
+        self.assertTrue(
+            all(brush is None for brush in row_backgrounds(widget, 0)),
+            'an empty reserved row is not tinted',
+        )
+
+    def test_the_reserved_row_cannot_be_selected_when_it_is_empty(self):
         controller = QueueController()
         controller.enqueue([queued_shot('/tmp/shot_a.h5')])
-        self.assertIsNone(self.head(controller), 'nothing has been offered yet')
 
-    def test_it_names_the_shot_blacs_is_running(self):
+        widget = self.widget_for(controller)
+
+        self.assertFalse(
+            widget.queue_model.item(0, widget.path_column).isSelectable(),
+            'there is nothing there to act on',
+        )
+
+    def test_the_shot_that_was_sent_moves_into_the_reserved_row(self):
         controller = QueueController()
-        controller.enqueue([queued_shot('/tmp/shot_a.h5')])
+        controller.enqueue(
+            [queued_shot('/tmp/shot_a.h5'), queued_shot('/tmp/shot_b.h5')]
+        )
         controller.offer_next()
 
-        text, tooltip, state = current_shot_display(self.head(controller))
+        widget = self.widget_for(controller)
 
-        self.assertEqual(state, 'running')
-        self.assertIn('shot_a.h5', text)
-        self.assertIn('Running', text)
-        self.assertIn('cannot be deleted', tooltip, 'why Delete will refuse it')
+        self.assertEqual(
+            self.labels(widget),
+            ['shot_a.h5', 'shot_b.h5'],
+            'the sent shot is the reserved row, and is not listed twice',
+        )
+        for brush in row_backgrounds(widget, 0):
+            self.assertEqual(brush.color(), RUNNING_ROW_BACKGROUND)
+        self.assertTrue(
+            all(brush is None for brush in row_backgrounds(widget, 1)),
+            'waiting work is never tinted',
+        )
 
-    def test_it_says_why_a_failed_shot_failed_on_its_face(self):
-        # On the face of it and not only in the tooltip: a queue that is not
-        # moving because the apparatus stopped is what a user most needs to see
-        # without hunting for it.
+    def test_a_failed_shot_stays_in_the_reserved_row_in_red(self):
         controller = QueueController()
-        controller.enqueue([queued_shot('/tmp/shot_a.h5')])
+        controller.enqueue(
+            [queued_shot('/tmp/shot_a.h5'), queued_shot('/tmp/shot_b.h5')]
+        )
         offered = controller.offer_next()
         controller.shot_finished(
             offered['shot_id'], 'failed', 'Device(s) in error state'
         )
 
-        text, tooltip, state = current_shot_display(self.head(controller))
+        widget = self.widget_for(controller)
 
-        self.assertEqual(state, 'failed')
-        self.assertIn('shot_a.h5', text)
-        self.assertIn('Device(s) in error state', text)
-        self.assertIn('Device(s) in error state', tooltip)
+        self.assertEqual(self.labels(widget), ['shot_a.h5', 'shot_b.h5'])
+        for brush in row_backgrounds(widget, 0):
+            self.assertEqual(brush.color(), FAILED_ROW_BACKGROUND)
+        self.assertIn(
+            'Device(s) in error state',
+            widget.queue_model.item(0, widget.path_column).toolTip(),
+        )
+        self.assertTrue(
+            widget.queue_model.item(0, widget.path_column).isSelectable(),
+            'a failed shot has to be deletable: it is how the queue moves on',
+        )
 
-    def test_every_state_has_a_style_to_show_it_in(self):
-        for state in ('', 'running', 'failed'):
-            self.assertIn(state, CURRENT_SHOT_STYLES)
+    def test_the_reserved_row_is_ruled_off_from_the_work_below_it(self):
+        controller = QueueController()
+        controller.enqueue([queued_shot('/tmp/shot_a.h5')])
+        controller.offer_next()
+
+        widget = self.widget_for(controller)
+
+        model = widget.queue_model
+        self.assertTrue(
+            model.item(0, widget.path_column).data(RULE_BELOW_ROLE),
+            'the break from the queue below is what makes it a cell apart',
+        )
+
+    def test_the_columns_describe_the_reserved_row_too(self):
+        # The reason it is a row and not a label above the table: whatever
+        # columns the queue grows, the shot that was sent gets them as well.
+        controller = QueueController()
+        controller.enqueue(
+            [queued_shot('/tmp/shot_a.h5', compile_mode=COMPILE_MODE_LAZY)]
+        )
+        controller.offer_next()
+
+        widget = self.widget_for(controller)
+
+        model = widget.queue_model
+        mode_column = 0 if widget.path_column else 1
+        self.assertEqual(model.item(0, mode_column).text(), 'JIT')
 
 
 class QueueDisplayTests(unittest.TestCase):

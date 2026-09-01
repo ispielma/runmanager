@@ -44,10 +44,11 @@ PROVIDER_NONE = 'none'
 # How BLACS may say a shot it was offered turned out. Every one but 'completed'
 # leaves the row at the head of the queue in red; see shot_finished():
 SHOT_OUTCOME_STATUSES = ('completed', 'aborted', 'failed', 'rejected')
-# The shot BLACS is executing keeps its place in the queue, and so does one it
-# could not run. Both are coloured rather than given a column of their own, so
-# that the queue reads as a list of outstanding work with one row marked as
-# under way, or as needing attention:
+# The colours of the reserved first row -- the shot that was sent to BLACS --
+# and of nothing else. Green while BLACS is running it, red once it has come
+# back not having run. The rows below it are work still waiting and are never
+# tinted, so the queue reads as a list of outstanding work with the shot that
+# left it set apart above:
 RUNNING_ROW_BACKGROUND = QtGui.QColor('#ccffcc')
 FAILED_ROW_BACKGROUND = QtGui.QColor('#ffcccc')
 ROW_BACKGROUNDS = {'running': RUNNING_ROW_BACKGROUND, 'failed': FAILED_ROW_BACKGROUND}
@@ -56,46 +57,6 @@ ROW_BACKGROUNDS = {'running': RUNNING_ROW_BACKGROUND, 'failed': FAILED_ROW_BACKG
 # naming the text colour alongside the fill is what keeps the pair legible
 # whichever theme is in use.
 TINTED_ROW_FOREGROUND = QtGui.QColor('#202020')
-# The slot above the queue, holding whichever shot BLACS has. Its position is
-# fixed and it is always there, empty or not, so that an operator looks in one
-# place rather than hunting a coloured row -- and it says the state in words,
-# because a colour alone tells a colour-blind operator nothing. The row in the
-# table keeps a tint of the same colour, which answers a different question:
-# which row Delete will refuse to remove.
-CURRENT_SHOT_STYLES = {
-    '': 'border: 1px solid palette(dark); border-radius: 3px; padding: 3px;',
-    'running': 'border: 1px solid palette(dark); border-radius: 3px; '
-               'padding: 3px; background-color: %s; color: %s;'
-               % (RUNNING_ROW_BACKGROUND.name(), TINTED_ROW_FOREGROUND.name()),
-    'failed': 'border: 1px solid palette(dark); border-radius: 3px; '
-              'padding: 3px; background-color: %s; color: %s;'
-              % (FAILED_ROW_BACKGROUND.name(), TINTED_ROW_FOREGROUND.name()),
-}
-
-
-def current_shot_display(row):
-    """Return the ``(text, tooltip, state)`` for the slot above the queue.
-
-    ``row`` is the head display item when BLACS has that shot, or None when it
-    has none of this runmanager's work. Empty is a normal state and says so
-    rather than going blank, since a slot that vanishes is one an operator
-    stops looking at."""
-    if row is None:
-        return 'No shot with BLACS', '', ''
-    name = os.path.basename(row['path'])
-    if row['state'] == 'failed':
-        reason = row['message'] or 'did not run'
-        return (
-            'Failed: %s - %s' % (name, reason),
-            '%s\n%s\nStays here until it is retried or deleted.'
-            % (row['path'], reason),
-            'failed',
-        )
-    return (
-        'Running in BLACS: %s' % name,
-        '%s\nBLACS is executing this shot. It cannot be deleted.' % row['path'],
-        'running',
-    )
 # What a shot record says about this session's attempt at it rather than about
 # the shot: assigned by _normalise_item, and left out of a saved queue:
 SESSION_ONLY_FIELDS = ('compiling', 'state', 'message', 'reclaimed')
@@ -126,41 +87,78 @@ class RunmanagerQueueWidget(ShotQueueWidget):
         self.add_button.hide()
         self.queue_view.deleteRequested.connect(self._emit_delete)
 
-    def set_queue_paths(self, paths):
-        selected_paths = set(self.selected_files())
-        row_infos = []
-        for path_info in paths:
-            if isinstance(path_info, dict):
-                mode = path_info.get('mode', '')
-                row_info = {
-                    'path': path_info['path'],
-                    'label': path_info.get('label', os.path.basename(path_info['path'])),
-                    'tooltip': path_info.get('tooltip', path_info['path']),
-                    'columns': [
-                        {
-                            'text': mode,
-                            'tooltip': 'Compile mode: %s' % mode if mode else '',
-                            'alignment': QtCore.Qt.AlignCenter,
-                        }
-                    ],
+    def _row_info(self, path_info):
+        mode = path_info.get('mode', '')
+        row_info = {
+            'path': path_info['path'],
+            'label': path_info.get('label', os.path.basename(path_info['path'])),
+            'tooltip': path_info.get('tooltip', path_info['path']),
+            'row_id': path_info.get('shot_id'),
+            'columns': [
+                {
+                    'text': mode,
+                    'tooltip': 'Compile mode: %s' % mode if mode else '',
+                    'alignment': QtCore.Qt.AlignCenter,
                 }
-                background = ROW_BACKGROUNDS.get(path_info.get('state'))
-                if background is not None:
-                    row_info['background'] = background
-                    row_info['foreground'] = TINTED_ROW_FOREGROUND
-                row_infos.append(row_info)
+            ],
+        }
+        background = ROW_BACKGROUNDS.get(path_info.get('state'))
+        if background is not None:
+            row_info['background'] = background
+            row_info['foreground'] = TINTED_ROW_FOREGROUND
+        return row_info
+
+    def _sent_to_blacs_row(self, path_info):
+        """The reserved first row: whichever shot has gone to BLACS.
+
+        Set apart from the queue below it by a rule and by its colour, because
+        it is not waiting work -- it is the shot BLACS was given, and what an
+        operator wants to know about it is different. It keeps the columns,
+        rather than being a label above the table, so that a column added later
+        describes it too.
+
+        A row having any state at all is what "has been sent" means: the empty
+        string is a row that has never been handed over, and every state a row
+        can reach it reaches by being given to BLACS. A state added later is
+        therefore included here without this having to learn its name."""
+        if path_info is None:
+            return {
+                'path': '',
+                'label': 'Nothing sent to BLACS',
+                'tooltip': 'The shot BLACS was given appears here while it has one.',
+                'rule_below': True,
+                # Nothing to act on, so nothing to select:
+                'selectable': False,
+            }
+        row_info = self._row_info(path_info)
+        row_info['rule_below'] = True
+        return row_info
+
+    def set_queue_paths(self, paths):
+        selected_ids = set(self.selected_ids())
+        paths = list(paths)
+        # Only the head can have been sent: it is the row that gets offered,
+        # and an outcome either retires it or leaves it there with a state.
+        sent = paths[0] if paths and paths[0].get('state') else None
+        waiting = paths[1:] if sent is not None else paths
+        row_infos = [self._sent_to_blacs_row(sent)]
+        for path_info in waiting:
+            if isinstance(path_info, dict):
+                row_infos.append(self._row_info(path_info))
             else:
                 row_infos.append(path_info)
         self.set_row_infos(row_infos)
-        self.select_paths(selected_paths)
+        self.select_ids(selected_ids)
 
     def _emit_delete(self):
-        # Emit the selected paths alongside their rows: the queue can shift
-        # under the widget when BLACS takes the shot at the front of it, so the
-        # controller needs to confirm which shots were actually selected.
-        rows = list(zip(self.selected_rows(), self.selected_files()))
-        if rows:
-            self.deleteRowsRequested.emit(rows)
+        # By identity, not position. The queue moves on its own -- a shot
+        # finishing removes a row while the operator has one selected -- so a
+        # row number that meant one shot when the table was drawn can mean
+        # another by the time the key is pressed. A shot_id means one shot for
+        # as long as that shot exists, and nothing once it is gone.
+        shot_ids = self.selected_ids()
+        if shot_ids:
+            self.deleteRowsRequested.emit(shot_ids)
 
 
 class QueueController(object):
@@ -256,14 +254,17 @@ class QueueController(object):
         with self._lock:
             self._items.extend(records)
 
-    def delete_rows(self, rows):
-        """Delete the queued shots given as (row, path) pairs.
+    def delete_rows(self, shot_ids):
+        """Delete the queued shots with these stable ids.
 
-        The path identifies the shot the user actually selected. Rows whose
-        path no longer matches have shifted since the queue widget was drawn,
-        so they are skipped rather than deleting the wrong shot.
+        By id and not by position. The queue moves on its own -- a shot
+        finishing removes a row while the operator has one selected -- so a row
+        number that meant one shot when the table was drawn can mean another by
+        the time the key is pressed. An id means one shot for as long as it
+        exists, and nothing afterwards, so an id that has gone deletes nothing
+        rather than deleting whatever took its place.
 
-        The row BLACS is running is skipped as well, and its file is kept:
+        The row BLACS is running is skipped, and its file is kept:
         deleting either would take the shot file out from under hardware that
         is executing it, and editing the queue is not a way to interfere with
         the apparatus. Nothing else is protected -- a red failed row is
@@ -278,19 +279,20 @@ class QueueController(object):
 
         Returns ``(removed_paths, protected_paths)``: the shots that were
         removed, and the running one that was selected and kept."""
+        wanted = set(shot_ids)
         removed_paths = []
         protected_paths = []
         with self._lock:
-            for entry in sorted(rows, key=lambda entry: entry[0], reverse=True):
-                row, path = entry[0], entry[1]
-                if not 0 <= row < len(self._items):
-                    continue
-                if self._items[row]['path'] != os.path.abspath(str(path)):
-                    continue
-                if self._items[row]['state'] == 'running':
-                    protected_paths.append(self._items[row]['path'])
-                    continue
-                removed_paths.append(self._items.pop(row)['path'])
+            keep = []
+            for item in self._items:
+                if item['shot_id'] not in wanted:
+                    keep.append(item)
+                elif item['state'] == 'running':
+                    protected_paths.append(item['path'])
+                    keep.append(item)
+                else:
+                    removed_paths.append(item['path'])
+            self._items = keep
             return removed_paths, protected_paths
 
     def clear(self):
@@ -337,8 +339,11 @@ class QueueController(object):
                         'tooltip': '%s\n%s' % (path, message) if message else path,
                         'state': item['state'],
                         # Separately from the tooltip it is folded into, because
-                        # the slot above the queue says the reason on its face:
+                        # the reserved row says the reason on its face:
                         'message': message,
+                        # What the widget reports back when the operator selects
+                        # a row, so that deleting never depends on a position:
+                        'shot_id': item['shot_id'],
                     }
                 )
             return items

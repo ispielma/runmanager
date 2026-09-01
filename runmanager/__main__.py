@@ -85,7 +85,6 @@ from runmanager.blacs_status import (
 from runmanager.queueing import (
     COMPILE_MODE_EAGER,
     COMPILE_MODE_LAZY,
-    CURRENT_SHOT_STYLES,
     EMPTY_QUEUE_DEFAULT_LABSCRIPT,
     EMPTY_QUEUE_NOTHING,
     PROVIDER_NONE,
@@ -94,7 +93,6 @@ from runmanager.queueing import (
     QueueManager,
     RunmanagerQueueWidget,
     SHOT_OUTCOME_STATUSES,
-    current_shot_display,
 )
 
 from qtutils import (
@@ -2065,20 +2063,7 @@ class RunManager(LabscriptApplication):
         self.queue_widget.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
         )
-        # The shot BLACS has, in a slot of its own above the queue rather than
-        # as a coloured row inside it. That row is always the head, so its
-        # position tells an operator nothing; what helps is one place to look,
-        # and words rather than only a colour. The slot is here whether or not
-        # BLACS has anything, so the queue below it never shifts.
-        self.queue_current_shot_label = QtWidgets.QLabel(self.tab_queue)
-        self.queue_current_shot_label.setSizePolicy(
-            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
-        )
-        self.queue_current_shot_label.setAlignment(
-            QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
-        )
         self.verticalLayout_queue_tab.addLayout(controls_layout)
-        self.verticalLayout_queue_tab.addWidget(self.queue_current_shot_label)
         self.verticalLayout_queue_tab.addWidget(self.queue_widget)
         self.ui.tabWidget.insertTab(0, self.tab_queue, 'Queue')
         queue_tab_index = self.ui.tabWidget.indexOf(self.tab_queue)
@@ -2208,8 +2193,8 @@ class RunManager(LabscriptApplication):
         new_index = (current_index + change) % n_tabs
         self.ui.tabWidget.setCurrentIndex(new_index)
 
-    def on_queue_delete_rows_requested(self, rows):
-        self.queue_manager.delete_rows(rows)
+    def on_queue_delete_rows_requested(self, shot_ids):
+        self.queue_manager.delete_rows(shot_ids)
 
     def on_queue_empty_policy_changed(self, index):
         empty_queue_policy = self.queue_empty_policy_combo.itemData(index)
@@ -2254,16 +2239,12 @@ class RunManager(LabscriptApplication):
 
     @inmain_decorator()
     def refresh_queue_tab(self):
-        controller = self.queue_manager.controller
-        rows = controller.get_queue_display_items()
-        self.queue_widget.set_queue_paths(rows)
-        # Only the head can be with BLACS: it is the row that gets offered, and
-        # an outcome either retires it or reddens it where it is.
-        head = rows[0] if rows and rows[0]['state'] else None
-        text, tooltip, state = current_shot_display(head)
-        self.queue_current_shot_label.setText(text)
-        self.queue_current_shot_label.setToolTip(tooltip)
-        self.queue_current_shot_label.setStyleSheet(CURRENT_SHOT_STYLES[state])
+        # The widget reserves its first row for the shot that went to BLACS and
+        # lays the waiting work out beneath it, so there is nothing to divide
+        # up here.
+        self.queue_widget.set_queue_paths(
+            self.queue_manager.controller.get_queue_display_items()
+        )
 
     def on_output_popout_button_clicked(self):
         if self.output_box_is_popped_out:
