@@ -562,6 +562,21 @@ class QueueController(object):
                 if status == 'completed':
                     return self._items.pop(index)
                 state = 'rejected' if status == 'rejected' else 'failed'
+                # This catches a resend only while the row still shows the
+                # outcome being reported -- so in practice only a rejected row,
+                # that being the one state the offer path refuses to re-offer.
+                # For a failed or aborted row the same exchange goes on to
+                # re-offer it and reset the state, so a resend is applied and
+                # reported again.
+                #
+                # That is deliberate, and the exchange cannot do better. A
+                # resend of one run's outcome and a genuine second run that
+                # failed identically are the same bytes; telling them apart
+                # needs the offer to carry a token that the outcome echoes
+                # back, which this protocol does not have. Of the two errors
+                # available, a repeated line in the output box is much the
+                # safer: see ReplayTests, which pins that a retry failing the
+                # same way is still a second failure and must be reported.
                 if item['state'] == state and item['message'] == message:
                     return None
                 item['state'] = state

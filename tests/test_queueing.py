@@ -1401,6 +1401,76 @@ def malformed_outcomes(shot_id):
     )
 
 
+class OutcomeAppliedOnceTests(unittest.TestCase):
+    """Applying an outcome cannot cost the shot it reports on.
+
+    Two holes in the exchange's replay safety, both of which end with a shot
+    that ran going unanalysed.
+
+    The offer half is answered rather than raised, because BLACS cannot tell an
+    exception handed back from a runmanager it never reached, and would hold the
+    outcome and resend it once a second forever. The outcome half had no such
+    guard -- and it is the half that has already retired the row when it raises,
+    so no resend can put the analysis submission back.
+
+    The dedupe beside it has a hole of the same shape and is deliberately left
+    alone: it compares the row's displayed state against the one reported, and
+    the same exchange re-offers the row and resets that state before any resend
+    arrives, so only a rejected row is really deduped. Closing it would mean
+    treating a genuine second identical failure as a resend, which ReplayTests
+    pins as the case that must not be lost. Telling the two apart needs a token
+    the exchange does not carry.
+    """
+
+    def app_with_shot(self):
+        app = FakeRunManager()
+        self.addCleanup(app.queue_manager.shutdown)
+        app.queue_manager.enqueue([queued_shot('/tmp/shot_a.h5')])
+        offered = app.queue_manager.offer_next()
+        return app, offered['shot_id']
+
+    def outcome(self, shot_id, status, message=''):
+        return {
+            'shot_id': shot_id,
+            'status': status,
+            'message': message,
+            'path': '/tmp/shot_a.h5',
+        }
+
+    def test_a_failure_while_applying_an_outcome_is_answered_not_raised(self):
+        app, shot_id = self.app_with_shot()
+
+        def explode(path):
+            raise RuntimeError('lyse submission fell over')
+
+        app.analysis_submission.notify_shot_complete = explode
+
+        response = app.queue_exchange(self.outcome(shot_id, 'completed'), False)
+
+        self.assertEqual(
+            response['state'],
+            PROVIDER_NONE,
+            'BLACS gets an answer, so it lets go of an outcome runmanager has '
+            'already applied rather than resending it once a second forever',
+        )
+        self.assertTrue(
+            app.output_box.said('lyse submission fell over'),
+            'and the operator is told what went wrong on this side',
+        )
+
+    def test_a_different_outcome_for_the_same_row_is_still_reported(self):
+        app, shot_id = self.app_with_shot()
+
+        app.queue_exchange(self.outcome(shot_id, 'failed', 'a device would not arm'), True)
+        app.output_box.lines = []
+        app.queue_exchange(self.outcome(shot_id, 'aborted', 'the operator stopped it'), True)
+
+        self.assertTrue(
+            app.output_box.said('shot_a.h5', 'aborted'),
+            'a genuinely new outcome for the retried row still gets through',
+        )
+
+
 class MalformedOutcomeTests(unittest.TestCase):
     """An outcome runmanager cannot read must not look like an outage.
 
@@ -1722,7 +1792,7 @@ class ExchangeFailureTests(unittest.TestCase):
             'a normal reply, so BLACS knows its outcome landed',
         )
         self.assertTrue(
-            app.output_box.said('could not offer a shot', 'moved'),
+            app.output_box.said('could not answer BLACS', 'moved'),
             'and the operator is told what went wrong here',
         )
         self.assertEqual(

@@ -4485,11 +4485,12 @@ class RunManager(LabscriptApplication):
         running: by the time it looks, a row BLACS has just reported on has
         already been retired or reddened, so anything still marked running is a
         row this BLACS is demonstrably not executing."""
-        if outcome is not None:
-            self.apply_shot_outcome(outcome)
-        if not request_shot:
-            return {'state': PROVIDER_NONE, 'shot_id': None, 'path': None}
+        no_shot = {'state': PROVIDER_NONE, 'shot_id': None, 'path': None}
         try:
+            if outcome is not None:
+                self.apply_shot_outcome(outcome)
+            if not request_shot:
+                return no_shot
             return self.offer_shot()
         except Exception as exc:
             # Answered rather than raised, for the same reason an unreadable
@@ -4499,10 +4500,16 @@ class RunManager(LabscriptApplication):
             # send it again for ever -- once a second, showing "Runmanager
             # unavailable" the whole time, for what is a fault on this side.
             # Report it where an operator will see it and answer normally.
+            #
+            # This covers applying the outcome as well as choosing the offer.
+            # It used to cover only the offer, which was the wrong half: by the
+            # time applying an outcome can raise, the row it retired is already
+            # gone, so the resend it provokes can never put the analysis
+            # submission back.
             self.output_box.output(
-                'Runmanager could not offer a shot: %s\n' % str(exc), red=True
+                'Runmanager could not answer BLACS: %s\n' % str(exc), red=True
             )
-            return {'state': PROVIDER_NONE, 'shot_id': None, 'path': None}
+            return no_shot
 
     def apply_shot_outcome(self, outcome):
         """Record how BLACS says the shot it was offered turned out.
