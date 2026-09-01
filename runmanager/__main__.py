@@ -77,9 +77,10 @@ from runmanager.analysis_submission import (
     set_icon_label_pixmap,
 )
 from runmanager.blacs_status import (
-    STATUS_ICONS,
+    LINK_ICONS,
     BlacsStatusMonitor,
-    blacs_status_display,
+    blacs_activity_display,
+    blacs_link_display,
 )
 from runmanager.queueing import (
     COMPILE_MODE_EAGER,
@@ -2048,6 +2049,15 @@ class RunManager(LabscriptApplication):
             'offers the same shot at its head.'
         )
         controls_layout.addWidget(self.queue_pause_button)
+        # What BLACS is doing sits next to the control that decides whether it
+        # is offered anything, because the two are read together: a paused
+        # queue and a BLACS running its own override shot is a different
+        # situation from a paused queue and a BLACS that has stopped.
+        self.queue_blacs_activity_label = QtWidgets.QLabel(self.tab_queue)
+        self.queue_blacs_activity_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        controls_layout.addWidget(self.queue_blacs_activity_label)
         controls_layout.addStretch(1)
         self.queue_widget = RunmanagerQueueWidget(self.tab_queue)
         self.queue_widget.setSizePolicy(
@@ -2212,17 +2222,29 @@ class RunManager(LabscriptApplication):
 
     @inmain_decorator()
     def update_blacs_status(self, status):
-        """Show what BLACS last said it was doing, beside the BLACS checkbox.
+        """Show what BLACS last said, in the two places it belongs.
 
-        Deliberately independent of that checkbox: what the apparatus is doing
-        with the work already queued is worth seeing whether or not newly
+        Whether BLACS is answering goes beside the destination checkbox, where
+        it means what the lyse light on the row below means and nothing more.
+        What BLACS is doing with the queue goes beside Pause queue, in words,
+        because that is the control it is about and none of it is a yes or a
+        no.
+
+        Both are independent of the destination checkbox: what the apparatus
+        is doing with work already queued is worth seeing whether or not newly
         engaged shots are being added to it. Informational only -- there is
         nothing here to enable BLACS, clear what stopped it, or abort a shot;
         those stay with the operator standing at the apparatus."""
-        state, tooltip = blacs_status_display(status)
-        icon = QtGui.QIcon(STATUS_ICONS.get(state, ':/qtutils/fugue/exclamation-red'))
+        state, tooltip = blacs_link_display(
+            status, host=self.blacs_status_monitor.client.host
+        )
+        icon = QtGui.QIcon(LINK_ICONS.get(state, ':/qtutils/fugue/exclamation-red'))
         self.ui.blacs_status_indicator.setPixmap(icon.pixmap(QtCore.QSize(16, 16)))
         self.ui.blacs_status_indicator.setToolTip(tooltip)
+
+        activity, activity_tooltip = blacs_activity_display(status)
+        self.queue_blacs_activity_label.setText(activity)
+        self.queue_blacs_activity_label.setToolTip(activity_tooltip)
 
     @inmain_decorator()
     def refresh_queue_tab(self):

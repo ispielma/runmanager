@@ -34,7 +34,8 @@ from runmanager.analysis_submission import art_dir
 from runmanager.blacs_status import (
     BlacsStatusMonitor,
     Client,
-    blacs_status_display,
+    blacs_activity_display,
+    blacs_link_display,
 )
 
 
@@ -56,24 +57,29 @@ def answered(**fields):
     return dict(snapshot(**fields), reachable=True)
 
 
-class IndicatorStateTests(unittest.TestCase):
-    def test_a_blacs_asking_for_work_is_shown_as_requesting(self):
-        state, tooltip = blacs_status_display(
-            answered(requesting_shots=True, status='Idle')
-        )
-        self.assertEqual(state, 'requesting')
-        self.assertIn('requesting shots', tooltip)
+class LinkIndicatorTests(unittest.TestCase):
+    """The light beside the BLACS checkbox: is BLACS answering?
+
+    It means what the lyse light on the row below means, and no more. Whether
+    BLACS is requesting shots, and what it is running, are queue behaviour and
+    are reported in words beside Pause queue instead.
+    """
 
     def test_nothing_heard_from_blacs_yet_is_shown_as_checking(self):
-        state, tooltip = blacs_status_display(None)
+        state, tooltip = blacs_link_display(None)
         self.assertEqual(state, 'checking')
         self.assertIn('Checking', tooltip)
 
-    def test_a_blacs_that_did_not_answer_is_shown_as_unreachable(self):
-        state, tooltip = blacs_status_display(
+    def test_a_blacs_that_answered_is_shown_as_online(self):
+        state, tooltip = blacs_link_display(answered(requesting_shots=True))
+        self.assertEqual(state, 'online')
+        self.assertIn('responding', tooltip)
+
+    def test_a_blacs_that_did_not_answer_is_shown_as_offline(self):
+        state, tooltip = blacs_link_display(
             {'reachable': False, 'reason': 'Timed out waiting for BLACS'}
         )
-        self.assertEqual(state, 'unreachable')
+        self.assertEqual(state, 'offline')
         self.assertIn('not responding', tooltip)
         self.assertIn(
             'Timed out waiting for BLACS',
@@ -81,15 +87,45 @@ class IndicatorStateTests(unittest.TestCase):
             'why runmanager could not reach BLACS is worth reading',
         )
 
-    def test_a_blacs_that_is_up_but_not_asking_is_shown_as_locally_disabled(self):
-        state, tooltip = blacs_status_display(
+    def test_a_blacs_that_is_up_but_not_running_shots_is_still_online(self):
+        # The distinction this light exists to keep: an apparatus deliberately
+        # not taking work is a healthy link, not a broken one. Every one of
+        # these is a BLACS that answered.
+        for description, status in (
+            ('not requesting shots', answered(requesting_shots=False)),
+            ('stopped by an error', answered(error='Device(s) in error state')),
+            (
+                'running a shot',
+                answered(requesting_shots=True, shot_path='/data/shot_a.h5'),
+            ),
+        ):
+            with self.subTest(blacs=description):
+                self.assertEqual(blacs_link_display(status)[0], 'online')
+
+    def test_the_light_names_the_host_it_is_talking_to(self):
+        _, tooltip = blacs_link_display(answered(), host='blacs-pc')
+        self.assertIn('blacs-pc', tooltip)
+
+
+class ActivityLineTests(unittest.TestCase):
+    """The line beside Pause queue: what is BLACS doing with the queue?"""
+
+    def test_a_blacs_asking_for_work_says_so(self):
+        text, tooltip = blacs_activity_display(
+            answered(requesting_shots=True, status='Requesting shots')
+        )
+        self.assertEqual(text, 'BLACS: requesting shots')
+        self.assertIn('requesting shots', tooltip)
+
+    def test_a_blacs_that_is_up_but_not_asking_says_so(self):
+        text, tooltip = blacs_activity_display(
             answered(requesting_shots=False, status='Not requesting shots')
         )
-        self.assertEqual(state, 'disabled')
+        self.assertEqual(text, 'BLACS: not requesting shots')
         self.assertIn('not requesting shots', tooltip)
 
     def test_a_blacs_running_a_shot_names_the_shot(self):
-        state, tooltip = blacs_status_display(
+        text, tooltip = blacs_activity_display(
             answered(
                 requesting_shots=True,
                 status='Running (program time: 0.100s)...',
@@ -97,8 +133,7 @@ class IndicatorStateTests(unittest.TestCase):
                 shot_path='/data/2026/shot_a.h5',
             )
         )
-        self.assertEqual(state, 'running')
-        self.assertIn('shot_a.h5', tooltip)
+        self.assertEqual(text, 'BLACS: running shot_a.h5')
         self.assertIn('/data/2026/shot_a.h5', tooltip, 'the whole path is available')
         self.assertIn('shot-1', tooltip, 'which queued row this is')
         self.assertIn('Running (program time: 0.100s)...', tooltip)
@@ -107,45 +142,43 @@ class IndicatorStateTests(unittest.TestCase):
         # BLACS runs its local override shot when this runmanager has nothing
         # for it. That shot is in nobody's queue and has no id, and saying so
         # is how a user sees why their queue is not moving.
-        state, tooltip = blacs_status_display(
-            answered(
-                requesting_shots=True,
-                status='Running (program time: 0.100s)...',
-                shot_path='/data/override.h5',
-            )
+        text, tooltip = blacs_activity_display(
+            answered(requesting_shots=True, shot_path='/data/override.h5')
         )
-        self.assertEqual(state, 'running')
-        self.assertIn('override.h5', tooltip)
+        self.assertEqual(text, 'BLACS: running override.h5')
         self.assertIn('local override', tooltip)
 
     def test_a_shot_path_from_another_machine_still_names_the_shot(self):
         # BLACS sends the path shared-drive-agnostic, so a BLACS on Windows
         # and a runmanager on anything else still agree which file it is.
-        state, tooltip = blacs_status_display(
+        text, tooltip = blacs_activity_display(
             answered(requesting_shots=True, shot_path='Z:\\2026\\shot_a.h5')
         )
-        self.assertEqual(state, 'running')
-        self.assertIn('BLACS is running shot_a.h5', tooltip)
+        self.assertEqual(text, 'BLACS: running shot_a.h5')
         self.assertIn(
             os.path.join('2026', 'shot_a.h5'),
             tooltip,
             'and shows the path the way this machine writes it',
         )
 
-    def test_the_reason_blacs_stopped_reads_as_an_error(self):
-        state, tooltip = blacs_status_display(
+    def test_the_reason_blacs_stopped_is_on_the_line_itself(self):
+        # Not only in the tooltip: a queue that is not moving because the
+        # apparatus stopped is the thing a user most needs to see without
+        # hunting for it.
+        text, tooltip = blacs_activity_display(
             answered(
                 requesting_shots=False,
                 status='Device(s) in error state\nRequests stopped',
                 error='Device(s) in error state',
             )
         )
-        self.assertEqual(state, 'error')
-        self.assertIn(
-            'Device(s) in error state',
-            tooltip,
-            'the reason is readable here rather than only at the apparatus',
-        )
+        self.assertIn('stopped', text)
+        self.assertIn('Device(s) in error state', text)
+        self.assertIn('Device(s) in error state', tooltip)
+
+    def test_a_blacs_that_did_not_answer_says_that_rather_than_guessing(self):
+        text, _ = blacs_activity_display({'reachable': False, 'reason': 'refused'})
+        self.assertEqual(text, 'BLACS: not responding')
 
 
 class FakeBlacs(object):
@@ -174,7 +207,7 @@ class PollingTests(unittest.TestCase):
         monitor = BlacsStatusMonitor(on_status=reported.append, client=blacs)
         for _ in answers:
             monitor.poll()
-        return blacs, [blacs_status_display(status)[0] for status in reported]
+        return blacs, [blacs_activity_display(status)[0] for status in reported]
 
     def test_a_blacs_that_comes_back_is_shown_as_back(self):
         # Losing BLACS is not final: polling goes on, and the indicator
@@ -183,7 +216,9 @@ class PollingTests(unittest.TestCase):
             TimeoutError('BLACS did not answer'),
             snapshot(requesting_shots=True),
         )
-        self.assertEqual(states, ['unreachable', 'requesting'])
+        self.assertEqual(
+            states, ['BLACS: not responding', 'BLACS: requesting shots']
+        )
 
     def test_the_indicator_follows_a_shot_from_running_to_failed(self):
         _, states = self.poll_all(
@@ -200,7 +235,14 @@ class PollingTests(unittest.TestCase):
                 error='Device(s) in error state',
             ),
         )
-        self.assertEqual(states, ['requesting', 'running', 'error'])
+        self.assertEqual(
+            states,
+            [
+                'BLACS: requesting shots',
+                'BLACS: running shot_a.h5',
+                'BLACS: stopped - Device(s) in error state',
+            ],
+        )
 
     def test_polling_asks_blacs_for_nothing_but_its_status(self):
         # Monitoring only: recovering the apparatus stays with the operator
@@ -215,9 +257,9 @@ class PollingTests(unittest.TestCase):
         _, states = self.poll_all(
             'Error: BLACS no longer accepts direct shot submissions\n'
         )
-        self.assertEqual(states, ['unreachable'])
+        self.assertEqual(states, ['BLACS: not responding'])
         _, states = self.poll_all(RuntimeError('BLACS server returned an exception'))
-        self.assertEqual(states, ['unreachable'])
+        self.assertEqual(states, ['BLACS: not responding'])
 
     def test_an_answer_arriving_after_shutdown_is_not_reported(self):
         # Runmanager closing waits for this thread, and reporting goes to the
@@ -279,10 +321,14 @@ class ClientTests(unittest.TestCase):
 class FakeLabel(object):
     def __init__(self):
         self.tooltip = ''
+        self.text = ''
         self.pixmaps = []
 
     def setPixmap(self, pixmap):
         self.pixmaps.append(pixmap)
+
+    def setText(self, text):
+        self.text = str(text)
 
     def setToolTip(self, tooltip):
         self.tooltip = str(tooltip)
@@ -303,12 +349,16 @@ class FakeUi(object):
 
 
 class FakeRunManager(object):
-    """Runmanager's indicator, over only the surface it uses."""
+    """Runmanager's two status surfaces, over only what they use."""
 
     update_blacs_status = RunManager.update_blacs_status
 
-    def __init__(self, run_shots_checked=True):
+    def __init__(self, run_shots_checked=True, host='localhost'):
         self.ui = FakeUi(run_shots_checked)
+        self.queue_blacs_activity_label = FakeLabel()
+        self.blacs_status_monitor = types.SimpleNamespace(
+            client=types.SimpleNamespace(host=host)
+        )
 
 
 _qapplication = None
@@ -420,7 +470,7 @@ class IndicatorUpdateTests(unittest.TestCase):
     main.ui is what has gone wrong.
     """
 
-    def test_the_status_light_says_the_same_whatever_the_checkbox_says(self):
+    def test_both_surfaces_say_the_same_whatever_the_checkbox_says(self):
         # Watching BLACS is not a consequence of sending it shots: an operator
         # who has unticked the destination still needs to see what the
         # apparatus is doing with the work already queued.
@@ -437,15 +487,32 @@ class IndicatorUpdateTests(unittest.TestCase):
             self.assertTrue(
                 app.ui.blacs_status_indicator.pixmaps, 'the light is always set'
             )
-            shown[checked] = app.ui.blacs_status_indicator.tooltip
+            shown[checked] = (
+                app.ui.blacs_status_indicator.tooltip,
+                app.queue_blacs_activity_label.text,
+            )
 
-        self.assertIn('shot_a.h5', shown[False])
+        self.assertIn('shot_a.h5', shown[False][1])
         self.assertEqual(shown[True], shown[False])
 
-    def test_the_status_light_says_it_is_checking_before_blacs_answers(self):
+    def test_the_light_reports_the_link_and_the_line_reports_the_queue(self):
+        # The split this pair exists for. A BLACS that answered is online even
+        # when it is deliberately running nothing, and the reason it is running
+        # nothing belongs in the line, not in the light.
+        app = FakeRunManager()
+        app.update_blacs_status(
+            answered(requesting_shots=False, error='Device(s) in error state')
+        )
+
+        self.assertIn('responding', app.ui.blacs_status_indicator.tooltip)
+        self.assertNotIn('error state', app.ui.blacs_status_indicator.tooltip)
+        self.assertIn('Device(s) in error state', app.queue_blacs_activity_label.text)
+
+    def test_both_surfaces_say_they_are_checking_before_blacs_answers(self):
         app = FakeRunManager()
         app.update_blacs_status(None)
         self.assertIn('Checking', app.ui.blacs_status_indicator.tooltip)
+        self.assertIn('checking', app.queue_blacs_activity_label.text)
 
 
 class PauseQueueControlTests(unittest.TestCase):

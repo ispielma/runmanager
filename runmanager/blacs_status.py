@@ -13,8 +13,12 @@
 """What runmanager knows about the BLACS it offers shots to.
 
 Runmanager asks; BLACS never pushes. This holds the small client that asks,
-the poller that keeps asking, and the rule turning an answer into the state of
-the indicator beside the BLACS destination checkbox.
+the poller that keeps asking, and the two rules that turn an answer into what
+the interface shows: whether the link to BLACS is up, beside the BLACS
+destination checkbox, and what BLACS is doing with the queue, beside Pause
+queue. They are separate because they are separate questions -- a BLACS that
+is up and deliberately not running shots is a healthy link and a stopped
+queue, and one glyph cannot say that.
 
 It is monitoring only, and deliberately so: whether BLACS requests shots, the
 error that stopped it, and Abort belong to the operator standing at the
@@ -44,15 +48,16 @@ POLL_INTERVAL = 2
 # one runmanager cannot reach. It also keeps a poll shorter than the wait when
 # runmanager closes, so that shutting down does not have to abandon one.
 POLL_TIMEOUT = 1
-# The same status light BLACS and the analysis submission widget already use: a
-# small pixmap on a QLabel, with everything that does not fit in its tooltip.
-STATUS_ICONS = {
+# The light beside the BLACS checkbox says one thing: whether BLACS answered.
+# It is the lyse light on the row below in every respect -- same three states,
+# same icons -- because it means the same thing, and two lights side by side
+# that look alike had better not mean different things. What BLACS is doing
+# with the queue is a separate question, answered in words beside Pause queue;
+# a link is up or down whatever the apparatus is busy with.
+LINK_ICONS = {
     'checking': ':/qtutils/fugue/hourglass',
-    'unreachable': ':/qtutils/fugue/plug--exclamation',
-    'error': ':/qtutils/fugue/exclamation-red',
-    'running': ':/qtutils/fugue/control',
-    'requesting': ':/qtutils/fugue/tick',
-    'disabled': ':/qtutils/fugue/minus-circle',
+    'online': ':/qtutils/fugue/tick',
+    'offline': ':/qtutils/fugue/exclamation',
 }
 
 
@@ -150,19 +155,48 @@ class BlacsStatusMonitor(object):
             self.stopped.wait(self.interval)
 
 
-def blacs_status_display(status):
-    """Return the ``(state, tooltip)`` an indicator should show for a status.
+def blacs_link_display(status, host=None):
+    """Return the ``(state, tooltip)`` for the light beside the BLACS checkbox.
+
+    Whether BLACS answered, and nothing else: ``'checking'`` before it has been
+    asked, then ``'online'`` or ``'offline'``. Deliberately says nothing about
+    whether BLACS is requesting shots or what it is running -- that is queue
+    behaviour, and it is reported in words beside Pause queue. A BLACS sitting
+    idle with requests switched off is online.
 
     ``status`` is the snapshot BLACS answered with, with ``reachable`` added by
     the poller, or None before BLACS has answered at all."""
     if status is None:
         return 'checking', 'Checking BLACS...'
+    if status.get('reachable'):
+        tooltip = 'BLACS is responding'
+        state = 'online'
+    else:
+        tooltip = 'BLACS is not responding'
+        state = 'offline'
+    if host:
+        tooltip += '\nHost: %s' % host
+    reason = status.get('reason')
+    if reason and state == 'offline':
+        tooltip += '\n' + str(reason)
+    return state, tooltip
+
+
+def blacs_activity_display(status):
+    """Return the ``(text, tooltip)`` for the line beside Pause queue.
+
+    What BLACS is doing with the work this runmanager offers it: whether it is
+    asking for shots, which one it is running, and what stopped it if anything
+    has. In words rather than a glyph, because none of it is a yes or a no, and
+    beside Pause queue because that is the control it is about."""
+    if status is None:
+        return 'BLACS: checking...', 'Waiting for BLACS to answer'
     if not status.get('reachable'):
         tooltip = 'BLACS is not responding'
         reason = status.get('reason')
         if reason:
             tooltip += '\n' + str(reason)
-        return 'unreachable', tooltip
+        return 'BLACS: not responding', tooltip
     # BLACS sends the path shared-drive-agnostic, as it sends an outcome's, so
     # put it back into the form this machine uses before showing it:
     shot_path = shared_drive.path_to_local(str(status.get('shot_path') or ''))
@@ -171,19 +205,19 @@ def blacs_status_display(status):
         # Something at the apparatus stopped BLACS requesting shots. Only an
         # operator there can clear it, so this says what it was and nothing
         # more; runmanager offers no way to acknowledge it from here.
-        state = 'error'
+        text = 'BLACS: stopped'
         lines = ['BLACS stopped requesting shots: %s' % error]
     elif shot_path:
         # A shot is under way whether or not BLACS is still asking for more:
         # an operator who has just unticked Request shots is watching this one
         # finish, and that is what runmanager should say it is doing.
-        state = 'running'
+        text = 'BLACS: running %s' % os.path.basename(shot_path)
         lines = ['BLACS is running %s' % os.path.basename(shot_path)]
     elif status.get('requesting_shots'):
-        state = 'requesting'
+        text = 'BLACS: requesting shots'
         lines = ['BLACS is requesting shots']
     else:
-        state = 'disabled'
+        text = 'BLACS: not requesting shots'
         lines = ['BLACS is not requesting shots']
     activity = str(status.get('status') or '')
     if activity:
@@ -198,4 +232,6 @@ def blacs_status_display(status):
         # its local override shot because this runmanager had nothing to
         # offer, which is worth saying to whoever is wondering why.
         lines.append('Not a queued shot: BLACS local override')
-    return state, '\n'.join(lines)
+    if error:
+        text = 'BLACS: stopped - %s' % error
+    return text, '\n'.join(lines)
