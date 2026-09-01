@@ -407,7 +407,15 @@ class TabToolButton(QtWidgets.QToolButton):
 
 class FingerTabWidget(QtWidgets.QTabWidget):
 
-    """A QTabWidget equivalent which uses our FingerTabBarWidget"""
+    """A QTabWidget equivalent which uses our FingerTabBarWidget.
+
+    Not labscript_utils.qtwidgets.fingertab.FingerTabWidget, which shares the
+    name and the gist both are credited to, and nothing else: that one is the
+    gist as written, and this one has grown closable tabs, per-tab movability
+    and a tab bar to match. labscript_utils' is what the settings dialog every
+    app opens uses; this one is only ever promoted from runmanager's main.ui.
+    Import the wrong one and the interface still loads, so say which.
+    """
 
     def __init__(self, parent, *args):
         QtWidgets.QTabWidget.__init__(self, parent, *args)
