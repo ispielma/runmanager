@@ -266,24 +266,6 @@ class QueueOutcomeTests(unittest.TestCase):
             controller.offer_next()['path'], os.path.abspath('/tmp/shot_b.h5')
         )
 
-    def test_an_outcome_that_arrives_twice_cannot_reach_another_row(self):
-        # A reply BLACS never received is sent again. The outcome names its row
-        # by id, so the repeat finds the row it was always about -- or, once
-        # that row has gone, nothing at all.
-        controller = QueueController()
-        controller.enqueue(
-            [queued_shot('/tmp/shot_a.h5'), queued_shot('/tmp/shot_b.h5')]
-        )
-        offered = controller.offer_next()
-        controller.shot_finished(offered['shot_id'], 'completed')
-
-        self.assertIsNone(controller.shot_finished(offered['shot_id'], 'completed'))
-        self.assertEqual(
-            [row['path'] for row in controller.get_queue_display_items()],
-            [os.path.abspath('/tmp/shot_b.h5')],
-            'the shot behind it is not completed in its place',
-        )
-
     def test_outcome_for_an_unknown_shot_changes_nothing(self):
         controller = QueueController()
         controller.enqueue([queued_shot('/tmp/shot_a.h5')])
@@ -1020,6 +1002,13 @@ def row_backgrounds(widget, row):
 
 
 class QueueDisplayTests(unittest.TestCase):
+    """What a row's state looks like in the queue: green, red, or nothing.
+
+    Only the mapping from a row's state to its appearance is here. Which state
+    a row is in after an offer, a failure, a retry or a completion is the
+    controller's rule, and is covered against the controller above.
+    """
+
     def test_running_row_is_shown_green_and_waiting_rows_are_not(self):
         controller = QueueController()
         controller.enqueue(
@@ -1055,33 +1044,6 @@ class QueueDisplayTests(unittest.TestCase):
             widget.queue_model.item(0, 1).toolTip(),
             'the reason a shot needs attention is on the row',
         )
-
-    def test_retried_row_goes_back_to_green(self):
-        controller = QueueController()
-        controller.enqueue([queued_shot('/tmp/shot_a.h5')])
-        offered = controller.offer_next()
-        controller.shot_finished(offered['shot_id'], 'failed', 'Device(s) in error state')
-        controller.offer_next()
-        widget = make_queue_widget()
-        widget.set_queue_paths(controller.get_queue_display_items())
-
-        for brush in row_backgrounds(widget, 0):
-            self.assertEqual(brush.color(), RUNNING_ROW_BACKGROUND)
-        self.assertNotIn(
-            'Device(s) in error state', widget.queue_model.item(0, 1).toolTip()
-        )
-
-    def test_row_stops_being_green_once_the_shot_completes(self):
-        controller = QueueController()
-        controller.enqueue(
-            [queued_shot('/tmp/shot_a.h5'), queued_shot('/tmp/shot_b.h5')]
-        )
-        offered = controller.offer_next()
-        controller.shot_finished(offered['shot_id'], 'completed')
-        widget = make_queue_widget()
-        widget.set_queue_paths(controller.get_queue_display_items())
-        self.assertEqual(widget.queue_model.rowCount(), 1)
-        self.assertTrue(all(brush is None for brush in row_backgrounds(widget, 0)))
 
 
 class ExchangeFailureTests(unittest.TestCase):

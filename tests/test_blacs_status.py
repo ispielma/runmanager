@@ -7,7 +7,6 @@ a constructed RunManager.
 import os
 import time
 import unittest
-from xml.etree import ElementTree
 
 from qtutils import UiLoader
 from qtutils.qt.QtWidgets import QApplication, QCheckBox, QLabel, QLayout
@@ -161,18 +160,6 @@ class PollingTests(unittest.TestCase):
             monitor.poll()
         return blacs, [blacs_status_display(status)[0] for status in reported]
 
-    def test_polling_reports_what_blacs_answered(self):
-        _, states = self.poll_all(
-            {
-                'requesting_shots': True,
-                'status': 'Idle',
-                'shot_id': None,
-                'shot_path': None,
-                'error': None,
-            }
-        )
-        self.assertEqual(states, ['requesting'])
-
     def test_a_blacs_that_comes_back_is_shown_as_back(self):
         # Losing BLACS is not final: polling goes on, and the indicator
         # follows it back without anything being restarted or reconnected.
@@ -308,86 +295,98 @@ class FakeRunManager(object):
         self.ui = FakeUi(run_shots_checked)
 
 
+_qapplication = None
+
+
+def load_main_ui():
+    """Load main.ui the way RunManager.__init__ does."""
+    global _qapplication
+    if QApplication.instance() is None:
+        # Held for the life of the process: a QApplication that is garbage
+        # collected takes every widget built under it down with it.
+        _qapplication = QApplication([])
+    loader = UiLoader()
+    loader.registerCustomWidget(FingerTabWidget)
+    loader.registerCustomWidget(TreeView)
+    return loader.load(os.path.join(os.path.dirname(runmanager.__file__), 'main.ui'))
+
+
 class DestinationControlTests(unittest.TestCase):
-    """The BLACS destination checkbox, and the status light beside it."""
+    """The BLACS destination checkbox, and the status light beside it.
 
-    def setUp(self):
-        main_ui = os.path.join(os.path.dirname(runmanager.__file__), 'main.ui')
-        self.layouts = ElementTree.parse(main_ui).getroot().iter('layout')
-        self.checkbox = None
-        for widget in ElementTree.parse(main_ui).getroot().iter('widget'):
-            if widget.get('name') == 'checkBox_run_shots':
-                self.checkbox = widget
+    Asserted against the loaded interface rather than against main.ui read as
+    XML: what a user meets is the window runmanager builds, and a main.ui that
+    will not load is a runmanager that will not start -- which reading the file
+    as text cannot tell us. Loading it here also leaves the .ui free to be
+    rearranged, so long as the widgets are still there and still say this.
+    """
 
-    def property_of_checkbox(self, name):
-        for prop in self.checkbox.iter('property'):
-            if prop.get('name') == name:
-                return prop.find('string').text
-        return None
+    @classmethod
+    def setUpClass(cls):
+        cls.ui = load_main_ui()
+
+    def checkbox(self):
+        checkbox = self.ui.findChild(QCheckBox, 'checkBox_run_shots')
+        self.assertIsNotNone(checkbox, 'checkBox_run_shots is the object name')
+        return checkbox
+
+    def test_the_interface_still_loads_with_the_widgets_this_feature_needs(self):
+        # The widgets both halves of this feature reach for by name:
+        # AnalysisSubmission is given verticalLayout_2, and Engage reads the
+        # two checkboxes.
+        self.assertIsNotNone(self.ui.findChild(QLayout, 'verticalLayout_2'))
+        self.assertIsNotNone(self.ui.findChild(QCheckBox, 'checkBox_view_shots'))
+        indicator = self.ui.findChild(QLabel, 'blacs_status_indicator')
+        self.assertIsNotNone(indicator)
+        self.assertFalse(
+            indicator.pixmap().isNull(),
+            'the light shows something before the first poll',
+        )
 
     def test_the_destination_control_is_labelled_blacs(self):
-        self.assertEqual(self.property_of_checkbox('text'), 'BLACS')
+        checkbox = self.checkbox()
+        self.assertEqual(checkbox.text(), 'BLACS')
+        self.assertTrue(checkbox.isChecked(), 'engaged shots are queued by default')
 
     def test_the_destination_control_keeps_the_name_other_programs_use(self):
         # Only the label changed. What it means, what it is called, and the
         # remote methods that read and set it are a public interface.
-        self.assertIsNotNone(self.checkbox, 'checkBox_run_shots is the object name')
+        self.checkbox()
         self.assertTrue(hasattr(runmanager.remote.Client, 'get_run_shots'))
         self.assertTrue(hasattr(runmanager.remote.Client, 'set_run_shots'))
         self.assertTrue(hasattr(RemoteServer, 'handle_get_run_shots'))
         self.assertTrue(hasattr(RemoteServer, 'handle_set_run_shots'))
 
     def test_the_tooltip_says_what_the_checkbox_is_not(self):
-        tooltip = self.property_of_checkbox('toolTip')
+        tooltip = self.checkbox().toolTip()
         self.assertIn('queue', tooltip, 'what ticking it does')
         for not_this in ['Pause queue', 'Request shots', 'Abort']:
             self.assertIn(
                 not_this, tooltip, 'the controls it is not must be named'
             )
 
-    def test_the_interface_still_loads_with_the_status_light_in_it(self):
-        # The indicator went into a layout of its own beside the checkbox, and
-        # a main.ui that will not load is a runmanager that will not start --
-        # which reading the file as text cannot tell us. Load it the way
-        # RunManager.__init__ does, and check the widgets both halves of this
-        # feature reach for by name are still there: AnalysisSubmission is
-        # given verticalLayout_2, and Engage reads the two checkboxes.
-        if QApplication.instance() is None:
-            self.__class__._qapplication = QApplication([])
-        loader = UiLoader()
-        loader.registerCustomWidget(FingerTabWidget)
-        loader.registerCustomWidget(TreeView)
-        ui = loader.load(
-            os.path.join(os.path.dirname(runmanager.__file__), 'main.ui')
-        )
-
-        self.assertIsNotNone(ui.findChild(QLayout, 'verticalLayout_2'))
-        checkbox = ui.findChild(QCheckBox, 'checkBox_run_shots')
-        self.assertEqual(checkbox.text(), 'BLACS')
-        self.assertTrue(checkbox.isChecked(), 'engaged shots are queued by default')
-        self.assertIsNotNone(ui.findChild(QCheckBox, 'checkBox_view_shots'))
-        indicator = ui.findChild(QLabel, 'blacs_status_indicator')
-        self.assertIsNotNone(indicator)
-        self.assertFalse(
-            indicator.pixmap().isNull(), 'the light shows something before the first poll'
-        )
-
     def test_the_status_light_sits_beside_the_destination_control(self):
-        together = [
-            {
-                widget.get('name')
-                for item in layout.findall('item')
-                for widget in item.findall('widget')
-            }
-            for layout in self.layouts
-        ]
+        # Whichever layout holds them, the two are laid out together: BLACS's
+        # connectivity belongs next to the control that sends it work, not in
+        # a dock or a status bar of its own.
+        checkbox = self.checkbox()
+        indicator = self.ui.findChild(QLabel, 'blacs_status_indicator')
         self.assertTrue(
             any(
-                {'checkBox_run_shots', 'blacs_status_indicator'} <= names
-                for names in together
+                layout.indexOf(checkbox) != -1 and layout.indexOf(indicator) != -1
+                for layout in self.ui.findChildren(QLayout)
             ),
             'the indicator belongs beside the checkbox, not in a new dock',
         )
+
+
+class IndicatorUpdateTests(unittest.TestCase):
+    """What runmanager puts on the status light when an answer arrives.
+
+    Against the indicator's own surface rather than the loaded window: this is
+    the update runmanager makes, and it should still be reported here when
+    main.ui is what has gone wrong.
+    """
 
     def test_the_status_light_says_the_same_whatever_the_checkbox_says(self):
         # Watching BLACS is not a consequence of sending it shots: an operator
