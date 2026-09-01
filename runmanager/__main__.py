@@ -4355,12 +4355,24 @@ class RunManager(LabscriptApplication):
                                  creationflags=creationflags, stdout=None, stderr=None,
                                  close_fds=True)
             else:
-                devnull = open(os.devnull, 'w')
-                if not os.fork():
-                    os.setsid()
-                    subprocess.Popen([sys.executable, '-m', 'runviewer'],
-                                     stdin=devnull, stdout=devnull, stderr=devnull, close_fds=True)
-                    os._exit(0)
+                # start_new_session does the setsid this used to fork to reach,
+                # and reaches it without running Python in a forked child.
+                # os.fork() here was unsafe and did not work: runmanager runs
+                # half a dozen threads, so the child got only this one, holding
+                # whatever locks the others held at the instant of the fork --
+                # including the allocator's, which subprocess needs. It
+                # deadlocked before starting anything, silently, and Python 3.12
+                # started warning about it. Worse, had Popen raised instead, the
+                # os._exit(0) below it would never have run and the child would
+                # have carried on as a second copy of runmanager.
+                subprocess.Popen(
+                    [sys.executable, '-m', 'runviewer'],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    close_fds=True,
+                )
             try:
                 zmq_get(runviewer_port, 'localhost', data='hello', timeout=15)
             except Exception as e:
