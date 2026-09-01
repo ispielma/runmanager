@@ -119,9 +119,19 @@ class BlacsStatusMonitor(object):
         self.thread.start()
 
     def shutdown(self):
+        """Stop asking. Deliberately does not wait for the poller to finish.
+
+        Reporting a status is a blocking hop to the GUI thread, and this is
+        called from that thread, so joining meant each waiting for the other:
+        the poller parked in the GUI queue, the GUI thread parked in join(),
+        and neither moved until the join timed out a second later. The operator
+        saw the window freeze on quit, and the stale update then landed on
+        widgets already being torn down.
+
+        There is nothing here worth waiting for. The thread is a daemon, it
+        holds no state to flush, and poll() drops an answer that arrives after
+        this."""
         self.stopped.set()
-        if self.thread.is_alive() and threading.current_thread() is not self.thread:
-            self.thread.join(timeout=1)
 
     def poll(self):
         """Ask BLACS once what it is doing, and report the answer."""

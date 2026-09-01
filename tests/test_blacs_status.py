@@ -5,6 +5,7 @@ so they are tested against snapshots rather than against a running apparatus or
 a constructed RunManager.
 """
 import os
+import threading
 import time
 import types
 import unittest
@@ -315,6 +316,48 @@ class ClientTests(unittest.TestCase):
                 (4242, 'blacs-pc', ['get_status', (), {}], 3),
                 (4242, 'blacs-pc', ['hello', (), {}], 3),
             ],
+        )
+
+
+class MonitorShutdownTests(unittest.TestCase):
+    """Closing runmanager while a poll is reporting.
+
+    Reporting a status is a blocking hop to the GUI thread. Joining the poller
+    from that same thread meant each waited for the other: the poller parked in
+    the GUI queue, the GUI thread parked in join(), and neither moved until the
+    join timed out. The operator saw the window freeze on quit, and the stale
+    update then landed on widgets already torn down.
+
+    There is nothing to wait for here. The poller holds no state worth
+    flushing, it is a daemon, and it has been told to stop.
+    """
+
+    def test_shutdown_does_not_wait_for_a_poll_already_reporting(self):
+        reporting = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def on_status(status):
+            reporting.set()
+            release.wait(5)
+
+        monitor = BlacsStatusMonitor(
+            on_status=on_status,
+            client=FakeBlacs({'requesting_shots': True}),
+            interval=0.01,
+        )
+        monitor.start()
+        self.assertTrue(reporting.wait(2), 'the poller got as far as reporting')
+
+        started = time.monotonic()
+        monitor.shutdown()
+        elapsed = time.monotonic() - started
+
+        self.assertLess(
+            elapsed,
+            0.5,
+            'closing runmanager waited on a poller that was itself waiting on '
+            'the thread doing the closing',
         )
 
 
