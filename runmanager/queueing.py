@@ -50,7 +50,10 @@ SHOT_OUTCOME_STATUSES = ('completed', 'aborted', 'failed', 'rejected')
 # exception: it came back without running, and is waiting for an operator. The
 # rows below the rule are work still waiting and are never tinted.
 FAILED_ROW_BACKGROUND = QtGui.QColor('#ffcccc')
-ROW_BACKGROUNDS = {'failed': FAILED_ROW_BACKGROUND}
+ROW_BACKGROUNDS = {
+    'failed': FAILED_ROW_BACKGROUND,
+    'rejected': FAILED_ROW_BACKGROUND,
+}
 # Set with either of them, and not left to the theme. Both fills are pale, so
 # on a dark theme the palette's own near-white text sits on them unreadably;
 # naming the text colour alongside the fill is what keeps the pair legible
@@ -506,6 +509,15 @@ class QueueController(object):
             if not self._items or not self._items[0]['compiled']:
                 return None
             item = self._items[0]
+            if item['state'] == 'rejected':
+                # BLACS could not read this shot at all -- a file that has gone,
+                # or a connection table that does not match the apparatus. That
+                # is this queue's problem and not the apparatus's, and offering
+                # it again would only be refused again, once per request. It is
+                # held here, red, until an operator deletes it or a restart
+                # clears the state. Meanwhile BLACS is free: it keeps asking,
+                # gets nothing, and runs its own shot.
+                return None
             reclaimed = item['state'] == 'running'
             item['state'] = 'running'
             # Whatever went wrong last time is being attempted again, so the
@@ -540,9 +552,10 @@ class QueueController(object):
                     continue
                 if status == 'completed':
                     return self._items.pop(index)
-                if item['state'] == 'failed' and item['message'] == message:
+                state = 'rejected' if status == 'rejected' else 'failed'
+                if item['state'] == state and item['message'] == message:
                     return None
-                item['state'] = 'failed'
+                item['state'] = state
                 item['message'] = message
                 return dict(item)
             return None

@@ -294,13 +294,95 @@ class QueueOutcomeTests(unittest.TestCase):
                     ],
                     'the shot that did not run stays at the head of the queue',
                 )
-                self.assertEqual(rows[0]['state'], 'failed')
+                self.assertEqual(
+                    rows[0]['state'],
+                    'rejected' if status == 'rejected' else 'failed',
+                    'a rejected shot is held apart: it is the queue that has to '
+                    'be put right, not the apparatus',
+                )
                 self.assertIn('Device error', rows[0]['tooltip'])
                 self.assertEqual(
                     [item['shot_id'] for item in controller.export_state()['items']][0],
                     offered['shot_id'],
                     'the row keeps the id it was offered under',
                 )
+
+
+class RejectedShotTests(unittest.TestCase):
+    """A shot BLACS could not read at all is this queue's problem, not the
+    apparatus's.
+
+    A file that has gone, or a connection table that does not match: nothing
+    about the apparatus is wrong and nothing about it will change by asking
+    again. So the row is held here, red, and is not offered again -- an
+    operator deletes it, or a restart clears the state. BLACS is left running:
+    it keeps asking, gets nothing, and runs its own shot meanwhile. Anything
+    else would need somebody standing at the apparatus to restart it over a
+    file only this end can fix.
+    """
+
+    def rejected_queue(self):
+        controller = QueueController()
+        controller.enqueue(
+            [queued_shot('/tmp/shot_a.h5'), queued_shot('/tmp/shot_b.h5')]
+        )
+        offered = controller.offer_next()
+        controller.shot_finished(
+            offered['shot_id'], 'rejected', 'H5 file not accessible to Control PC'
+        )
+        return controller, offered
+
+    def test_a_rejected_shot_is_not_offered_again(self):
+        controller, _ = self.rejected_queue()
+
+        self.assertIsNone(
+            controller.offer_next(),
+            'offering it again would only be refused again, once per request',
+        )
+        self.assertEqual(
+            [row['path'] for row in controller.get_queue_display_items()],
+            [os.path.abspath('/tmp/shot_a.h5'), os.path.abspath('/tmp/shot_b.h5')],
+            'and it holds its place rather than letting the queue past it',
+        )
+
+    def test_a_failed_shot_is_offered_again_and_a_rejected_one_is_not(self):
+        # The distinction the two states exist for. A shot the apparatus could
+        # not run is worth another attempt once an operator has seen why; a
+        # shot that could not be read is not, and no amount of asking changes
+        # the file.
+        for status, offered_again in (('failed', True), ('rejected', False)):
+            with self.subTest(status=status):
+                controller = QueueController()
+                controller.enqueue([queued_shot('/tmp/shot_a.h5')])
+                offered = controller.offer_next()
+                controller.shot_finished(offered['shot_id'], status, 'a reason')
+
+                again = controller.offer_next()
+
+                self.assertEqual(again is not None, offered_again)
+
+    def test_deleting_it_lets_the_queue_go_on(self):
+        controller, _ = self.rejected_queue()
+        rows = controller.get_queue_display_items()
+
+        controller.delete_rows([rows[0]['shot_id']])
+
+        offered = controller.offer_next()
+        self.assertEqual(offered['path'], os.path.abspath('/tmp/shot_b.h5'))
+
+    def test_it_is_shown_like_any_other_shot_needing_attention(self):
+        controller, _ = self.rejected_queue()
+
+        widget = make_queue_widget()
+        widget.set_queue_paths(controller.get_queue_display_items())
+
+        for brush in row_backgrounds(widget, 0):
+            self.assertEqual(brush.color(), FAILED_ROW_BACKGROUND)
+        item = widget.queue_model.item(0, widget.path_column)
+        self.assertIn('H5 file not accessible', item.toolTip())
+        self.assertTrue(
+            item.isSelectable(), 'deleting it is how an operator moves the queue on'
+        )
 
 
 class FakeAnalysisSubmission(object):
