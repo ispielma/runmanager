@@ -1292,10 +1292,17 @@ class ReplayTests(unittest.TestCase):
             'a re-offer the operator would otherwise never see is reported',
         )
 
-    def test_a_completed_outcome_that_arrives_twice_is_analysed_once(self):
+    def test_a_completed_outcome_that_arrives_twice_retires_the_row_once(self):
         # BLACS lets go of an outcome only once runmanager has taken it, so a
-        # lost reply makes it send the same completed outcome again. Analysis
-        # follows the row that was retired, so the repeat finds nothing to do.
+        # lost reply makes it send the same completed outcome again. The queue
+        # is changed once: the second finds no row and leaves it alone.
+        #
+        # The file is submitted both times, and that is deliberate. Runmanager
+        # cannot tell a resend from a shot whose row went while BLACS was
+        # running it -- an operator loading a configuration, or restarting --
+        # and of the two mistakes available, submitting a file twice is one
+        # lyse absorbs by ignoring a duplicate filepath, while dropping a shot
+        # that ran and wrote data is not recoverable afterwards.
         self.enqueue('shot_a.h5')
         offered = self.app.queue_exchange(request_shot=True)
         outcome = {
@@ -1310,8 +1317,8 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(self.rows(), [], 'the shot is finished with, once')
         self.assertEqual(
             self.app.analysis_submission.submitted,
-            [offered['path']],
-            'lyse is not given the same shot to analyse twice',
+            [offered['path'], offered['path']],
+            'the same filepath twice, which lyse ignores the second time',
         )
 
     def test_a_repeated_outcome_cannot_reach_a_later_shot_of_the_same_file(self):
@@ -1339,8 +1346,11 @@ class ReplayTests(unittest.TestCase):
         )
         self.assertEqual(
             self.app.analysis_submission.submitted,
-            [first['path']],
-            'and it is not analysed on the strength of the first shot finishing',
+            [first['path'], first['path']],
+            'the resend submits the file that ran a second time, which lyse '
+            'ignores by filepath; what must not happen is the second row being '
+            'analysed on the strength of the first shot finishing, and it is '
+            'the same file either way",'.replace('",', '"'),
         )
 
     def test_a_repeated_failed_outcome_keeps_one_red_row_and_one_reason(self):
@@ -1470,6 +1480,80 @@ class OutcomeAppliedOnceTests(unittest.TestCase):
             app.output_box.said('shot_a.h5', 'aborted'),
             'a genuinely new outcome for the retried row still gets through',
         )
+
+
+class OutcomeWithNoRowTests(unittest.TestCase):
+    """A shot that ran, reported by BLACS, with no row left to match.
+
+    The row can be gone for ordinary reasons: the operator loaded a queue
+    configuration, or restarted runmanager, while BLACS was still running the
+    shot it had been given. BLACS finishes, says so, and runmanager has nothing
+    in its queue under that id.
+
+    The queue is left alone -- there is nothing there to change -- but the shot
+    still ran and still wrote data, so it goes to lyse. It used to be dropped,
+    on the grounds that a resent outcome for a row already retired would be
+    submitted twice. lyse ignores a duplicate filepath and says so, which is a
+    far smaller thing than a real shot nothing ever analyses.
+    """
+
+    def app(self):
+        app = FakeRunManager()
+        self.addCleanup(app.queue_manager.shutdown)
+        return app
+
+    def outcome(self, path='/tmp/gone.h5'):
+        return {
+            'shot_id': 'no-such-row',
+            'status': 'completed',
+            'message': '',
+            'path': path,
+        }
+
+    def test_a_completed_shot_with_no_row_still_reaches_lyse(self):
+        app = self.app()
+
+        app.apply_shot_outcome(self.outcome())
+
+        self.assertEqual(
+            app.analysis_submission.submitted,
+            ['/tmp/gone.h5'],
+            'the shot ran and wrote data; losing it to analysis is the one '
+            'outcome that cannot be undone later',
+        )
+
+    def test_the_operator_is_told_the_queue_was_not_touched(self):
+        app = self.app()
+
+        app.apply_shot_outcome(self.outcome())
+
+        self.assertTrue(
+            app.output_box.said('no-such-row'),
+            'and told which shot it was, since the queue shows nothing of it',
+        )
+
+    def test_a_shot_that_did_not_complete_is_not_analysed(self):
+        app = self.app()
+
+        app.apply_shot_outcome(
+            {
+                'shot_id': 'no-such-row',
+                'status': 'failed',
+                'message': 'a device would not arm',
+                'path': '/tmp/gone.h5',
+            }
+        )
+
+        self.assertEqual(
+            app.analysis_submission.submitted, [], 'it did not run to the end'
+        )
+
+    def test_nothing_is_submitted_when_blacs_named_no_file(self):
+        app = self.app()
+
+        app.apply_shot_outcome(dict(self.outcome(), path=None))
+
+        self.assertEqual(app.analysis_submission.submitted, [])
 
 
 class QueueBookkeepingUnderSubmissionTests(unittest.TestCase):
@@ -1899,7 +1983,7 @@ class LostRowTests(unittest.TestCase):
     it says what happened either way.
     """
 
-    def test_a_completed_shot_with_no_row_is_reported_and_not_analysed(self):
+    def test_a_completed_shot_with_no_row_is_reported_and_still_analysed(self):
         app = FakeRunManager()
         self.addCleanup(app.queue_manager.shutdown)
         app.queue_manager.enqueue([queued_shot('/tmp/shot_a.h5')])
@@ -1918,8 +2002,15 @@ class LostRowTests(unittest.TestCase):
             request_shot=False,
         )
 
-        self.assertEqual(app.analysis_submission.submitted, [])
-        self.assertTrue(app.output_box.said(offered['shot_id'], 'not been sent'))
+        self.assertEqual(
+            app.analysis_submission.submitted,
+            ['/tmp/shot_a.h5'],
+            'the queue lost the row, but the shot ran and wrote data: dropping '
+            'it here is the one loss nothing later can undo',
+        )
+        self.assertTrue(
+            app.output_box.said(offered['shot_id'], 'queue is unchanged')
+        )
 
     def test_a_path_runmanager_cannot_use_does_not_reach_analysis_as_it_came(self):
         app = FakeRunManager()

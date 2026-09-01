@@ -4550,24 +4550,31 @@ class RunManager(LabscriptApplication):
         record = self.queue_manager.shot_finished(shot_id, status, message)
         if status != 'completed':
             return
-        if record is None:
-            # A completed shot that matched no row. Usually a lost reply being
-            # sent again, which is exactly what should change nothing -- but it
-            # also happens when the row went while BLACS was running it, and
-            # then a shot really did run and nothing will analyse it. The two
-            # are indistinguishable here, so say what happened and let the
-            # operator judge which it was.
-            self.output_box.output(
-                'BLACS reported shot %s as completed, but no queued shot has '
-                'that id; it has not been sent for analysis.\n' % shot_id,
-                red=True,
-            )
-            return
         agnostic_path = fields.get('path')
         agnostic_path = str(agnostic_path) if agnostic_path else ''
-        if not agnostic_path:
+        if record is None:
+            # A completed shot that matched no row. The row can be gone for
+            # ordinary reasons -- the operator loaded a queue configuration, or
+            # restarted runmanager, while BLACS was running the shot it had
+            # been given -- and it can also be a lost reply being sent again
+            # for a row already retired. The two are indistinguishable here.
+            #
+            # There is nothing to do to the queue either way. But the shot ran
+            # and wrote data, so it still goes to lyse: a duplicate is ignored
+            # there by filepath, with a line saying so, while a real shot that
+            # nothing analyses is not recoverable later. Say which shot it was,
+            # since the queue shows nothing of it.
+            self.output_box.output(
+                'BLACS reported shot %s as completed, but no queued shot has '
+                'that id; the queue is unchanged.\n' % shot_id,
+                red=True,
+            )
+        elif not agnostic_path:
             agnostic_path = shared_drive.path_to_agnostic(record['path'])
-        self.analysis_submission.notify_shot_complete(agnostic_path)
+        if agnostic_path:
+            # With no row there is no second place to look for the file, so an
+            # outcome that named none has nothing to analyse.
+            self.analysis_submission.notify_shot_complete(agnostic_path)
 
     def offer_shot(self):
         """Offer BLACS a shot, if this runmanager has one to run.
