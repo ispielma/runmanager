@@ -528,9 +528,11 @@ class PauseQueueControlTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        # The real main.ui, because setup_queue_tab inserts its tab into that
-        # tab widget and asks its tab bar not to move it -- which needs the
-        # drag-drop tab bar main.ui sets up, not a bare FingerTabWidget.
+        # The real main.ui, because setup_queue_tab pins its tab in place with
+        # tabBar().setMovable(False, index=...), and only runmanager's own
+        # FingerTabBarWidget takes that index keyword. labscript_utils' bar of
+        # the same name inherits QTabBar.setMovable(bool), which takes no
+        # keywords at all, so building the tab against it raises TypeError.
         cls.ui = load_main_ui()
 
     def build_queue_tab(self):
