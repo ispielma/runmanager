@@ -71,7 +71,7 @@ SESSION_ONLY_FIELDS = ('compiling', 'state', 'message', 'reclaimed')
 # row reserved for the shot BLACS was given, kept it through a replacement
 # submission, and told the operator BLACS was running it. A new state that
 # does mean a handover joins by being named here.
-BLACS_STATES = ('running', 'failed', 'rejected')
+BLACS_STATES = ('running', 'failed', 'rejected', 'cancelled')
 
 
 def sent_to_blacs(row):
@@ -156,16 +156,18 @@ class RunmanagerQueueWidget(ShotQueueWidget):
         row_info = self._row_info(path_info)
         row_info['rule_below'] = True
         if path_info['state'] == 'running':
-            # Not selectable, so Delete cannot even be aimed at it. The queue
-            # refuses to remove it anyway, but saying so afterwards means
-            # printing into the output box on another tab, which an operator
-            # looking at the queue never sees. Refusing the selection says it
-            # where they are, before they try, and the tooltip says why.
-            row_info['selectable'] = False
             row_info['tooltip'] = (
-                '%s\nBLACS is running this shot. It cannot be deleted until it '
-                'is done.' % path_info['path']
+                '%s\nBLACS has this shot. Delete cancels it: the row stays '
+                'until BLACS next asks for work, because its file may still be '
+                'being written, but it will not be sent again.'
+                % path_info['path']
             )
+        elif path_info['state'] == 'cancelled':
+            # Struck through rather than removed, and nothing more to aim at
+            # it: a second Delete could not free the file any sooner than the
+            # first, for the same reason.
+            row_info['strikeout'] = True
+            row_info['selectable'] = False
         return row_info
 
     def set_queue_paths(self, paths):
@@ -322,7 +324,21 @@ class QueueController(object):
                 if item['shot_id'] not in wanted:
                     keep.append(item)
                 elif item['state'] == 'running':
+                    # Marked, not removed. Its file may be under the hardware's
+                    # pen, and nothing here can know otherwise -- so the row
+                    # stays, struck through, and is never offered again. What
+                    # clears it is BLACS's next request carrying no outcome for
+                    # it, which is the one fact that proves the file is free;
+                    # see offer_next. A second Delete cannot do better, for the
+                    # same reason the first could not.
+                    item['state'] = 'cancelled'
+                    item['message'] = (
+                        'Cancelled. It will not be sent again, and goes when '
+                        'BLACS next asks for work.'
+                    )
                     protected.append(dict(item))
+                    keep.append(item)
+                elif item['state'] == 'cancelled':
                     keep.append(item)
                 else:
                     removed_paths.append(item['path'])
@@ -499,6 +515,19 @@ class QueueController(object):
                 ]
             return [item['path'] for item in dropped]
 
+    def drop_cancelled_head(self):
+        """Forget a cancelled row, now that nobody can be running it.
+
+        Called when BLACS asks for work. The outcome it carried, if any, has
+        already been applied, so a cancelled row still here at this point is
+        one BLACS said nothing about -- and a request carrying no outcome for a
+        row is proof nobody is running it, the same fact the reclaim rests on.
+        That is when its file is free to go. Returns the paths to delete."""
+        with self._lock:
+            if not self._items or self._items[0]['state'] != 'cancelled':
+                return []
+            return [self._items.pop(0)['path']]
+
     def offer_next(self):
         """Offer the shot at the head of the queue if it is ready to hand over.
 
@@ -584,7 +613,12 @@ class QueueController(object):
             for index, item in enumerate(self._items):
                 if item['shot_id'] != shot_id:
                     continue
-                if status == 'completed':
+                if status == 'completed' or item['state'] == 'cancelled':
+                    # A cancelled row goes on any outcome at all. The operator
+                    # has said they do not want this shot, so a failure is not
+                    # an invitation to try it again -- and a completed one is
+                    # still reported onward by the caller, the cancel being
+                    # about the queue and not about physics already done.
                     return self._items.pop(index)
                 state = 'rejected' if status == 'rejected' else 'failed'
                 # This catches a resend only while the row still shows the
@@ -846,6 +880,10 @@ class QueueManager(QtCore.QObject):
         for row in protected:
             if row['state'] == 'running':
                 reason = 'BLACS is running it.'
+            elif row['state'] == 'cancelled':
+                # Not something BLACS said: the operator did this, and the row
+                # already carries the whole of it.
+                reason = row['message']
             else:
                 reason = 'BLACS reported it as %s%s' % (
                     row['state'],
@@ -867,6 +905,9 @@ class QueueManager(QtCore.QObject):
         return self._remove_from_queue(*self.controller.clear())
 
     def offer_next(self):
+        cancelled = self.controller.drop_cancelled_head()
+        if cancelled:
+            self._delete_queue_files(cancelled)
         overtaken = self.controller.drop_overtaken_default_shots()
         if overtaken:
             self._delete_queue_files(overtaken)

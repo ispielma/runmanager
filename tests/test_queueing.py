@@ -903,15 +903,32 @@ class KeptRowReasonTests(unittest.TestCase):
         app.queue_manager.enqueue(list(items))
         return app
 
-    def test_delete_says_blacs_is_running_the_row_it_kept(self):
+    def test_clear_says_blacs_is_running_the_row_it_kept(self):
+        # Clear is the caller that can still keep a row BLACS is genuinely
+        # running: Delete now cancels that row rather than keeping it as it
+        # was, so this is where the running wording is reached.
+        app = self.app_with(
+            queued_shot('/tmp/shot_a.h5'), queued_shot('/tmp/shot_b.h5')
+        )
+        app.queue_manager.offer_next()
+
+        app.queue_manager.clear()
+
+        self.assertTrue(
+            app.output_box.said('shot_a.h5', 'BLACS is running it'),
+            'that one really is running',
+        )
+
+    def test_delete_says_the_shot_blacs_has_was_cancelled(self):
         app = self.app_with(queued_shot('/tmp/shot_a.h5'))
         offered = app.queue_manager.offer_next()
 
         app.queue_manager.delete_rows([offered['shot_id']])
 
         self.assertTrue(
-            app.output_box.said('shot_a.h5', 'BLACS is running it'),
-            'that one really is running',
+            app.output_box.said('shot_a.h5', 'Cancelled'),
+            'the operator asked for it to go, and it will, once BLACS asks '
+            'for work and proves the file is free',
         )
 
     def test_clear_does_not_say_blacs_is_running_a_row_that_came_back(self):
@@ -1060,22 +1077,28 @@ class QueueEditingTests(unittest.TestCase):
         by_path = {row['path']: row['shot_id'] for row in self.rows()}
         return [by_path[path] for path in paths]
 
-    def test_delete_keeps_the_shot_blacs_is_running_and_its_file(self):
+    def test_delete_cancels_the_shot_blacs_has_and_keeps_its_file(self):
         running = self.enqueue('shot_a.h5')
         self.app.offer_shot()
 
         removed = self.app.queue_manager.delete_rows(self.selection(running))
 
-        self.assertEqual(removed, [])
+        self.assertEqual(removed, [], 'nothing is removed yet')
         rows = self.rows()
         self.assertEqual([row['path'] for row in rows], [running])
-        self.assertEqual(rows[0]['state'], 'running')
-        self.assertTrue(
-            os.path.exists(running), 'the file BLACS is running is still there'
+        self.assertEqual(
+            rows[0]['state'],
+            'cancelled',
+            'the operator has said not this one, and the row says so',
         )
         self.assertTrue(
-            self.app.output_box.said('shot_a.h5', 'running'),
-            'and the operator is told why the row they selected is still there',
+            os.path.exists(running),
+            'the file may still be under the hardware pen, so it stays until '
+            'BLACS asking for work proves otherwise',
+        )
+        self.assertTrue(
+            self.app.output_box.said('shot_a.h5'),
+            'and the operator is told what happened to the row they selected',
         )
 
     def test_delete_removes_the_rest_of_the_selection_around_it(self):
@@ -1092,14 +1115,20 @@ class QueueEditingTests(unittest.TestCase):
         )
 
         self.assertEqual(sorted(removed), sorted([waiting, also_waiting]))
-        self.assertEqual([row['path'] for row in self.rows()], [running])
+        self.assertEqual(
+            [row['path'] for row in self.rows()],
+            [running],
+            'the shot BLACS has is cancelled rather than removed, so it is '
+            'still the row that is left',
+        )
+        self.assertEqual(self.rows()[0]['state'], 'cancelled')
         self.assertFalse(os.path.exists(waiting), 'a waiting row takes its file')
         self.assertFalse(os.path.exists(also_waiting))
         self.assertTrue(os.path.exists(running))
         self.assertEqual(
-            len(self.app.output_box.said('shot_a.h5', 'running')),
+            len(self.app.output_box.said('shot_a.h5', 'Cancelled')),
             1,
-            'the one row that was kept is named once',
+            'the one row that was kept is named once, and says what happened',
         )
 
     def test_clear_keeps_the_shot_blacs_is_running_and_removes_the_rest(self):
@@ -1483,6 +1512,135 @@ class OutcomeAppliedOnceTests(unittest.TestCase):
         )
 
 
+class CancelledShotTests(unittest.TestCase):
+    """Deleting the shot BLACS was given.
+
+    The row could not be deleted at all. That was safe -- its file may be under
+    the hardware's pen -- but it left an operator with no way to say "not this
+    one" about the shot at the head of their own queue, and a row stranded by a
+    BLACS that was killed sat there for ever claiming to be running.
+
+    So Delete marks it instead of removing it: struck through, still present,
+    and never offered again under any circumstance. What clears it is the one
+    thing that constitutes proof the file is free -- BLACS's next request
+    carrying no outcome for it, which is the same fact the reclaim already
+    rests on. Until then nothing removes it, because nothing else can know.
+
+    An outcome arriving first clears it too, whatever the outcome was: the
+    operator has said they do not want this shot, so a failure does not stay
+    red to be retried. A completed one is still reported onward -- the cancel
+    is about the queue, not about physics that already happened.
+    """
+
+    def queue_with_a_shot_at_blacs(self):
+        app = FakeRunManager()
+        self.addCleanup(app.queue_manager.shutdown)
+        app.queue_manager.enqueue(
+            [queued_shot('/tmp/X.h5'), queued_shot('/tmp/Y.h5')]
+        )
+        offered = app.queue_manager.offer_next()
+        return app, offered['shot_id']
+
+    def rows(self, app):
+        return app.queue_manager.controller.get_queue_display_items()
+
+    def test_deleting_it_keeps_the_row_and_its_file(self):
+        app, shot_id = self.queue_with_a_shot_at_blacs()
+
+        removed = app.queue_manager.delete_rows([shot_id])
+
+        self.assertEqual(removed, [], 'the file may be under the hardware pen')
+        self.assertEqual(
+            [os.path.basename(row['path']) for row in self.rows(app)],
+            ['X.h5', 'Y.h5'],
+            'and the row stays where it is',
+        )
+
+    def test_the_row_is_struck_through(self):
+        app, shot_id = self.queue_with_a_shot_at_blacs()
+
+        app.queue_manager.delete_rows([shot_id])
+
+        widget = make_queue_widget()
+        widget.set_queue_paths(self.rows(app))
+        font = widget.queue_model.item(0, widget.path_column).font()
+        self.assertTrue(
+            font.strikeOut(), 'still here, and finished with, said at once'
+        )
+
+    def test_it_is_never_offered_again(self):
+        app, shot_id = self.queue_with_a_shot_at_blacs()
+        app.queue_manager.delete_rows([shot_id])
+
+        offered = app.queue_manager.offer_next()
+
+        self.assertTrue(
+            offered['path'].endswith('Y.h5'),
+            'the queue goes on to the next shot rather than stalling',
+        )
+        self.assertEqual(
+            [os.path.basename(row['path']) for row in self.rows(app)],
+            ['Y.h5'],
+            'and the cancelled row is gone: a request carrying no outcome for '
+            'it is proof nobody was running it, which is when its file is free',
+        )
+
+    def test_a_completed_outcome_still_reaches_analysis(self):
+        app, shot_id = self.queue_with_a_shot_at_blacs()
+        app.queue_manager.delete_rows([shot_id])
+
+        app.apply_shot_outcome(
+            {
+                'shot_id': shot_id,
+                'status': 'completed',
+                'message': '',
+                'path': '/tmp/X.h5',
+            }
+        )
+
+        self.assertEqual(
+            app.analysis_submission.submitted,
+            ['/tmp/X.h5'],
+            'the cancel is about the queue, not about physics that already '
+            'happened',
+        )
+        self.assertEqual(
+            [os.path.basename(row['path']) for row in self.rows(app)], ['Y.h5']
+        )
+
+    def test_a_failed_outcome_does_not_leave_it_red_for_retry(self):
+        app, shot_id = self.queue_with_a_shot_at_blacs()
+        app.queue_manager.delete_rows([shot_id])
+
+        app.apply_shot_outcome(
+            {
+                'shot_id': shot_id,
+                'status': 'failed',
+                'message': 'a device would not arm',
+                'path': '/tmp/X.h5',
+            }
+        )
+
+        self.assertEqual(
+            [os.path.basename(row['path']) for row in self.rows(app)],
+            ['Y.h5'],
+            'the operator has said they do not want this shot; a failure is '
+            'not an invitation to try it again',
+        )
+
+    def test_a_waiting_row_is_still_deleted_outright(self):
+        app, _shot_id = self.queue_with_a_shot_at_blacs()
+        waiting = self.rows(app)[1]
+
+        removed = app.queue_manager.delete_rows([waiting['shot_id']])
+
+        self.assertEqual(
+            [os.path.basename(path) for path in removed],
+            ['Y.h5'],
+            'nothing has ever held this one, so it simply goes',
+        )
+
+
 class OutcomeWithNoRowTests(unittest.TestCase):
     """A shot that ran, reported by BLACS, with no row left to match.
 
@@ -1821,11 +1979,12 @@ class SentToBlacsRowTests(unittest.TestCase):
             'a failed shot has to be deletable: it is how the queue moves on',
         )
 
-    def test_the_running_row_cannot_be_selected_and_says_why(self):
-        # Delete is refused by the queue whatever happens, but refusing it
-        # afterwards means a line in the output box on another tab, which an
-        # operator looking at the queue never sees. Refuse the selection
-        # instead, and explain it where they are.
+    def test_the_running_row_can_be_selected_and_says_what_delete_does(self):
+        # Delete used to be refused, so the selection was refused too, to say
+        # so where an operator would see it. Delete now cancels the shot
+        # instead, so there is something to aim at -- and the tooltip says what
+        # aiming at it will do, since it is not the outright removal that
+        # Delete means everywhere else.
         controller = QueueController()
         controller.enqueue([queued_shot('/tmp/shot_a.h5')])
         controller.offer_next()
@@ -1833,8 +1992,21 @@ class SentToBlacsRowTests(unittest.TestCase):
         widget = self.widget_for(controller)
 
         item = widget.queue_model.item(0, widget.path_column)
-        self.assertFalse(item.isSelectable())
-        self.assertIn('cannot be deleted', item.toolTip())
+        self.assertTrue(item.isSelectable())
+        self.assertIn('Delete cancels it', item.toolTip())
+
+    def test_a_cancelled_row_cannot_be_selected_again(self):
+        controller = QueueController()
+        controller.enqueue([queued_shot('/tmp/shot_a.h5')])
+        controller.offer_next()
+        controller.delete_rows([controller.get_queue_display_items()[0]['shot_id']])
+
+        widget = self.widget_for(controller)
+
+        self.assertFalse(
+            widget.queue_model.item(0, widget.path_column).isSelectable(),
+            'a second Delete could not free the file any sooner than the first',
+        )
 
     def test_the_reserved_row_is_ruled_off_from_the_work_below_it(self):
         controller = QueueController()
