@@ -53,6 +53,7 @@ FAILED_ROW_BACKGROUND = QtGui.QColor('#ffcccc')
 ROW_BACKGROUNDS = {
     'failed': FAILED_ROW_BACKGROUND,
     'rejected': FAILED_ROW_BACKGROUND,
+    'compile_failed': FAILED_ROW_BACKGROUND,
 }
 # Set with either of them, and not left to the theme. Both fills are pale, so
 # on a dark theme the palette's own near-white text sits on them unreadably;
@@ -64,16 +65,23 @@ TINTED_ROW_FOREGROUND = QtGui.QColor('#202020')
 SESSION_ONLY_FIELDS = ('compiling', 'state', 'message', 'reclaimed')
 
 
+# The states a row reaches by being given to BLACS. Not every state is one:
+# 'compile_failed' is runmanager's own, reached without the row ever leaving
+# here, and reading it as a handover put a file BLACS had never seen into the
+# row reserved for the shot BLACS was given, kept it through a replacement
+# submission, and told the operator BLACS was running it. A new state that
+# does mean a handover joins by being named here.
+BLACS_STATES = ('running', 'failed', 'rejected')
+
+
 def sent_to_blacs(row):
     """Whether this row has been handed to BLACS.
 
-    Any state at all means it has: the empty string is a row that has never
-    left the queue, and every state a row can reach it reaches by being given
-    to BLACS. Written once because three rules turn on it -- which row the
-    queue reserves its first place for, what Clear leaves alone, and what a
-    saved queue means -- and a state added later should join all three without
-    being named again in each."""
-    return bool(row.get('state'))
+    Written once because three rules turn on it -- which row the queue reserves
+    its first place for, what Clear leaves alone, and what a saved queue means
+    -- and a state added to BLACS_STATES joins all three without being named
+    again in each."""
+    return row.get('state') in BLACS_STATES
 
 
 class RunmanagerQueueWidget(ShotQueueWidget):
@@ -131,10 +139,11 @@ class RunmanagerQueueWidget(ShotQueueWidget):
         rather than being a label above the table, so that a column added later
         describes it too.
 
-        A row having any state at all is what "has been sent" means: the empty
-        string is a row that has never been handed over, and every state a row
-        can reach it reaches by being given to BLACS. A state added later is
-        therefore included here without this having to learn its name."""
+        What "has been sent" means is named once, in BLACS_STATES, so a state
+        added there is included here without this having to learn its name. A
+        compile failure is deliberately not one of them: that row never left
+        runmanager, and drawing it here claimed a handover that never
+        happened."""
         if path_info is None:
             return {
                 'path': '',
@@ -302,23 +311,23 @@ class QueueController(object):
         because export_state never writes 'running' out and restore_state gives
         every row back waiting.
 
-        Returns ``(removed_paths, protected_paths)``: the shots that were
+        Returns ``(removed_paths, protected)``: the shots that were
         removed, and the running one that was selected and kept."""
         wanted = set(shot_ids)
         removed_paths = []
-        protected_paths = []
+        protected = []
         with self._lock:
             keep = []
             for item in self._items:
                 if item['shot_id'] not in wanted:
                     keep.append(item)
                 elif item['state'] == 'running':
-                    protected_paths.append(item['path'])
+                    protected.append(dict(item))
                     keep.append(item)
                 else:
                     removed_paths.append(item['path'])
             self._items = keep
-            return removed_paths, protected_paths
+            return removed_paths, protected
 
     def clear(self):
         """Empty the queue, leaving whatever has been sent to BLACS.
@@ -334,14 +343,14 @@ class QueueController(object):
 
         Discarding a failed row is still possible, and still explicit: select
         it and delete it. That is what delete_rows is for, and it is the only
-        thing that does it. Returns ``(removed_paths, protected_paths)``."""
+        thing that does it. Returns ``(removed_paths, protected)``."""
         with self._lock:
             kept = [item for item in self._items if sent_to_blacs(item)]
             removed_paths = [
                 item['path'] for item in self._items if not sent_to_blacs(item)
             ]
             self._items = kept
-            return removed_paths, [item['path'] for item in kept]
+            return removed_paths, [dict(item) for item in kept]
 
     def get_queue_paths(self, include_default_shots=True):
         """Return the paths of the queued shots.
@@ -573,7 +582,7 @@ class QueueController(object):
             item = self._items[0]
             if item['compiled']:
                 return None, False
-            if item['state'] == 'failed':
+            if item['state'] == 'compile_failed':
                 # Already tried, and it went red. Not claimed again, and not
                 # merely to save the work: a compile that fails partway leaves
                 # the devices and calibrations groups in the shot file, and
@@ -615,7 +624,11 @@ class QueueController(object):
                 item['state'] = ''
                 item['message'] = ''
             else:
-                item['state'] = 'failed'
+                # Its own state, and not the one BLACS's failures use: this row
+                # never left runmanager, so nothing that asks whether BLACS has
+                # it should say yes. It is still red, still at the head, and
+                # still a dead end until deleted.
+                item['state'] = 'compile_failed'
                 item['message'] = str(message)
             return True, True
 
@@ -775,16 +788,31 @@ class QueueManager(QtCore.QObject):
         self.controller.set_paused(value)
         self.queueChanged.emit()
 
-    def _remove_from_queue(self, removed_paths, protected_paths):
-        """Delete the files of the rows that went, and say which one stayed.
+    def _remove_from_queue(self, removed_paths, protected):
+        """Delete the files of the rows that went, and say why one stayed.
 
         The operator either selected the protected row or asked for a Clear
         that would have taken it, so a line in the output box says why it is
         still there -- a line rather than a dialog, because the rest of what
-        they asked for has happened. Returns the paths that were removed."""
-        for path in protected_paths:
+        they asked for has happened.
+
+        The reason is read off the row, because the two callers keep rows for
+        different reasons: Delete keeps only the row BLACS is executing, while
+        Clear keeps everything that went to BLACS, which includes rows that came
+        back failed or rejected long ago. One message said "BLACS is running it"
+        for all of them, which for the second kind is untrue, and it is the
+        untruth most likely to send an operator to Abort on idle hardware.
+        Returns the paths that were removed."""
+        for row in protected:
+            if row['state'] == 'running':
+                reason = 'BLACS is running it.'
+            else:
+                reason = 'BLACS reported it as %s%s' % (
+                    row['state'],
+                    ': %s' % row['message'] if row['message'] else '.',
+                )
             self.output(
-                'Kept queued shot %s: BLACS is running it.\n' % os.path.basename(path),
+                'Kept queued shot %s: %s\n' % (os.path.basename(row['path']), reason),
                 red=True,
             )
         if removed_paths:

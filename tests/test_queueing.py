@@ -24,6 +24,7 @@ from runmanager.queueing import (
     FAILED_ROW_BACKGROUND,
     PROVIDER_NONE,
     PROVIDER_SHOT,
+    ROW_BACKGROUNDS,
     TINTED_ROW_FOREGROUND,
     QueueController,
     QueueManager,
@@ -740,7 +741,11 @@ class LazyCompileFailureTests(unittest.TestCase):
             ['lazy_a.h5', 'shot_b.h5'],
             'it is still there, and still first',
         )
-        self.assertEqual(rows[0]['state'], 'failed')
+        self.assertIn(
+            rows[0]['state'],
+            ROW_BACKGROUNDS,
+            'and coloured, whichever kind of failure it was',
+        )
         self.assertIn('Could not be compiled', rows[0]['tooltip'])
 
     def test_the_reason_a_compile_raised_is_on_the_row(self):
@@ -792,6 +797,144 @@ class LazyCompileFailureTests(unittest.TestCase):
         row = self.rows(app)[0]
         self.assertEqual(row['state'], 'running')
         self.assertEqual(row['tooltip'], row['path'], 'nothing to explain')
+
+
+class CompileFailureIsNotAHandoverTests(unittest.TestCase):
+    """A shot that never compiled has not been given to BLACS.
+
+    Both kinds of failure were recorded with the same word, and sent_to_blacs
+    read any state at all as proof of a handover. So a compile failure -- a row
+    that never left runmanager -- was drawn in the reserved first row, the one
+    that means "the shot BLACS was given"; a replacement submission refused to
+    clear it; and the operator was told BLACS was running a file it had never
+    seen.
+
+    What the operator chose stays: the row is still red, still at the head, and
+    still a dead end until it is deleted. Only the claim that BLACS has it goes.
+    """
+
+    def failed_compile_queue(self):
+        controller = QueueController()
+        controller.enqueue(
+            [
+                {
+                    'path': '/tmp/lazy_a.h5',
+                    'labscript_file': '/tmp/e.py',
+                    'compile_mode': COMPILE_MODE_LAZY,
+                    'compiled': False,
+                },
+                queued_shot('/tmp/shot_b.h5'),
+            ]
+        )
+        item, _pending = controller.claim_next_for_compile()
+        controller.finish_compile(item, False, 'Could not be compiled. See the output.')
+        return controller
+
+    def test_it_does_not_take_the_row_reserved_for_the_shot_blacs_has(self):
+        controller = self.failed_compile_queue()
+
+        widget = make_queue_widget()
+        widget.set_queue_paths(controller.get_queue_display_items())
+
+        model = widget.queue_model
+        labels = [
+            model.item(row, widget.path_column).text()
+            for row in range(model.rowCount())
+        ]
+        self.assertIn(
+            'Nothing sent',
+            labels[0],
+            'BLACS has never seen this file, so the row that means it has one '
+            'stays empty',
+        )
+        self.assertEqual(labels[1:], ['lazy_a.h5', 'shot_b.h5'])
+
+    def test_a_replacement_submission_clears_it(self):
+        controller = self.failed_compile_queue()
+
+        removed_paths, protected = controller.clear()
+
+        self.assertEqual(
+            sorted(os.path.basename(path) for path in removed_paths),
+            ['lazy_a.h5', 'shot_b.h5'],
+            'nothing here went to BLACS, so replacing the queue replaces all of '
+            'it rather than stranding the batch behind a row BLACS never had',
+        )
+        self.assertEqual(protected, [])
+
+    def test_it_is_still_red_and_still_first_with_its_reason(self):
+        controller = self.failed_compile_queue()
+
+        rows = controller.get_queue_display_items()
+
+        self.assertEqual(os.path.basename(rows[0]['path']), 'lazy_a.h5')
+        self.assertIn('Could not be compiled', rows[0]['tooltip'])
+        self.assertIn(
+            rows[0]['state'],
+            ROW_BACKGROUNDS,
+            'a shot that cannot run is coloured, however it came to be that way',
+        )
+
+    def test_it_is_still_not_compiled_again(self):
+        controller = self.failed_compile_queue()
+
+        self.assertEqual(
+            controller.claim_next_for_compile(),
+            (None, False),
+            'the failed compile left data in the file that stops labscript ever '
+            'compiling into it',
+        )
+
+
+class KeptRowReasonTests(unittest.TestCase):
+    """Why a row was kept, said accurately.
+
+    One message served two callers with different rules. Delete keeps only the
+    row BLACS is executing; Clear keeps everything that went to BLACS, which
+    includes rows that came back failed or rejected long ago. Both printed
+    "BLACS is running it" -- and for the second that is untrue, and it is the
+    untruth most likely to send an operator to Abort on idle hardware.
+    """
+
+    def app_with(self, *items):
+        app = FakeRunManager()
+        self.addCleanup(app.queue_manager.shutdown)
+        app.queue_manager.enqueue(list(items))
+        return app
+
+    def test_delete_says_blacs_is_running_the_row_it_kept(self):
+        app = self.app_with(queued_shot('/tmp/shot_a.h5'))
+        offered = app.queue_manager.offer_next()
+
+        app.queue_manager.delete_rows([offered['shot_id']])
+
+        self.assertTrue(
+            app.output_box.said('shot_a.h5', 'BLACS is running it'),
+            'that one really is running',
+        )
+
+    def test_clear_does_not_say_blacs_is_running_a_row_that_came_back(self):
+        app = self.app_with(
+            queued_shot('/tmp/shot_a.h5'), queued_shot('/tmp/shot_b.h5')
+        )
+        offered = app.queue_manager.offer_next()
+        app.queue_manager.shot_finished(
+            offered['shot_id'], 'failed', 'a device would not arm'
+        )
+        app.output_box.lines = []
+
+        app.queue_manager.clear()
+
+        self.assertEqual(
+            app.output_box.said('shot_a.h5', 'BLACS is running it'),
+            [],
+            'BLACS reported this shot and moved on; it is not running it',
+        )
+        self.assertTrue(
+            app.output_box.said('shot_a.h5', 'a device would not arm'),
+            'the reason it was kept is the reason it came back, which is '
+            'recorded on the row and was being dropped',
+        )
 
 
 class CompiledFlagOwnershipTests(unittest.TestCase):
@@ -1337,9 +1480,10 @@ class SentToBlacsRowTests(unittest.TestCase):
     below it by a rule and by its colour. Always present, so the queue below
     never shifts, and saying so when nothing has been sent.
 
-    "Sent to BLACS" is any state at all: the empty string is a row that has
-    never been handed over, so a state added later belongs here without the
-    widget having to learn its name.
+    "Sent to BLACS" is the states a row reaches by being given to BLACS, named
+    in BLACS_STATES, so one added later belongs here without the widget having
+    to learn its name. A compile failure is not one of them: that row never left
+    runmanager.
     """
 
     def widget_for(self, controller):
