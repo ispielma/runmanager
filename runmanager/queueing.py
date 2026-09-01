@@ -150,6 +150,12 @@ class QueueController(object):
             compile_mode = COMPILE_MODE_EAGER
         record['compile_mode'] = compile_mode
         record['compiled'] = bool(record.get('compiled', compile_mode == COMPILE_MODE_EAGER))
+        # A shot runmanager produced itself because the queue was empty, rather
+        # than one a user engaged. It is queue work like any other, but it is
+        # not part of a sequence and its file lives in the daily default
+        # directory, so it must never become the anchor that the next Engage
+        # batch is written alongside; see offer_shot().
+        record['default_shot'] = bool(record.get('default_shot', False))
         # A compile in progress belongs to this session only, so a restored
         # shot never starts out claimed:
         record['compiling'] = False
@@ -225,9 +231,17 @@ class QueueController(object):
             self._items = []
             return removed_paths
 
-    def get_queue_paths(self):
+    def get_queue_paths(self, include_default_shots=True):
+        """Return the paths of the queued shots.
+
+        Clear ``include_default_shots`` to leave out the shots runmanager
+        produced itself, which are not part of any sequence."""
         with self._lock:
-            return [item['path'] for item in self._items]
+            return [
+                item['path']
+                for item in self._items
+                if include_default_shots or not item['default_shot']
+            ]
 
     def get_queue_display_items(self):
         with self._lock:
@@ -272,6 +286,18 @@ class QueueController(object):
                 # would only put back something restore_state discards -- and
                 # would make the configuration differ from the saved one, and
                 # so prompt to be saved again, after every offer:
+                #
+                # And without runmanager's own default shots at all. A default
+                # shot's globals were read when it was produced, so restoring
+                # the row would offer BLACS a shot in a later session as though
+                # they were current -- which is the very thing
+                # discard_default_shot() exists to prevent within one session.
+                # Its file is in the default directory for the day it was made,
+                # too, so a restored row would likely name a shot that is no
+                # longer there, at the head of the queue, ahead of real work.
+                # Nothing is lost by leaving it out: a runmanager that still
+                # has the same empty-queue policy produces another as soon as
+                # it is asked for a shot.
                 'items': [
                     {
                         name: value
@@ -279,6 +305,7 @@ class QueueController(object):
                         if name not in SESSION_ONLY_FIELDS
                     }
                     for item in self._items
+                    if not item['default_shot']
                 ],
             }
 
@@ -592,8 +619,8 @@ class QueueManager(QtCore.QObject):
             self.queueChanged.emit()
         return record
 
-    def get_queue_paths(self):
-        return self.controller.get_queue_paths()
+    def get_queue_paths(self, include_default_shots=True):
+        return self.controller.get_queue_paths(include_default_shots)
 
     def get_queue_state(self):
         return self.controller.get_queue_state()

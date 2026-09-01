@@ -42,7 +42,6 @@ import pprint
 import traceback
 import signal
 import unicodedata
-import uuid
 from pathlib import Path
 
 splash.update_text('importing matplotlib')
@@ -2350,7 +2349,11 @@ class RunManager(LabscriptApplication):
         )
 
     def get_queue_append_filepath(self):
-        queue_paths = self.queue_manager.get_queue_paths()
+        # Runmanager's own default shots are passed over: a default shot is not
+        # part of a sequence, so the next batch must not be numbered alongside
+        # it, and a queue holding nothing else is one there is nothing to add
+        # shots to. See offer_shot().
+        queue_paths = self.queue_manager.get_queue_paths(include_default_shots=False)
         if not queue_paths:
             return None
         return os.path.abspath(queue_paths[-1])
@@ -4448,12 +4451,17 @@ class RunManager(LabscriptApplication):
             ):
                 return no_shot
             queue_state = self.queue_manager.get_queue_state()
-            if queue_state['empty_queue_policy'] != EMPTY_QUEUE_DEFAULT_LABSCRIPT:
-                self.discard_default_shot()
-                self.queue_manager.set_last_sent_from_queue(None)
-                return no_shot
             labscript_file = queue_state['default_labscript_file']
-            if not labscript_file:
+            # No default shot is called for: the policy does not ask for one,
+            # there is no labscript file to make it from, or the queue is not
+            # empty after all -- the only way its head can have gone unoffered
+            # is that BLACS is already running it, so runmanager has work in
+            # flight rather than nothing to offer.
+            if (
+                queue_state['empty_queue_policy'] != EMPTY_QUEUE_DEFAULT_LABSCRIPT
+                or not labscript_file
+                or queue_state['n_items']
+            ):
                 self.discard_default_shot()
                 self.queue_manager.set_last_sent_from_queue(None)
                 return no_shot
@@ -4468,24 +4476,37 @@ class RunManager(LabscriptApplication):
             run_file = self.take_default_shot(labscript_file)
             if run_file is None:
                 return no_shot
-            # A default shot has no queue row of its own, so its identifier is
-            # made here. BLACS reports its outcome like any other shot's, which
-            # is what sends a completed one on for analysis:
-            shot_id = uuid.uuid4().hex
+            # The default shot joins the queue as an ordinary row and is then
+            # offered like one. That is the whole of its lifecycle: it is
+            # visible while it runs, goes red with its reason if it does not,
+            # is retried by the next request, can be deleted by the operator,
+            # and is removed and sent for analysis when it completes -- all by
+            # rules the queue already has, with no second lifecycle to keep in
+            # step. It is also what stops a second default shot being made
+            # while the first still needs attention: a red row is the head of
+            # the queue, so it is what the next request is offered.
+            self.queue_manager.enqueue(
+                [{'path': run_file, 'compiled': True, 'default_shot': True}]
+            )
+            item = self.queue_manager.offer_next()
+            if item is None:
+                return no_shot
         else:
             # The queue has taken over, so any default shot prepared while it
             # was empty is now out of date:
             self.discard_default_shot()
-            run_file = item['path']
-            shot_id = item['shot_id']
-        agnostic_path = shared_drive.path_to_agnostic(run_file)
-        if item is not None:
-            # Only shots that came from the queue are recorded here. A default
-            # shot is not part of a sequence, and lives in the daily default
+        agnostic_path = shared_drive.path_to_agnostic(item['path'])
+        if not item['default_shot']:
+            # Only shots a user engaged are recorded here. A default shot is
+            # not part of a sequence, and lives in the daily default
             # directory, so it must not become the anchor that "add shots to
             # last sequence" writes the next batch alongside:
             self.queue_manager.set_last_sent_from_queue(agnostic_path)
-        return {'state': PROVIDER_SHOT, 'shot_id': shot_id, 'path': agnostic_path}
+        return {
+            'state': PROVIDER_SHOT,
+            'shot_id': item['shot_id'],
+            'path': agnostic_path,
+        }
 
 
 class RemoteServer(ZMQServer):
