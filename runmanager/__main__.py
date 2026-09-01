@@ -2226,6 +2226,14 @@ class RunManager(LabscriptApplication):
         engaged shots are being added to it. Informational only -- there is
         nothing here to enable BLACS, clear what stopped it, or abort a shot;
         those stay with the operator standing at the apparatus."""
+        if self.blacs_status_monitor.stopped.is_set():
+            # Runmanager is closing. The poller checks this too, but it checks
+            # before handing the answer over, and this body is what runs after
+            # -- on the GUI thread, once the queued call comes up. An answer
+            # that passed that check can still be sitting here when the window
+            # starts coming down, and painting a QLabel that has been deleted
+            # raises, which the operator meets as a dialog on the way out.
+            return
         state, tooltip = blacs_link_display(
             status, host=self.blacs_status_monitor.client.host
         )

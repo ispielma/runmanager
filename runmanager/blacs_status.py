@@ -128,9 +128,10 @@ class BlacsStatusMonitor(object):
         saw the window freeze on quit, and the stale update then landed on
         widgets already being torn down.
 
-        There is nothing here worth waiting for. The thread is a daemon, it
-        holds no state to flush, and poll() drops an answer that arrives after
-        this."""
+        There is nothing here worth waiting for. The thread is a daemon and it
+        holds no state to flush. A poll already past its own check can still
+        hand an answer over after this; what makes that harmless is that the
+        update looks again on the GUI thread, when the queued call comes up."""
         self.stopped.set()
 
     def poll(self):
@@ -148,10 +149,11 @@ class BlacsStatusMonitor(object):
                 # not know the question. Reached, but nothing to show.
                 status = {'reachable': False, 'reason': str(status)}
         if self.stopped.is_set():
-            # Runmanager is closing, and the GUI thread this would report to
-            # is the one waiting for this thread to finish. An answer that
-            # arrived too late is dropped rather than sent into a window that
-            # is being taken down.
+            # Runmanager is closing: no sense paying for a hop to a GUI thread
+            # that is busy taking the window down. A saving, not a guarantee --
+            # this runs before the answer is handed over, so it says nothing
+            # about a shutdown that begins afterwards. The update makes the
+            # check that counts, where the widgets are.
             return status
         self.on_status(status)
         return status

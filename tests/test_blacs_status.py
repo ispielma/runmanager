@@ -185,9 +185,12 @@ class ActivityLineTests(unittest.TestCase):
 class FakeBlacs(object):
     """A BLACS server that answers whatever it has been told to answer."""
 
-    def __init__(self, *answers):
+    def __init__(self, *answers, host='localhost'):
         self.answers = list(answers)
         self.requests = []
+        # The real client knows which machine it is asking, and the status
+        # light says so in its tooltip.
+        self.host = host
 
     def request(self, command, *args, **kwargs):
         self.requests.append(command)
@@ -263,9 +266,10 @@ class PollingTests(unittest.TestCase):
         self.assertEqual(states, ['BLACS: not responding'])
 
     def test_an_answer_arriving_after_shutdown_is_not_reported(self):
-        # Runmanager closing waits for this thread, and reporting goes to the
-        # GUI thread doing the waiting. An answer that arrives once shutdown
-        # has begun is dropped rather than sent into a window being torn down.
+        # An answer whose poll finishes after the close has begun is not worth
+        # a hop to a GUI thread that is taking the window down, so poll() does
+        # not make one. The cheap half only: a poll that got past this check
+        # first is caught by the update instead (MonitorShutdownTests).
         blacs = FakeBlacs(snapshot(requesting_shots=True))
         reported = []
         monitor = BlacsStatusMonitor(on_status=reported.append, client=blacs)
@@ -292,8 +296,10 @@ class PollingTests(unittest.TestCase):
         monitor.shutdown()
         # shutdown() deliberately does not wait for the poller -- joining it
         # from the GUI thread is what used to deadlock the quit -- so a poll
-        # already past its own stopped check can still report once. Let that
-        # land before asking whether the loop stopped.
+        # already in flight can still hand its answer over. What becomes of
+        # that answer is the update's business, and the update drops it
+        # (MonitorShutdownTests); the question here is only whether the loop
+        # stopped asking, so let the last one land before counting.
         time.sleep(0.05)
         polls_after_stopping = len(reported)
         time.sleep(0.05)
@@ -328,16 +334,21 @@ class ClientTests(unittest.TestCase):
 
 
 class MonitorShutdownTests(unittest.TestCase):
-    """Closing runmanager while a poll is reporting.
+    """Closing runmanager while a poll is in flight.
 
-    Reporting a status is a blocking hop to the GUI thread. Joining the poller
-    from that same thread meant each waited for the other: the poller parked in
-    the GUI queue, the GUI thread parked in join(), and neither moved until the
-    join timed out. The operator saw the window freeze on quit, and the stale
-    update then landed on widgets already torn down.
+    Two rules, and they only make sense together. Reporting a status is a
+    blocking hop to the GUI thread, so closing must not wait for the poller:
+    joining it from that same thread meant each waited for the other -- the
+    poller parked in the GUI queue, the GUI thread parked in join() -- and the
+    operator saw the window freeze on quit. There is nothing to wait for in any
+    case: the poller holds no state worth flushing, it is a daemon, and it has
+    been told to stop.
 
-    There is nothing to wait for here. The poller holds no state worth
-    flushing, it is a daemon, and it has been told to stop.
+    Not waiting leaves an answer free to be sitting in the GUI queue when the
+    window starts coming down, so the update has to be what notices it is too
+    late. The poller's own check cannot: it runs before the answer is handed
+    over, and everything that matters happens after. The check that counts is
+    the one on the GUI thread, beside the widgets being torn down.
     """
 
     def test_shutdown_does_not_wait_for_a_poll_already_reporting(self):
@@ -367,6 +378,37 @@ class MonitorShutdownTests(unittest.TestCase):
             'closing runmanager waited on a poller that was itself waiting on '
             'the thread doing the closing',
         )
+
+    def test_an_answer_handed_over_before_the_close_is_not_shown_after_it(self):
+        # Played out in order rather than raced for: the poll passes the
+        # poller's own check and hands its answer over, the window then begins
+        # closing, and only then does the GUI thread get to the call that was
+        # waiting in its queue. Each of those steps happens in production, and
+        # here they cannot happen in any other order.
+        app = FakeRunManager()
+        monitor = app.blacs_status_monitor
+        queued_for_the_gui = []
+        # Standing in for the hop itself: inmain() from the poller thread puts
+        # the call in the GUI thread's queue and waits for it to be run.
+        monitor.on_status = queued_for_the_gui.append
+
+        poller = threading.Thread(target=monitor.poll)
+        poller.start()
+        poller.join(2)
+        self.assertFalse(poller.is_alive(), 'the poll got as far as handing over')
+        self.assertTrue(queued_for_the_gui, 'with an answer for the GUI thread')
+
+        monitor.shutdown()
+        for status in queued_for_the_gui:
+            app.update_blacs_status(status)
+
+        self.assertEqual(
+            app.ui.blacs_status_indicator.pixmaps,
+            [],
+            'setPixmap on a QLabel already being torn down raises, and the '
+            'operator meets it as an error dialog on the way out',
+        )
+        self.assertEqual(app.queue_blacs_activity_label.text, '')
 
 
 class FakeLabel(object):
@@ -407,8 +449,10 @@ class FakeRunManager(object):
     def __init__(self, run_shots_checked=True, host='localhost'):
         self.ui = FakeUi(run_shots_checked)
         self.queue_blacs_activity_label = FakeLabel()
-        self.blacs_status_monitor = types.SimpleNamespace(
-            client=types.SimpleNamespace(host=host)
+        # A real monitor, because the update asks it two things: who it is
+        # talking to, and whether it has been stopped.
+        self.blacs_status_monitor = BlacsStatusMonitor(
+            on_status=self.update_blacs_status, client=FakeBlacs(snapshot(), host=host)
         )
 
 
