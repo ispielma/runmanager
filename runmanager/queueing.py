@@ -676,7 +676,13 @@ class QueueManager(QtCore.QObject):
         success = self.compile_run_file_callback(item['labscript_file'], item['path'])
         if success and send_to_runviewer:
             self.send_to_runviewer_callback(item['path'])
-        item['compiled'] = bool(success)
+        # Deliberately does not mark the record compiled. For a row already in
+        # the queue that is the controller's to do, under its lock, in
+        # finish_compile: marking it here made it offerable before the compile
+        # was recorded, and the offer's running state was then wiped by the
+        # compile finishing -- so the row was handed to BLACS and offered again
+        # afterwards as though it never had been. The eager caller below marks
+        # its own record, which is not in the queue yet.
         return success
 
     def compile_next_in_background(self, send_to_runviewer):
@@ -869,6 +875,10 @@ class QueueManager(QtCore.QObject):
                                 success = self._compile_shot(
                                     item, send_to_runviewer=send_to_runviewer
                                 )
+                                # Safe here, and only here: this record is not
+                                # in the queue until enqueue() below, so no
+                                # other thread can see it half-marked.
+                                item['compiled'] = bool(success)
                                 if not success:
                                     self.compilation_aborted.set()
                                     aborted = True

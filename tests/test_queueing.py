@@ -18,6 +18,7 @@ from qtutils.qt.QtWidgets import QApplication
 
 from runmanager.__main__ import RunManager
 from runmanager.queueing import (
+    COMPILE_MODE_EAGER,
     COMPILE_MODE_LAZY,
     EMPTY_QUEUE_DEFAULT_LABSCRIPT,
     FAILED_ROW_BACKGROUND,
@@ -791,6 +792,98 @@ class LazyCompileFailureTests(unittest.TestCase):
         row = self.rows(app)[0]
         self.assertEqual(row['state'], 'running')
         self.assertEqual(row['tooltip'], row['path'], 'nothing to explain')
+
+
+class CompiledFlagOwnershipTests(unittest.TestCase):
+    """The controller owns ``compiled`` for a row that is already in the queue.
+
+    The background compile used to write it a second time, outside the lock,
+    before handing the outcome to the controller. In that gap an exchange
+    arriving on the server thread saw a row ready to hand over, took it, and
+    marked it running -- and the compile then finished and cleared the state it
+    had just been given. The row lost the protection that state carries, left
+    the reserved display row, and the next request offered the same shot again
+    as a fresh offer, with nothing to say it had been offered before. The same
+    file ran twice on hardware.
+
+    These drive the two steps by hand rather than through the compile thread,
+    because what is pinned here is the state between them, and a test that has
+    to win a race to see it is a test that reports nothing when it loses.
+    """
+
+    def lazy_queue(self):
+        app = FakeRunManager()
+        self.addCleanup(app.queue_manager.shutdown)
+        app.queue_manager.enqueue(
+            [
+                {
+                    'path': '/tmp/lazy.h5',
+                    'labscript_file': '/tmp/e.py',
+                    'compile_mode': COMPILE_MODE_LAZY,
+                    'compiled': False,
+                }
+            ]
+        )
+        return app
+
+    def test_a_row_is_not_offerable_until_the_controller_records_the_compile(self):
+        app = self.lazy_queue()
+        controller = app.queue_manager.controller
+        item, _pending = controller.claim_next_for_compile()
+        self.assertIsNotNone(item, 'the row is there to be compiled')
+
+        app.queue_manager._compile_shot(item)
+
+        self.assertIsNone(
+            controller.offer_next(),
+            'the compile is not recorded until finish_compile takes the lock, '
+            'so the row is not ready to hand over yet: offering it here is what '
+            'lets the finishing compile erase the running state the offer set',
+        )
+
+    def test_the_compile_records_itself_only_through_the_controller(self):
+        app = self.lazy_queue()
+        controller = app.queue_manager.controller
+        item, _pending = controller.claim_next_for_compile()
+
+        app.queue_manager._compile_shot(item)
+        self.assertFalse(
+            controller._items[0]['compiled'],
+            'a row in the queue is marked compiled under the lock, by the '
+            'controller, and not by the thread that did the compiling',
+        )
+
+        controller.finish_compile(item, True, '')
+        self.assertTrue(controller._items[0]['compiled'], 'and then it is')
+
+    def test_an_eagerly_compiled_batch_is_queued_ready_to_hand_over(self):
+        # The other half of the same rule: a record compiled before it is put in
+        # the queue is nobody else's to see, so it carries its own mark and must
+        # still arrive ready.
+        app = FakeRunManager()
+        self.addCleanup(app.queue_manager.shutdown)
+        app.queue_manager.compile_shots(
+            [
+                {
+                    'path': '/tmp/eager.h5',
+                    'labscript_file': '/tmp/e.py',
+                    'compile_mode': COMPILE_MODE_EAGER,
+                    'compiled': False,
+                }
+            ],
+            True,
+            False,
+        )
+        for _ in range(200):
+            if app.queue_manager.controller._items:
+                break
+            time.sleep(0.01)
+
+        offered = app.queue_manager.controller.offer_next()
+        self.assertIsNotNone(
+            offered, 'an eagerly compiled shot is ready the moment it is queued'
+        )
+        self.assertEqual(offered['path'], '/tmp/eager.h5')
 
 
 class QueueEditingTests(unittest.TestCase):
