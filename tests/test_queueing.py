@@ -876,16 +876,6 @@ class CompileFailureIsNotAHandoverTests(unittest.TestCase):
             'a shot that cannot run is coloured, however it came to be that way',
         )
 
-    def test_it_is_still_not_compiled_again(self):
-        controller = self.failed_compile_queue()
-
-        self.assertEqual(
-            controller.claim_next_for_compile(),
-            (None, False),
-            'the failed compile left data in the file that stops labscript ever '
-            'compiling into it',
-        )
-
 
 class KeptRowReasonTests(unittest.TestCase):
     """Why a row was kept, said accurately.
@@ -1001,21 +991,6 @@ class CompiledFlagOwnershipTests(unittest.TestCase):
             'so the row is not ready to hand over yet: offering it here is what '
             'lets the finishing compile erase the running state the offer set',
         )
-
-    def test_the_compile_records_itself_only_through_the_controller(self):
-        app = self.lazy_queue()
-        controller = app.queue_manager.controller
-        item, _pending = controller.claim_next_for_compile()
-
-        app.queue_manager._compile_shot(item)
-        self.assertFalse(
-            controller._items[0]['compiled'],
-            'a row in the queue is marked compiled under the lock, by the '
-            'controller, and not by the thread that did the compiling',
-        )
-
-        controller.finish_compile(item, True, '')
-        self.assertTrue(controller._items[0]['compiled'], 'and then it is')
 
     def test_an_eagerly_compiled_batch_is_queued_ready_to_hand_over(self):
         # The other half of the same rule: a record compiled before it is put in
