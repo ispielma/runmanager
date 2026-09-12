@@ -16,18 +16,9 @@ Exceptions are still logged and still reach stderr, so nothing diagnostic is
 lost.
 
 `setdefault` leaves an explicit setting alone, so exporting the variable
-yourself decides: `LABSCRIPT_NO_ERROR_DIALOG=0` gives you the dialog back, as do
-`false`, `no`, `off`, the empty string, and not setting it at all.
-
-That was not always true, and the difference is worth keeping rather than
-deleting. Until labscript-utils' "Let LABSCRIPT_NO_ERROR_DIALOG=0 mean what it
-looks like" -- `ae73495` today, though find it by subject rather than hash,
-because this work is unpushed and the hash has moved once already -- the
-variable was read as
-`bool(os.environ.get(...))`, so *any* non-empty value suppressed the dialog and
-`=0` suppressed it exactly as `=1` did -- which bit hardest at a test of the
-dialog itself, the one case the rule exempts. A comment elsewhere in the suite
-still describing that is stale, not describing a case this one misses.
+yourself decides. `LABSCRIPT_NO_ERROR_DIALOG=0` gives you the dialog back, as do
+`false`, `no`, `off`, the empty string, and not setting it at all; anything else
+suppresses it.
 
 A test of the dialog can also set `labscript_utils.excepthook.NO_ERROR_DIALOG`
 directly. The module reads that name where it uses it, so assigning to it works
