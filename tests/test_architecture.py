@@ -26,7 +26,10 @@ import unittest
 
 import runmanager.blacs_status
 import runmanager.remote
-from runmanager.__main__ import RemoteServer
+# fixtures stubs the splash and does the guarded import of the
+# application, once, for every test module. Importing
+# runmanager.__main__ here instead would show the startup banner.
+from fixtures import RemoteServer
 from runmanager.analysis_submission import AnalysisSubmission
 
 # The commands that carried the old handoff: BLACS asked for a shot, said it

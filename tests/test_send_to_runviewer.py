@@ -16,7 +16,10 @@ import subprocess
 import types
 import unittest
 
-from runmanager.__main__ import RunManager
+# fixtures stubs the splash and does the guarded import of the
+# application, once, for every test module. Importing
+# runmanager.__main__ here instead would show the startup banner.
+from fixtures import RunManager, main_module
 
 
 class FakeOutputBox(object):
@@ -38,8 +41,6 @@ class SendToRunviewerTests(unittest.TestCase):
     """The launch, over its two boundaries: the port and the process."""
 
     def setUp(self):
-        import runmanager.__main__ as main_module
-
         self.main_module = main_module
         self.saved = {
             'zmq_get': main_module.zmq_get,

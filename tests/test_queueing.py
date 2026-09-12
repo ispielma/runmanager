@@ -17,7 +17,10 @@ from qtutils.qt.QtCore import Qt
 from qtutils.qt.QtWidgets import QApplication
 
 from labscript_utils import shared_drive
-from runmanager.__main__ import RunManager
+# fixtures stubs the splash and does the guarded import of the
+# application, once, for every test module. Importing
+# runmanager.__main__ here instead would show the startup banner.
+from fixtures import RunManager
 from runmanager.queueing import (
     COMPILE_MODE_EAGER,
     COMPILE_MODE_LAZY,

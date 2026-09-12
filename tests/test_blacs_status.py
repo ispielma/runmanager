@@ -25,7 +25,10 @@ import runmanager.remote
 # FingerTabWidget is runmanager's own, defined in __main__ beside RunManager --
 # not the labscript_utils widget of the same name. Loading main.ui with the
 # wrong one gives a tab widget whose tab bar the queue tab cannot configure.
-from runmanager.__main__ import (
+# fixtures stubs the splash and does the guarded import of the
+# application, once, for every test module. Importing
+# runmanager.__main__ here instead would show the startup banner.
+from fixtures import (
     FingerTabWidget,
     RemoteServer,
     RunManager,
