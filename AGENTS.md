@@ -54,7 +54,8 @@ Exceptions are still logged and still reach stderr.
 
 `setdefault` leaves an explicit setting alone, so `LABSCRIPT_NO_ERROR_DIALOG=0`
 gives you the dialog back, as do `false`, `no`, `off`, the empty string and not
-setting it at all. Until labscript-utils `8719676` any non-empty value
+setting it at all. Until labscript-utils `ae73495`, "Let
+LABSCRIPT_NO_ERROR_DIALOG=0 mean what it looks like", any non-empty value
 suppressed the dialog, `=0` included; a comment elsewhere still saying so is
 stale. A test of the dialog itself can instead assign to
 `labscript_utils.excepthook.NO_ERROR_DIALOG`, which the module reads where it
