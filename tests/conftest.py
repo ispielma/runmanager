@@ -15,15 +15,20 @@ the excepthook, so this runs in time.
 Exceptions are still logged and still reach stderr, so nothing diagnostic is
 lost.
 
-`setdefault` does not give you the dialog back, though, and it is worth knowing
-why before you try. The excepthook reads the variable as
-`bool(os.environ.get(...))`, so *any* non-empty value suppresses the dialog --
-`LABSCRIPT_NO_ERROR_DIALOG=0` suppresses it exactly as `=1` does. Only unsetting
-the variable, or setting it to the empty string, turns the dialog back on. The
-place this bites is a test of the error dialog itself, the one case the rule is
-meant to exempt: reaching for `=0` there produces no dialog and no clue why. Set
-`labscript_utils.excepthook.NO_ERROR_DIALOG = False` in the test instead, which
-says what it means and does not depend on the environment at all.
+`setdefault` leaves an explicit setting alone, so exporting the variable
+yourself decides: `LABSCRIPT_NO_ERROR_DIALOG=0` gives you the dialog back, as do
+`false`, `no`, `off`, the empty string, and not setting it at all.
+
+That was not always true, and the difference is worth keeping rather than
+deleting. Until labscript-utils `8719676` the variable was read as
+`bool(os.environ.get(...))`, so *any* non-empty value suppressed the dialog and
+`=0` suppressed it exactly as `=1` did -- which bit hardest at a test of the
+dialog itself, the one case the rule exempts. A comment elsewhere in the suite
+still describing that is stale, not describing a case this one misses.
+
+A test of the dialog can also set `labscript_utils.excepthook.NO_ERROR_DIALOG`
+directly. The module reads that name where it uses it, so assigning to it works
+at any point, whereas the environment is still consulted only once.
 
 Only this one variable. runmanager's tests build widgets but never show one, so
 there is nothing here to render and `QT_QPA_PLATFORM` would be noise -- the

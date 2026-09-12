@@ -52,11 +52,13 @@ tkinter window per unhandled exception — it has to be set before that module i
 imported, because it reads the variable once into a constant at import time.
 Exceptions are still logged and still reach stderr.
 
-Note that `LABSCRIPT_NO_ERROR_DIALOG=0` does **not** turn the dialog back on:
-the excepthook reads the variable as `bool(os.environ.get(...))`, so any
-non-empty value suppresses it. A test that needs the real dialog -- a test of
-the dialog itself -- should set `labscript_utils.excepthook.NO_ERROR_DIALOG`
-directly rather than fight the environment.
+`setdefault` leaves an explicit setting alone, so `LABSCRIPT_NO_ERROR_DIALOG=0`
+gives you the dialog back, as do `false`, `no`, `off`, the empty string and not
+setting it at all. Until labscript-utils `8719676` any non-empty value
+suppressed the dialog, `=0` included; a comment elsewhere still saying so is
+stale. A test of the dialog itself can instead assign to
+`labscript_utils.excepthook.NO_ERROR_DIALOG`, which the module reads where it
+uses it.
 
 There is no `QT_QPA_PLATFORM` here, unlike the repositories whose layout tests
 show a window. Nothing in this suite renders, so there is nothing to send
