@@ -380,6 +380,19 @@ class QueueController(object):
                 if include_default_shots or not item['default_shot']
             ]
 
+    def get_sequence_attrs(self, path):
+        """Return the sequence attributes recorded for the queued shot at
+        ``path``, or None if no row holds that path.
+
+        The last matching row answers. The queue does not set out to hold two
+        rows with one path, and taking the last means the newer row wins if it
+        ever does."""
+        with self._lock:
+            for item in reversed(self._items):
+                if item['path'] == path:
+                    return dict(item['sequence_attrs']) or None
+        return None
+
     def get_shot_path(self, shot_id):
         """Return the path recorded for one queued shot, or None for no row.
 
@@ -960,6 +973,9 @@ class QueueManager(QtCore.QObject):
 
     def get_queue_paths(self, include_default_shots=True):
         return self.controller.get_queue_paths(include_default_shots)
+
+    def get_sequence_attrs(self, path):
+        return self.controller.get_sequence_attrs(path)
 
     def get_shot_path(self, shot_id):
         return self.controller.get_shot_path(shot_id)

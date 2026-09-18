@@ -14,6 +14,7 @@
 """
 
 import queue
+import logging
 import os
 import sys
 import labscript_utils.excepthook
@@ -109,6 +110,13 @@ import qtutils.icons
 GLOBAL_MONOSPACE_FONT = "Consolas" if os.name == 'nt' else "Ubuntu Mono"
 
 runmanager_dir = RUNMANAGER_DIR
+
+# Bound here as well as under __main__ below, so that the methods of this
+# module can be called by anything that imports it rather than only by the
+# application. setup_logging() attaches handlers to the logger of this name and
+# hands back that same object, so running runmanager rebinds this to what it
+# already refers to. Getting it here attaches nothing and opens no log file.
+logger = logging.getLogger(APPLICATION_NAME)
 
 process_tree = ProcessTree.instance()
 
@@ -2394,6 +2402,12 @@ class RunManager(LabscriptApplication):
         self.engage_add_shots_action.triggered.connect(
             lambda: self.on_engage_clicked(submission_mode=SUBMISSION_MODE_ADD_SHOTS)
         )
+        self.engage_add_shots_action.setToolTip(
+            'Submit the new batch onto the same shot sequence as the queued shots.'
+        )
+        self.engage_add_shots_action.setStatusTip(
+            'Submit the new batch onto the same shot sequence as the queued shots.'
+        )
         self.engage_replace_queue_action = self.engage_submission_menu.addAction(
             'Empty queue, then add shots to new sequence'
         )
@@ -2483,7 +2497,22 @@ class RunManager(LabscriptApplication):
                 start=next_index,
             )
             run_file_info['path'] = run_file
+            # A sequence compiled in one go names each file after the run
+            # number written into it, so renumbering the files of a batch
+            # added to a sequence has to renumber its runs too. Otherwise the
+            # added shots restart at run 0 in a sequence that already has one,
+            # and lyse, which indexes a shot on its sequence and run number,
+            # has two shots with the same name.
+            run_file_info['run_no'] = next_index
             next_index += 1
+        # The sequence now runs from 0 up to the highest number just written.
+        # Shots written before this batch keep the count they were written
+        # with: a sequence that can be added to has no one answer for how many
+        # runs it has, and files that may already have run are not rewritten
+        # to invent one.
+        runs_in_sequence = run_file_infos[-1]['run_no'] + 1
+        for run_file_info in run_file_infos:
+            run_file_info['n_runs'] = runs_in_sequence
         return run_file_infos
 
     def on_engage_clicked(self, checked=False, submission_mode=SUBMISSION_MODE_NEW_FOLDER):
@@ -4257,6 +4286,33 @@ class RunManager(LabscriptApplication):
 
         return expansion_types_changed
 
+    def get_sequence_attrs_to_extend(self, path):
+        """The sequence a batch added to the shot at ``path`` belongs to.
+
+        The queue row is asked first and the shot file only if there is no
+        row. It has to be that way round rather than simply reading the file:
+        a queued shot is not written until it is compiled, which under lazy
+        compilation is not until BLACS asks for it, so the shot a batch is
+        added to often has no file yet. A shot whose row has gone -- the one
+        last sent to BLACS, after "empty queue, then add shots to last
+        sequence" has emptied the queue -- has been written by then, and its
+        file still says which sequence it is in."""
+        sequence_attrs = self.queue_manager.get_sequence_attrs(path)
+        if sequence_attrs:
+            return sequence_attrs
+        try:
+            return runmanager.get_sequence_attrs(path)
+        except Exception as exc:
+            # Said plainly, because on_engage_clicked shows this to whoever
+            # pressed Engage: an h5py message about a file that would not open
+            # does not tell them that the sequence they meant to add to is the
+            # thing that has gone.
+            raise Exception(
+                'Cannot add shots to the sequence of %s: it is not in the '
+                'queue, and its file does not say which sequence it is in.'
+                % path
+            ) from exc
+
     def make_h5_files(
         self,
         labscript_file,
@@ -4268,9 +4324,18 @@ class RunManager(LabscriptApplication):
         indexed_path_base=None,
         index_start=None,
     ):
+        # A batch given a shot to be numbered after is being added to that
+        # shot's sequence, so it takes that sequence's attributes and claims no
+        # index of its own: an index claimed for a sequence that is never
+        # started is one no sequence will ever carry.
+        extending = indexed_path_base is not None
         sequence_attrs, default_output_dir, filename_prefix = runmanager.new_sequence_details(
-            labscript_file, config=self.exp_config, increment_sequence_index=True
+            labscript_file,
+            config=self.exp_config,
+            increment_sequence_index=not extending,
         )
+        if extending:
+            sequence_attrs = self.get_sequence_attrs_to_extend(indexed_path_base)
         if output_folder == self.previous_default_output_folder:
             # The user is using dthe efault output folder. Just in case the sequence
             # index has been updated or the date has changed, use the default_output dir

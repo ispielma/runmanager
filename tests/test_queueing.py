@@ -12,6 +12,9 @@ import time
 import types
 import unittest
 
+from unittest import mock
+
+import runmanager
 from labscript_utils.qtwidgets.shotqueue import RULE_BELOW_ROLE
 from qtutils.qt.QtCore import Qt
 from qtutils.qt.QtWidgets import QApplication
@@ -430,6 +433,18 @@ class FakeRunManager(object):
     get_queue_append_filepath = RunManager.get_queue_append_filepath
     get_last_sent_from_queue_filepath = RunManager.get_last_sent_from_queue_filepath
     reindex_run_file_infos = RunManager.reindex_run_file_infos
+    make_h5_files = RunManager.make_h5_files
+    get_sequence_attrs_to_extend = RunManager.get_sequence_attrs_to_extend
+
+    # make_h5_files reads these. The output folder it would keep up to date is
+    # a line edit and a labscript file it does not have, and choosing the
+    # folder is not what any of this is about: the folder a batch added to a
+    # sequence is written to comes from the shot it is added to.
+    exp_config = None
+    previous_default_output_folder = None
+
+    def check_output_folder_update(self):
+        pass
 
     def __init__(self, default_shot_file=None, compiles=True):
         self.output_box = FakeOutputBox()
@@ -2231,6 +2246,198 @@ class LostRowTests(unittest.TestCase):
         self.assertTrue(
             all(isinstance(path, str) for path in app.analysis_submission.submitted),
             'lyse is given a path, whatever shape BLACS sent',
+        )
+
+
+class SequenceContinuityTests(unittest.TestCase):
+    """Shots added to the last sequence are part of that sequence.
+
+    "Add shots to last sequence" means what it says: the added shots belong to
+    the sequence already there, not to a new one written alongside it. lyse
+    indexes a shot on (sequence_index, run number, run repeat), so a batch
+    carrying freshly minted sequence attributes is a separate sequence however
+    its files are named, and a batch sharing them while restarting run numbers
+    at 0 collides with the shots already in it. Both halves have to hold.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.app = FakeRunManager()
+        self.addCleanup(self.app.queue_manager.shutdown)
+        self.existing = {
+            'script_basename': 'experiment',
+            'sequence_date': '2026-09-18',
+            'sequence_index': 11,
+            'sequence_id': '20260918T101112_experiment',
+        }
+        # What new_sequence_details would answer if asked for a new sequence.
+        # Minting one is a labconfig read, a timestamp and a counter file under
+        # a zlock; what is under test is what runmanager does with the answer,
+        # and -- for a batch being added to a sequence -- whether it asks at
+        # all.
+        self.fresh = {
+            'script_basename': 'experiment',
+            'sequence_date': '2026-09-18',
+            'sequence_index': 12,
+            'sequence_id': '20260918T120000_experiment',
+        }
+        self.claimed_a_sequence_index = []
+        patcher = mock.patch.object(
+            runmanager, 'new_sequence_details', self.fake_new_sequence_details
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def fake_new_sequence_details(
+        self, script_path, config=None, increment_sequence_index=True, **kwargs
+    ):
+        self.claimed_a_sequence_index.append(increment_sequence_index)
+        return dict(self.fresh), self.directory, 'experiment'
+
+    def path(self, name):
+        return os.path.join(self.directory, name)
+
+    def add_shots(self, count, anchor, index_start=None):
+        """Compile a batch onto the sequence the anchor shot belongs to."""
+        _, run_files = self.app.make_h5_files(
+            self.path('experiment.py'),
+            self.directory,
+            {},
+            [{'x': n} for n in range(count)],
+            False,
+            with_metadata=True,
+            indexed_path_base=anchor,
+            index_start=index_start,
+        )
+        return list(run_files)
+
+    def test_an_added_shot_is_numbered_by_the_filename_it_is_given(self):
+        # A sequence compiled in one go names each file after the run number
+        # written into it. Renumbering the files of an added batch without
+        # renumbering its runs breaks that, and restarts run numbers at 0
+        # inside a sequence that already has a shot 0.
+        anchor = self.path('experiment_03.h5')
+        self.app.queue_manager.enqueue(
+            [queued_shot(anchor, sequence_attrs=self.existing)]
+        )
+
+        added = self.add_shots(2, anchor)
+
+        self.assertEqual(
+            [(os.path.basename(info['path']), info['run_no']) for info in added],
+            [('experiment_04.h5', 4), ('experiment_05.h5', 5)],
+            'the run number and the filename index are the same number',
+        )
+
+    def test_an_added_shot_takes_the_run_number_of_the_file_it_reuses(self):
+        # "Empty queue, then add shots to last sequence" numbers from 0 again,
+        # taking back what the deleted shots gave up. The run numbers have to
+        # come back with the filenames: a shot written as experiment_01.h5
+        # while calling itself run 0 is a second run 0 in a sequence that
+        # already had one.
+        anchor = self.path('experiment_00.h5')
+        runmanager.make_single_run_file(anchor, None, {}, self.existing, 0, 1)
+
+        added = self.add_shots(2, anchor, index_start=0)
+
+        self.assertEqual(
+            [(os.path.basename(info['path']), info['run_no']) for info in added],
+            [('experiment_01.h5', 1), ('experiment_02.h5', 2)],
+            'index 0 is taken by a file that is still there, and so is run 0',
+        )
+
+    def test_an_extended_sequence_says_how_many_runs_it_now_has(self):
+        anchor = self.path('experiment_03.h5')
+        self.app.queue_manager.enqueue(
+            [queued_shot(anchor, sequence_attrs=self.existing)]
+        )
+
+        added = self.add_shots(2, anchor)
+
+        self.assertEqual(
+            [info['n_runs'] for info in added],
+            [6, 6],
+            'runs 0 to 5 of this sequence exist once these are written',
+        )
+
+    def test_added_shots_belong_to_the_sequence_they_were_added_to(self):
+        anchor = self.path('experiment_03.h5')
+        self.app.queue_manager.enqueue(
+            [queued_shot(anchor, sequence_attrs=self.existing)]
+        )
+
+        added = self.add_shots(2, anchor)
+
+        self.assertEqual(
+            [info['sequence_attrs'] for info in added],
+            [self.existing, self.existing],
+            'the sequence added to is the sequence the added shots are in',
+        )
+
+    def test_adding_shots_to_a_sequence_claims_no_new_sequence_index(self):
+        anchor = self.path('experiment_03.h5')
+        self.app.queue_manager.enqueue(
+            [queued_shot(anchor, sequence_attrs=self.existing)]
+        )
+
+        self.add_shots(2, anchor)
+
+        self.assertEqual(
+            self.claimed_a_sequence_index,
+            [False],
+            'a sequence index claimed for a sequence that was never started '
+            'is one no sequence will ever carry',
+        )
+
+    def test_a_batch_of_its_own_does_claim_a_sequence_index(self):
+        # The other half of the same rule: a batch that is not being added to
+        # anything is a new sequence, and has to take a number for it.
+        self.app.make_h5_files(
+            self.path('experiment.py'),
+            self.directory,
+            {},
+            [{'x': 0}],
+            False,
+            with_metadata=True,
+        )
+
+        self.assertEqual(self.claimed_a_sequence_index, [True])
+
+    def test_the_newer_row_answers_for_a_path_two_rows_hold(self):
+        # Nothing sets out to queue one path twice, so which row answers is a
+        # rule rather than a situation: the one added most recently.
+        path = self.path('experiment_00.h5')
+        later = dict(self.existing, sequence_id='20260918T140000_experiment')
+        self.app.queue_manager.enqueue([queued_shot(path, sequence_attrs=self.existing)])
+        self.app.queue_manager.enqueue([queued_shot(path, sequence_attrs=later)])
+
+        self.assertEqual(self.app.queue_manager.get_sequence_attrs(path), later)
+
+    def test_no_row_and_no_file_is_no_sequence_to_add_to(self):
+        # Reported rather than quietly compiled onto a sequence of its own:
+        # a batch added to a sequence that cannot be found is not a batch that
+        # should go anywhere. on_engage_clicked puts this in the output box.
+        missing = self.path('experiment_00.h5')
+        with self.assertRaises(Exception) as raised:
+            self.add_shots(1, missing)
+
+        self.assertIn(missing, str(raised.exception))
+
+    def test_the_sequence_is_read_off_the_shot_when_the_queue_has_lost_it(self):
+        # "Empty queue, then add shots to last sequence" empties the queue
+        # first, so the shot being added to is the one last sent to BLACS,
+        # whose row may be gone. Its file has been written by then, and carries
+        # what the queue no longer holds.
+        anchor = self.path('experiment_00.h5')
+        runmanager.make_single_run_file(anchor, None, {}, self.existing, 0, 1)
+
+        added = self.add_shots(1, anchor, index_start=0)
+
+        self.assertEqual(
+            [info['sequence_attrs'] for info in added],
+            [self.existing],
+            'the shot file answers for the sequence when no row does',
         )
 
 
