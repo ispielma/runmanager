@@ -2298,7 +2298,7 @@ class SequenceContinuityTests(unittest.TestCase):
     def path(self, name):
         return os.path.join(self.directory, name)
 
-    def add_shots(self, count, anchor, index_start=None):
+    def add_shots(self, count, anchor, index_start=None, sequence_attrs=None):
         """Compile a batch onto the sequence the anchor shot belongs to."""
         _, run_files = self.app.make_h5_files(
             self.path('experiment.py'),
@@ -2309,6 +2309,7 @@ class SequenceContinuityTests(unittest.TestCase):
             with_metadata=True,
             indexed_path_base=anchor,
             index_start=index_start,
+            sequence_attrs=sequence_attrs,
         )
         return list(run_files)
 
@@ -2423,6 +2424,57 @@ class SequenceContinuityTests(unittest.TestCase):
             self.add_shots(1, missing)
 
         self.assertIn(missing, str(raised.exception))
+
+    def test_a_cleared_queue_still_knows_the_sequence_it_was_adding_to(self):
+        # "Empty queue, then add shots to last sequence" with nothing yet sent
+        # to BLACS: the shot being added to is a queued one, and the Clear
+        # removes its row and deletes its file. Whatever says which sequence
+        # this is has to be read before that happens, or the mode has nothing
+        # left to add to.
+        anchor = self.path('experiment_00.h5')
+        open(anchor, 'w').close()
+        self.app.queue_manager.enqueue(
+            [queued_shot(anchor, sequence_attrs=self.existing)]
+        )
+
+        sequence = self.app.get_sequence_attrs_to_extend(anchor)
+        self.app.queue_manager.clear()
+        added = self.add_shots(1, anchor, index_start=0, sequence_attrs=sequence)
+
+        self.assertFalse(os.path.exists(anchor), 'the Clear deleted its file')
+        self.assertEqual(
+            [info['sequence_attrs'] for info in added],
+            [self.existing],
+            'the batch replacing the queue is in the sequence it replaced',
+        )
+
+    def test_a_replacement_batch_resumes_after_the_shots_blacs_has(self):
+        # The shots BLACS has been given keep their files, so the numbering
+        # picks up after them; the shots it has not keep nothing, so their
+        # numbers are free for the replacement batch to take back.
+        sent = self.path('experiment_00.h5')
+        open(sent, 'w').close()
+        waiting = self.path('experiment_01.h5')
+        open(waiting, 'w').close()
+        self.app.queue_manager.enqueue(
+            [
+                queued_shot(sent, sequence_attrs=self.existing),
+                queued_shot(waiting, sequence_attrs=self.existing),
+            ]
+        )
+        self.app.offer_shot()
+
+        sequence = self.app.get_sequence_attrs_to_extend(sent)
+        self.app.queue_manager.clear()
+        added = self.add_shots(2, sent, index_start=0, sequence_attrs=sequence)
+
+        self.assertTrue(os.path.exists(sent), 'BLACS has this one; it stays')
+        self.assertFalse(os.path.exists(waiting), 'this one was only waiting')
+        self.assertEqual(
+            [(os.path.basename(info['path']), info['run_no']) for info in added],
+            [('experiment_01.h5', 1), ('experiment_02.h5', 2)],
+            'numbering resumes at the first run whose file has gone',
+        )
 
     def test_the_sequence_is_read_off_the_shot_when_the_queue_has_lost_it(self):
         # "Empty queue, then add shots to last sequence" empties the queue

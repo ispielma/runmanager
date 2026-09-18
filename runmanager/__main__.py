@@ -2567,6 +2567,7 @@ class RunManager(LabscriptApplication):
             globals_details = runmanager.get_globals_details(active_groups)
             indexed_path_base = None
             index_start = None
+            sequence_attrs = None
             if submission_mode == SUBMISSION_MODE_ADD_SHOTS:
                 indexed_path_base = queue_append_filepath
             elif submission_mode == SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE:
@@ -2576,6 +2577,12 @@ class RunManager(LabscriptApplication):
                     self.get_last_sent_from_queue_filepath() or queue_append_filepath
                 )
                 index_start = 0
+                # Read before the Clear rather than after it. With nothing yet
+                # sent to BLACS the shot being added to is a queued one, and
+                # the Clear takes its row and deletes its file -- so asked
+                # afterwards, nothing would be left to say which sequence the
+                # replacement batch is joining.
+                sequence_attrs = self.get_sequence_attrs_to_extend(indexed_path_base)
                 self.queue_manager.clear()
             labscript_file, run_files = self.make_h5_files(
                 labscript_file,
@@ -2586,6 +2593,7 @@ class RunManager(LabscriptApplication):
                 with_metadata=True,
                 indexed_path_base=indexed_path_base,
                 index_start=index_start,
+                sequence_attrs=sequence_attrs,
             )
             compile_mode = self.queue_compile_mode_combo.currentData()
             queue_records = []
@@ -4323,18 +4331,22 @@ class RunManager(LabscriptApplication):
         with_metadata=False,
         indexed_path_base=None,
         index_start=None,
+        sequence_attrs=None,
     ):
         # A batch given a shot to be numbered after is being added to that
         # shot's sequence, so it takes that sequence's attributes and claims no
         # index of its own: an index claimed for a sequence that is never
-        # started is one no sequence will ever carry.
+        # started is one no sequence will ever carry. A caller that had to read
+        # the sequence earlier than this passes it in; see on_engage_clicked.
         extending = indexed_path_base is not None
-        sequence_attrs, default_output_dir, filename_prefix = runmanager.new_sequence_details(
+        new_attrs, default_output_dir, filename_prefix = runmanager.new_sequence_details(
             labscript_file,
             config=self.exp_config,
             increment_sequence_index=not extending,
         )
-        if extending:
+        if not extending:
+            sequence_attrs = new_attrs
+        elif sequence_attrs is None:
             sequence_attrs = self.get_sequence_attrs_to_extend(indexed_path_base)
         if output_folder == self.previous_default_output_folder:
             # The user is using dthe efault output folder. Just in case the sequence
