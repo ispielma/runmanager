@@ -3138,6 +3138,31 @@ class DeletedAnchorTests(unittest.TestCase):
         )
 
 
+class EngageWindow(object):
+    """The window Engage reads, over what its own warnings need.
+
+    ``get_queue_append_filepath`` stands for an empty queue, which is the
+    state the modes below are asked about, and ``compile_and_queue_shots``
+    records what reached it rather than compiling anything.
+    """
+
+    on_engage_clicked = RunManager.on_engage_clicked
+
+    def __init__(self, run_shots=True, view_shots=False):
+        self.output_box = FakeOutputBox()
+        self.submitted = []
+        self.ui = types.SimpleNamespace(
+            checkBox_run_shots=types.SimpleNamespace(isChecked=lambda: run_shots),
+            checkBox_view_shots=types.SimpleNamespace(isChecked=lambda: view_shots),
+        )
+
+    def get_queue_append_filepath(self):
+        return None
+
+    def compile_and_queue_shots(self, submission_mode, *args):
+        self.submitted.append(submission_mode)
+
+
 class EngageGuardTests(unittest.TestCase):
     """What Engage refuses before it compiles anything.
 
@@ -3147,39 +3172,12 @@ class EngageGuardTests(unittest.TestCase):
     queue moves on its own between the two.
     """
 
-    class Window(object):
-        """The window Engage reads, over what its warnings need.
-
-        ``get_queue_append_filepath`` stands for an empty queue, which is the
-        state the modes below are asked about.
-        """
-
-        on_engage_clicked = RunManager.on_engage_clicked
-
-        def __init__(self, run_shots=True, view_shots=False):
-            self.output_box = FakeOutputBox()
-            self.submitted = []
-            self.ui = types.SimpleNamespace(
-                checkBox_run_shots=types.SimpleNamespace(
-                    isChecked=lambda: run_shots
-                ),
-                checkBox_view_shots=types.SimpleNamespace(
-                    isChecked=lambda: view_shots
-                ),
-            )
-
-        def get_queue_append_filepath(self):
-            return None
-
-        def compile_and_queue_shots(self, submission_mode, *args):
-            self.submitted.append(submission_mode)
-
     def test_continuing_a_sequence_is_not_refused_for_an_empty_queue(self):
         # The mode exists to work with an empty queue: between one remote
         # submission and the next, empty is the normal state. A warning
         # written for the modes that add to queued shots must not take it in
         # with them.
-        window = self.Window()
+        window = EngageWindow()
 
         window.on_engage_clicked(
             submission_mode=main_module.SUBMISSION_MODE_CONTINUE_SEQUENCE
@@ -3192,7 +3190,7 @@ class EngageGuardTests(unittest.TestCase):
         )
 
     def test_an_alternate_mode_still_needs_shots_to_be_sent_to_blacs(self):
-        window = self.Window(run_shots=False, view_shots=True)
+        window = EngageWindow(run_shots=False, view_shots=True)
 
         window.on_engage_clicked(
             submission_mode=main_module.SUBMISSION_MODE_ADD_SHOTS
@@ -3202,7 +3200,7 @@ class EngageGuardTests(unittest.TestCase):
         self.assertTrue(window.output_box.said('BLACS'))
 
     def test_engaging_with_nowhere_to_send_the_shots_is_refused(self):
-        window = self.Window(run_shots=False, view_shots=False)
+        window = EngageWindow(run_shots=False, view_shots=False)
 
         window.on_engage_clicked()
 
