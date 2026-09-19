@@ -19,12 +19,14 @@ from unittest import mock
 # relying on runmanager below, so that this file can be run on its own.
 import labscript_utils.h5_lock  # noqa: F401
 import h5py
+import numpy as np
 import runmanager
 from labscript_utils.qtwidgets.shotqueue import RULE_BELOW_ROLE
 from qtutils.qt.QtCore import Qt
 from qtutils.qt.QtWidgets import QApplication
 
 from labscript_utils import shared_drive
+from labscript_utils.labconfig import load_appconfig, save_appconfig
 # fixtures stubs the splash and does the guarded import of the
 # application, once, for every test module. Importing
 # runmanager.__main__ here instead would show the startup banner.
@@ -128,6 +130,68 @@ class QueueIdentityTests(unittest.TestCase):
             [item['shot_id'] for item in restored.export_state()['items']],
             [item['shot_id'] for item in state['items']],
         )
+
+
+class SavedQueueValueTests(unittest.TestCase):
+    """A queue can be saved whatever its shots' values came from.
+
+    The queue is written into the app config, which holds strings, numbers and
+    booleans and nothing else. A record carrying anything else stops every
+    save from then on, the one offered on the way out included -- and that one
+    failing is a whole queue lost rather than a setting.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.attrs = {
+            'script_basename': 'experiment',
+            'sequence_date': '2026-09-18',
+            'sequence_index': 11,
+            'sequence_id': '20260918T101112_experiment',
+        }
+
+    def save(self, controller):
+        """Save the queue the way the application saves it, and read it back."""
+        path = os.path.join(self.directory, 'runmanager.toml')
+        save_appconfig(
+            path, {'runmanager_state': {'queue_state': controller.export_state()}}
+        )
+        return load_appconfig(path)['runmanager_state']['queue_state']
+
+    def test_a_queue_whose_sequence_came_off_a_shot_file_can_be_saved(self):
+        # The ordinary path between one submission and the next: the queue is
+        # empty, so the sequence the batch is added to is read back out of the
+        # shot file rather than off a row.
+        shot = os.path.join(self.directory, 'experiment_00.h5')
+        runmanager.make_single_run_file(shot, None, {}, self.attrs, 0, 1)
+        controller = QueueController()
+        controller.enqueue(
+            [queued_shot(shot, sequence_attrs=runmanager.get_sequence_attrs(shot))]
+        )
+
+        saved = self.save(controller)
+
+        self.assertEqual(saved['items'][0]['sequence_attrs'], self.attrs)
+
+    def test_a_record_is_saveable_whatever_its_sequence_arrived_as(self):
+        # A record is normalised on the way into the queue -- its paths, its
+        # names, its run numbers -- and that is what makes a queue saveable.
+        # Its sequence attributes are part of the record and are no exception,
+        # so the queue does not have to know where a caller read them.
+        controller = QueueController()
+        controller.enqueue(
+            [
+                queued_shot(
+                    os.path.join(self.directory, 'experiment_00.h5'),
+                    sequence_attrs=dict(self.attrs, sequence_index=np.int64(11)),
+                )
+            ]
+        )
+
+        saved = self.save(controller)
+
+        self.assertEqual(saved['items'][0]['sequence_attrs'], self.attrs)
 
 
 class QueuePauseTests(unittest.TestCase):

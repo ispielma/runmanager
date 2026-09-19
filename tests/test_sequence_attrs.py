@@ -13,6 +13,12 @@ import unittest
 from unittest import mock
 
 from labscript_utils.labconfig import LabConfig
+# h5_lock must be imported before h5py is, by anything in the process, and it
+# is what runmanager imports h5py through. Naming it here rather than relying
+# on runmanager below, so that this file can be run on its own.
+import labscript_utils.h5_lock  # noqa: F401
+import h5py
+import numpy as np
 import runmanager
 
 
@@ -76,3 +82,39 @@ class SequenceAttrsTests(unittest.TestCase):
             'a shot added to this sequence is written with what is read here, '
             'so anything lost on the way through lands in the added shots',
         )
+
+    def test_a_shot_file_answers_with_the_values_it_was_written_with(self):
+        # Equal values are not the same values. h5py answers with numpy
+        # scalars, and np.int64(7) == 7 while being something a TOML app
+        # config cannot hold -- so a queue holding a sequence read back from a
+        # shot file is a queue that cannot be saved. Types are asserted here
+        # because equality cannot see the difference.
+        attrs = sequence_attrs()
+        path = os.path.join(self.directory, 'experiment_01.h5')
+        runmanager.make_single_run_file(path, None, {}, attrs, 0, 1)
+
+        read = runmanager.get_sequence_attrs(path)
+
+        self.assertEqual(
+            {name: type(value) for name, value in read.items()},
+            {name: type(value) for name, value in attrs.items()},
+            'what is read here is written into the shots added to this '
+            'sequence and kept in their queue records, so it has to be the '
+            'plain values that were written and not stand-ins for them',
+        )
+
+    def test_a_sequence_stored_as_bytes_is_read_back_as_text(self):
+        # A shot file written by an older h5py stores its string attributes as
+        # fixed-length bytes, and those come back as bytes. The sequence a
+        # batch is added to is the one that file names, whatever it is stored
+        # as.
+        attrs = sequence_attrs()
+        path = os.path.join(self.directory, 'experiment_02.h5')
+        runmanager.make_single_run_file(path, None, {}, attrs, 0, 1)
+        with h5py.File(path, 'r+') as f:
+            f.attrs['sequence_id'] = np.bytes_(attrs['sequence_id'])
+
+        read = runmanager.get_sequence_attrs(path)
+
+        self.assertEqual(read['sequence_id'], attrs['sequence_id'])
+        self.assertIsInstance(read['sequence_id'], str)

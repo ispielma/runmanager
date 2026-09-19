@@ -613,13 +613,34 @@ SEQUENCE_ATTRS = (
 )
 
 
+def plain_value(value):
+    """The plain Python value an h5 attribute stands for.
+
+    h5py answers with numpy scalars, and with bytes for a string stored as
+    fixed-length characters. Each of those is equal to the number or string it
+    stands for without being it, and the difference tells wherever a value has
+    to be one rather than merely compare equal to one: a TOML app config holds
+    strings, numbers and booleans, so a queue record carrying a numpy integer
+    cannot be saved at all.
+
+    A value that is not a scalar is returned untouched. This says what one
+    scalar is and makes no claim about anything else."""
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, bytes):
+        return value.decode('utf-8')
+    return value
+
+
 def get_sequence_attrs(filename):
     """Return the sequence attributes of an existing shot file.
 
     The inverse of what make_single_run_file writes, for adding shots to the
-    sequence a shot already on disk belongs to."""
+    sequence a shot already on disk belongs to. The values come back as the
+    plain ones that were written: they are written again into every shot added
+    to the sequence and kept in those shots' queue records, which are saved."""
     with h5py.File(filename, 'r') as f:
-        return {name: f.attrs[name] for name in SEQUENCE_ATTRS}
+        return {name: plain_value(f.attrs[name]) for name in SEQUENCE_ATTRS}
 
 
 def next_sequence_index(shot_basedir, dt, increment=True):
