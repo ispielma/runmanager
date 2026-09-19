@@ -9,6 +9,7 @@ travels as, rather than by calling the handler method directly. The name is
 what crosses the wire -- a handler reachable only under a name no client sends
 is not reachable at all -- and the dispatch is runmanager's own.
 """
+import copy
 import os
 import shutil
 import tempfile
@@ -854,9 +855,12 @@ class ShotStatusTests(RemoteCommandTestCase):
         self.assertEqual(sorted(answer), ['gone', 'here'])
 
     def test_asking_leaves_the_queue_as_it_was(self):
+        # Deep, because the rows themselves are half of the claim: a list of
+        # the same dicts compares each row to itself and would pass with the
+        # answer written back into every row it was read from.
         self.enqueue('one')
         self.enqueue('two')
-        before = list(self.app.queue_manager.controller._items)
+        before = copy.deepcopy(self.app.queue_manager.controller._items)
 
         self.request('shot_status', ['one', 'two', 'three'])
 
