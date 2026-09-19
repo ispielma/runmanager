@@ -172,8 +172,12 @@ class Client(ZMQClient):
 
         ``entries`` is a list of ``{global_name: value}`` dicts; one entry is
         one shot. The globals an entry names are set in runmanager's window and
-        left set, so that whoever is watching sees what is running; globals no
-        entry names keep whatever they had.
+        left set, so that whoever is watching sees what is running, and the
+        window is left holding the last entry submitted. A global that another
+        entry names but this one does not goes back to the operator's own
+        expression before this entry's shot is made, so a value asked for once
+        does not carry into the shots after it; globals no entry names are
+        untouched.
 
         Returns one descriptor per entry, in the order submitted:
         ``{'shot_id', 'sequence_id', 'run_number', 'path'}``. The shots are
@@ -188,12 +192,18 @@ class Client(ZMQClient):
         the anchor as soon as BLACS asks and finds the queue empty, so each
         submission starts a sequence of its own.
 
-        Raises, having submitted nothing at all, if the labscript file or
-        output folder is not set, if the globals cannot be evaluated, or if an
-        entry would produce anything other than exactly one shot -- which is
-        what happens when a global still has a scan enabled. A scan also means
-        the value asked for is not the value that runs, so this is refused
-        rather than submitted."""
+        Raises, having submitted nothing at all, whatever it is that goes
+        wrong. The whole batch is made and handed over in one go, so until
+        that succeeds there is nothing queued to take back and no shot running
+        under an identifier the caller was never given.
+
+        An entry that would produce anything other than exactly one shot is
+        refused this way, which is what happens when a global still has a scan
+        enabled: a scan means the value asked for is not the value that runs,
+        so it is refused rather than submitted. So are a labscript file or
+        output folder that is not set, globals that cannot be evaluated, and a
+        name no active group has. The globals set before a refusal are left
+        set; nothing is queued and nothing runs."""
         return self.request('submit_shots', list(entries))
 
     def shot_status(self, shot_ids):

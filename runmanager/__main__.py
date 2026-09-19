@@ -2580,7 +2580,7 @@ class RunManager(LabscriptApplication):
         logger.info('end engage')
 
     def compile_and_queue_shots(
-        self, submission_mode, send_to_BLACS, send_to_runviewer
+        self, submission_mode, send_to_BLACS, send_to_runviewer, batch=None
     ):
         """Compile the pending shots and put them in the queue.
 
@@ -2590,11 +2590,26 @@ class RunManager(LabscriptApplication):
         the window has no output box to read: Engage catches these and puts
         them there itself.
 
-        Returns the queue records, each carrying the identifier its row has."""
+        ``batch``, if given, is the shots to make instead of the ones the
+        window's globals expand into: one ``(shot globals, globals to freeze)``
+        pair per shot. A caller that evaluated its shots one at a time, each
+        against the globals it asked for, holds the only copy of them, because
+        the window holds only the last. Making them in one batch is also what
+        numbers them apart: a filename and a run number are claimed by the
+        batch being made, not by the record reaching the queue afterwards.
+
+        Returns the queue records, each carrying the identifier its row has,
+        in the order the shots were given."""
         queue_append_filepath = self.get_queue_append_filepath()
         labscript_file = self.ui.lineEdit_labscript_file.text()
         # even though we shuffle on a per global basis, if ALL of the globals are set to shuffle, then we may as well shuffle again. This helps shuffle shots more randomly than just shuffling within each level (because without this, you would still do all shots with the outer most variable the same, etc)
         shuffle = self.ui.pushButton_shuffle.checkState() == QtCore.Qt.Checked
+        if batch is not None:
+            # Shuffling is for a scan runmanager expanded itself, where no
+            # order was asked for. A batch was named shot by shot by whoever
+            # submitted it, in an order that is theirs, and is answered for
+            # by position.
+            shuffle = False
         if not labscript_file:
             raise Exception('Error: No labscript file selected')
         output_folder = self.ui.lineEdit_shot_output_folder.text()
@@ -2615,7 +2630,15 @@ class RunManager(LabscriptApplication):
         except Exception as e:
             raise Exception('Error parsing globals:\n%s\nCompilation aborted.' % str(e))
         logger.info('Making h5 files')
-        globals_details = runmanager.get_globals_details(active_groups)
+        if batch is None:
+            globals_details = runmanager.get_globals_details(active_groups)
+            frozen_globals = [
+                runmanager.get_frozen_globals(globals_details, shot_globals)
+                for shot_globals in shots
+            ]
+        else:
+            shots = [shot_globals for shot_globals, _ in batch]
+            frozen_globals = [frozen for _, frozen in batch]
         indexed_path_base = None
         index_start = None
         sequence_attrs = None
@@ -2650,7 +2673,7 @@ class RunManager(LabscriptApplication):
         )
         compile_mode = self.queue_compile_mode_combo.currentData()
         queue_records = []
-        for run_file_info in run_files:
+        for run_file_info, frozen in zip(run_files, frozen_globals):
             queue_records.append(
                 {
                     'path': run_file_info['path'],
@@ -2658,10 +2681,7 @@ class RunManager(LabscriptApplication):
                     'active_groups': dict(active_groups),
                     'compile_mode': compile_mode,
                     'compiled': False,
-                    'frozen_globals': runmanager.get_frozen_globals(
-                        globals_details,
-                        run_file_info['shot_globals'],
-                    ),
+                    'frozen_globals': frozen,
                     'sequence_attrs': run_file_info['sequence_attrs'],
                     'run_no': run_file_info['run_no'],
                     'n_runs': run_file_info['n_runs'],
@@ -5108,68 +5128,149 @@ class RemoteServer(ZMQServer):
 
         An entry is a dict of global name to value. The globals it names are
         set in the window and left there, so that an operator watching can see
-        what is being run; globals it does not name are untouched, and keep
+        what is being run; globals no entry names are untouched, and keep
         whatever the operator last gave them.
 
         Returns one descriptor per entry -- shot_id, sequence_id, run_number
         and path -- in the order submitted.
 
-        The whole loop is one call, so nothing an operator does can land
-        between a global being set and the shot that uses it being submitted.
-        Within the loop the window is free between entries, so an operator
-        editing a global that no entry names can still change the experiment
-        partway through a batch; that is no different from two consecutive
-        Engages, and holding the window for the length of a batch would be
-        worse.
+        The window holds one entry's globals at a time, which is what the
+        operator sees and what that entry's shot is evaluated against. A
+        global another entry names but this one does not is put back to the
+        operator's own expression first, so that nothing an earlier entry
+        asked for reaches a later entry's shot -- a result recorded against
+        parameters that never ran is worse than no result. The window is left
+        holding the last entry submitted.
 
-        Every entry is checked before any is submitted. That is what makes it
-        safe to raise: a refusal leaves the queue as it found it, so there is
-        no half-submitted batch whose shots the caller would never hear about.
-        Checking costs a second pass over the entries, and the globals of a
-        refused batch are left set -- but nothing is queued, and nothing runs.
+        Every entry is evaluated before any shot is made, and the whole batch
+        is then made and submitted in one go. That is what makes it safe to
+        raise: until the last entry has been evaluated there is nothing in the
+        queue to take back, so a refusal leaves the queue as it found it and
+        there is no half-submitted batch whose shots the caller would never
+        hear about. It is also what tells the shots apart: a filename and a
+        run number are claimed by the batch being made, so entries submitted
+        one at a time would each find the same number free.
+
+        The globals of a refused batch are left set, at whichever entry the
+        refusal reached. Nothing is queued and nothing runs.
+
+        Within the batch the window is free between entries, so an operator
+        editing a global that no entry names can still change the experiment
+        partway through; that is no different from two consecutive Engages,
+        and holding the window for the length of a batch would be worse.
         """
         entries = [dict(entry) for entry in entries]
+        if not entries:
+            # A caller that produced no entries this round has asked for
+            # nothing, rather than asked wrongly. Nothing is made, so nothing
+            # claims a filename or a run number.
+            return []
+        named = set()
         for entry in entries:
+            named.update(entry)
+        baseline = self._operator_expressions(named)
+        send_to_runviewer = inmain(app.ui.checkBox_view_shots.isChecked)
+        batch = []
+        for entry in entries:
+            restore = {
+                name: baseline[name] for name in sorted(named - set(entry))
+            }
+            if restore:
+                self.handle_set_globals(restore, raw=True)
             self.handle_set_globals(entry)
+            # Setting a global asks the preparse thread to run again, and the
+            # preparse is what writes each global's expansion type and rebuilds
+            # the axes the shots are expanded along. Reading either while it is
+            # being rewritten is reading it half done -- see handle_engage,
+            # which waits for the same reason.
+            app.wait_until_preparse_complete()
             if self.handle_error_in_globals():
                 raise ValueError(
                     'Cannot submit %r: the globals it produces cannot be '
                     'evaluated.' % entry
                 )
-            n_shots = self.handle_n_shots()
-            if n_shots != 1:
-                # A global with a scan enabled ignores the value just set for
-                # it, so this is not only the wrong number of shots: it is a
-                # shot that did not use the parameters it was asked for, and a
-                # cost attributed to parameters that never ran is worse than no
-                # cost at all. Refused rather than mended, because the scan is
-                # the operator's and turning it off under them is not this
-                # command's to do.
-                raise ValueError(
-                    'Cannot submit %r as one shot: the globals as they stand '
-                    'produce %d. Expanded by: %s.'
-                    % (entry, n_shots, ', '.join(self._expanding_globals()) or 'none')
-                )
-        send_to_runviewer = inmain(app.ui.checkBox_view_shots.isChecked)
-        descriptors = []
-        for entry in entries:
-            self.handle_set_globals(entry)
-            records = inmain(
-                app.compile_and_queue_shots,
-                SUBMISSION_MODE_CONTINUE_SEQUENCE,
-                True,
-                send_to_runviewer,
+            batch.append(self._shot_for_entry(entry))
+        records = inmain(
+            app.compile_and_queue_shots,
+            SUBMISSION_MODE_CONTINUE_SEQUENCE,
+            True,
+            send_to_runviewer,
+            batch,
+        )
+        return [
+            {
+                'shot_id': record['shot_id'],
+                'sequence_id': record['sequence_attrs']['sequence_id'],
+                'run_number': record['run_no'],
+                'path': record['path'],
+            }
+            for record in records
+        ]
+
+    def _operator_expressions(self, names):
+        """What the operator has these globals set to, before any entry is.
+
+        Read once, at the start, and put back around every entry that does not
+        name them. Without that the window ends up holding the union of every
+        entry's globals, and each shot is compiled with the values of the
+        entries before it as well as its own.
+
+        Expressions and not values: what the operator wrote may be in terms of
+        other globals, and a number frozen out of it stops following them.
+
+        A name no active group has is refused here rather than at the entry
+        that carries it, because the globals of a refused batch are left set
+        and this one can be refused before any of them are.
+        """
+        expressions = self.handle_get_default_globals(raw=True)
+        missing = sorted(set(names) - set(expressions))
+        if missing:
+            raise ValueError('Global %s not found in any active group' % missing[0])
+        return {
+            name: self._without_trailing_comment(expressions[name]) for name in names
+        }
+
+    @staticmethod
+    def _without_trailing_comment(expression):
+        """An expression without the comment the window keeps on the end of it.
+
+        Setting a global puts back whatever comment the expression it replaces
+        ended with, so an expression handed back with its own comment still
+        attached would return carrying two of them."""
+        comments = runmanager.find_comments(expression)
+        if comments and comments[-1][1] == len(expression):
+            return expression[: comments[-1][0]]
+        return expression
+
+    @inmain_decorator()
+    def _shot_for_entry(self, entry):
+        """The one shot the window now stands for, and what to freeze with it.
+
+        Both read here, while the window is holding this entry's globals and
+        nothing else's: the expressions a queue record freezes are the ones
+        standing in the window when its shot was evaluated, and a batch that
+        read them once at the end would carry the last entry's for every shot
+        in it.
+
+        Anything but one shot is refused. A global with a scan enabled ignores
+        the value just set for it, so this is not only the wrong number of
+        shots: it is a shot that did not use the parameters it was asked for,
+        and a cost attributed to parameters that never ran is worse than no
+        cost at all. Refused rather than mended, because the scan is the
+        operator's and turning it off under them is not this command's to do.
+        Refused here, too, where one shot per entry is first relied on, rather
+        than counted afterwards when the shots are already queued.
+        """
+        active_groups = app.get_active_groups(interactive=False)
+        _, shots, _, _, _ = app.parse_globals(active_groups)
+        if len(shots) != 1:
+            raise ValueError(
+                'Cannot submit %r as one shot: the globals as they stand '
+                'produce %d. Expanded by: %s.'
+                % (entry, len(shots), ', '.join(self._expanding_globals()) or 'none')
             )
-            for record in records:
-                descriptors.append(
-                    {
-                        'shot_id': record['shot_id'],
-                        'sequence_id': record['sequence_attrs']['sequence_id'],
-                        'run_number': record['run_no'],
-                        'path': record['path'],
-                    }
-                )
-        return descriptors
+        globals_details = runmanager.get_globals_details(active_groups)
+        return shots[0], runmanager.get_frozen_globals(globals_details, shots[0])
 
     def _expanding_globals(self):
         """The globals that turn one set of values into more than one shot.
