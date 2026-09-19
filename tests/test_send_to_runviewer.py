@@ -1,14 +1,13 @@
 """Starting runviewer when it is not already running.
 
-Ticking *View shot(s)* with no runviewer up is meant to start one. It did not:
-the launch forked, and runmanager is heavily threaded, so the child inherited
-one thread and every lock the others happened to hold -- the allocator's among
-them, which subprocess needs. It deadlocked before starting anything and said
-nothing about it.
+Ticking *View shot(s)* with no runviewer up starts one.
 
 What is pinned here is that the child is started detached and without a fork,
 because a child that is not detached dies with runmanager and a fork in this
-process may never get as far as starting one.
+process may never get as far as starting one. Runmanager is heavily threaded,
+so a forked child gets one thread and every lock the others happen to hold at
+that instant -- the allocator's among them, which subprocess needs -- and
+deadlocks before starting anything, saying nothing about it.
 """
 import logging
 import os

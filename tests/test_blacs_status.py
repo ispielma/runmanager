@@ -298,7 +298,7 @@ class PollingTests(unittest.TestCase):
         polls_while_running = len(reported)
         monitor.shutdown()
         # shutdown() deliberately does not wait for the poller -- joining it
-        # from the GUI thread is what used to deadlock the quit -- so a poll
+        # from the GUI thread would deadlock the quit -- so a poll
         # already in flight can still hand its answer over. What becomes of
         # that answer is the update's business, and the update drops it
         # (MonitorShutdownTests); the question here is only whether the loop

@@ -216,8 +216,9 @@ class QueuePauseTests(unittest.TestCase):
         self.assertTrue(restored.get_queue_state()['paused'])
 
     def test_a_saved_queue_with_no_pause_state_loads_unpaused(self):
-        # An older configuration was written before there was a pause control,
-        # and must not open with the queue silently stopped.
+        # A configuration carrying no pause state -- one saved by a runmanager
+        # without the pause control -- must not open with the queue silently
+        # stopped.
         controller = QueueController()
         controller.set_paused(True)
         controller.restore_state({'items': [queued_shot('/tmp/shot_a.h5')]})
@@ -784,9 +785,9 @@ class DefaultShotTests(unittest.TestCase):
 class LazyCompileFailureTests(unittest.TestCase):
     """A queued shot that cannot be compiled must not just disappear.
 
-    It used to be dropped. That is indistinguishable from the queue draining
-    normally, which is exactly what one broken labscript file looked like: rows
-    vanishing one per request with no shot ever running and nothing in the
+    Dropping it would be indistinguishable from the queue draining normally,
+    which is what one broken labscript file would then look like: rows
+    vanishing one per request, with no shot ever running and nothing in the
     queue to say why. A shot that never compiled did not complete, so the row
     stays where it is and goes red with the reason, like any other failure.
 
@@ -894,15 +895,16 @@ class LazyCompileFailureTests(unittest.TestCase):
 class CompileFailureIsNotAHandoverTests(unittest.TestCase):
     """A shot that never compiled has not been given to BLACS.
 
-    Both kinds of failure were recorded with the same word, and sent_to_blacs
-    read any state at all as proof of a handover. So a compile failure -- a row
-    that never left runmanager -- was drawn in the reserved first row, the one
-    that means "the shot BLACS was given"; a replacement submission refused to
-    clear it; and the operator was told BLACS was running a file it had never
-    seen.
+    Recording both kinds of failure with the same word, so that sent_to_blacs
+    read any state at all as proof of a handover, would draw a compile failure
+    -- a row that never left runmanager -- in the reserved first row, the one
+    that means "the shot BLACS was given"; a replacement submission would
+    refuse to clear it; and the operator would be told BLACS was running a file
+    it had never seen.
 
     What the operator chose stays: the row is still red, still at the head, and
-    still a dead end until it is deleted. Only the claim that BLACS has it goes.
+    still a dead end until it is deleted. What it does not carry is any claim
+    that BLACS has it.
     """
 
     def failed_compile_queue(self):
@@ -1039,14 +1041,14 @@ class KeptRowReasonTests(unittest.TestCase):
 class CompiledFlagOwnershipTests(unittest.TestCase):
     """The controller owns ``compiled`` for a row that is already in the queue.
 
-    The background compile used to write it a second time, outside the lock,
-    before handing the outcome to the controller. In that gap an exchange
-    arriving on the server thread saw a row ready to hand over, took it, and
-    marked it running -- and the compile then finished and cleared the state it
-    had just been given. The row lost the protection that state carries, left
-    the reserved display row, and the next request offered the same shot again
-    as a fresh offer, with nothing to say it had been offered before. The same
-    file ran twice on hardware.
+    A background compile writing it a second time, outside the lock, before
+    handing the outcome to the controller would leave a gap. An exchange
+    arriving on the server thread inside it sees a row ready to hand over,
+    takes it, and marks it running -- and the compile then finishes and clears
+    the state it has just been given. The row loses the protection that state
+    carries, leaves the reserved display row, and the next request offers the
+    same shot again as a fresh offer, with nothing to say it has been offered
+    before. The same file runs twice on hardware.
 
     These drive the two steps by hand rather than through the compile thread,
     because what is pinned here is the state between them, and a test that has
@@ -1434,11 +1436,12 @@ class ContinuingSequenceAnchorTests(unittest.TestCase):
 class ShotIdBeforeCompileTests(unittest.TestCase):
     """A shot has its identifier before anything writes its file.
 
-    The eager path compiles a record before it is enqueued, and the identifier
-    was assigned by enqueue -- so on that path the file was written before the
-    shot had an id to put in it. Nothing about the id itself changes: enqueue
-    keeps whatever a record arrives with, so this fixes when it is decided,
-    not what it is.
+    The eager path compiles a record before it is enqueued, so an identifier
+    assigned by enqueue would come too late: a file written on that path would
+    have been written before its shot had an id to put in it. It is settled at
+    the compile instead. What the id is does not change -- enqueue keeps
+    whatever a record arrives with -- so what is pinned here is when it is
+    decided, not what it is.
     """
 
     def test_a_record_is_compiled_with_the_id_its_row_will_have(self):
@@ -2217,11 +2220,11 @@ class OutcomeWithNoRowTests(unittest.TestCase):
     in its queue under that id.
 
     The queue is left alone -- there is nothing there to change -- but the shot
-    ran and wrote data, so the completion is passed on. It used to be dropped,
-    on the grounds that a resent outcome for a row already retired would be
-    reported twice. That was runmanager deciding what the far end could cope
-    with, which is not its to decide: reporting a completion is its part, and
-    one it has withheld is one nothing downstream can ask for later.
+    ran and wrote data, so the completion is passed on. Dropping it, on the
+    grounds that a resent outcome for a row already retired would be reported
+    twice, would be runmanager deciding what the far end can cope with, which
+    is not its to decide: reporting a completion is its part, and one it
+    withholds is one nothing downstream can ask for later.
     """
 
     def app(self):
@@ -2287,12 +2290,12 @@ class QueueBookkeepingUnderSubmissionTests(unittest.TestCase):
     """Two things the queue records that a concurrent submission can spoil.
 
     The anchor that "add shots to last sequence" writes alongside is the last
-    shot actually sent to BLACS. It used to be cleared only when the queue was
-    genuinely empty. A later condition made the same branch reachable with work
-    still queued -- a head that cannot be offered, because it was rejected or
-    its compile failed -- and the clearing came along with it, so the next
-    replacement batch was written beside the last shot *queued* instead, which
-    is a different sequence folder as soon as two batches have been engaged.
+    shot actually sent to BLACS, and it is cleared only when the queue is
+    genuinely empty. Clearing it on any branch reachable with work still queued
+    -- a head that cannot be offered, because it was rejected or its compile
+    failed -- would write the next replacement batch beside the last shot
+    *queued* instead, which is a different sequence folder as soon as two
+    batches have been engaged.
 
     And the default shot is made because the queue is empty, on a different
     thread from the one that fills it. A batch landing in between leaves the
@@ -2547,11 +2550,10 @@ class SentToBlacsRowTests(unittest.TestCase):
         )
 
     def test_the_running_row_can_be_selected_and_says_what_delete_does(self):
-        # Delete used to be refused, so the selection was refused too, to say
-        # so where an operator would see it. Delete now cancels the shot
-        # instead, so there is something to aim at -- and the tooltip says what
-        # aiming at it will do, since it is not the outright removal that
-        # Delete means everywhere else.
+        # Delete cancels the running shot rather than removing it, so there is
+        # something to aim at and the row has to be selectable -- and the
+        # tooltip says what aiming at it will do, since it is not the outright
+        # removal that Delete means everywhere else.
         controller = QueueController()
         controller.enqueue([queued_shot('/tmp/shot_a.h5')])
         controller.offer_next()

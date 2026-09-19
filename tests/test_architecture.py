@@ -6,9 +6,9 @@ inside: a helper may be renamed, a class split, a module moved, and none of
 that should fail a test in this file.
 
   1. The superseded request/accept/reject/report RPC surface stays gone. One
-     exchange replaced it, and a compatibility shim was deliberately not kept,
-     so a method quietly reappearing would be a second protocol rather than an
-     addition to this one.
+     exchange carries all of it, and there is deliberately no compatibility
+     shim, so a method quietly reappearing would be a second protocol rather
+     than an addition to this one.
 
   2. Runmanager may ask BLACS what it is doing and nothing else. Whether BLACS
      requests shots, the error that stopped it, restarting a device and Abort
@@ -32,9 +32,9 @@ import runmanager.remote
 from fixtures import RemoteServer
 from runmanager.analysis_submission import AnalysisSubmission
 
-# The commands that carried the old handoff: BLACS asked for a shot, said it
-# had taken it, said it would not, and reported the result on a channel of its
-# own. queue_exchange does all four now. See ISSUES_PRD.md.
+# The commands of the superseded handoff: BLACS asking for a shot, saying it
+# has taken it, saying it will not, and reporting the result on a channel of
+# its own. queue_exchange does all four. See ISSUES_PRD.md.
 SUPERSEDED_COMMANDS = (
     'queue_request_next',
     'shot_accepted',
