@@ -2910,9 +2910,10 @@ class SequenceContinuityTests(unittest.TestCase):
 
         self.assertEqual(
             self.claimed_a_sequence_index,
-            [False],
+            [],
             'a sequence index claimed for a sequence that was never started '
-            'is one no sequence will ever carry',
+            'is one no sequence will ever carry, and minting one to throw it '
+            'away costs a lock on shot storage that every submission waits in',
         )
 
     def test_a_batch_of_its_own_does_claim_a_sequence_index(self):

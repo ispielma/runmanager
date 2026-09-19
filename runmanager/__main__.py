@@ -4478,32 +4478,40 @@ class RunManager(LabscriptApplication):
         sequence_attrs=None,
     ):
         # A batch given a shot to be numbered after is being added to that
-        # shot's sequence, so it takes that sequence's attributes and claims no
-        # index of its own: an index claimed for a sequence that is never
-        # started is one no sequence will ever carry. A caller that had to read
-        # the sequence earlier than this passes it in; see on_engage_clicked.
+        # shot's sequence, so everything a new sequence would be given comes
+        # from that shot instead: the folder it is in, the filename stem it is
+        # one of, and the sequence it belongs to. None of it is asked of
+        # new_sequence_details, which takes a lock on shot storage and claims
+        # a sequence index -- and an index claimed for a sequence that is
+        # never started is one no sequence will ever carry. A caller that had
+        # to read the sequence earlier than this passes it in; see
+        # compile_and_queue_shots.
         extending = indexed_path_base is not None
-        new_attrs, default_output_dir, filename_prefix = runmanager.new_sequence_details(
-            labscript_file,
-            config=self.exp_config,
-            increment_sequence_index=not extending,
-        )
-        if not extending:
-            sequence_attrs = new_attrs
-        elif sequence_attrs is None:
-            sequence_attrs = self.get_sequence_attrs_to_extend(indexed_path_base)
-        if output_folder == self.previous_default_output_folder:
-            # The user is using dthe efault output folder. Just in case the sequence
-            # index has been updated or the date has changed, use the default_output dir
-            # obtained from new_sequence_details, as it is race-free, whereas the one
-            # from the UI may be out of date since we only update it once a second.
-            output_folder = default_output_dir
+        if extending:
+            run_output_folder = os.path.dirname(os.path.abspath(indexed_path_base))
+            stem = os.path.splitext(os.path.basename(indexed_path_base))[0]
+            # The stem without the index the shot files of this sequence are
+            # numbered with, which is what they share.
+            filename_prefix = stem.rpartition('_')[0] or stem
+            if sequence_attrs is None:
+                sequence_attrs = self.get_sequence_attrs_to_extend(indexed_path_base)
+        else:
+            sequence_attrs, default_output_dir, filename_prefix = (
+                runmanager.new_sequence_details(
+                    labscript_file,
+                    config=self.exp_config,
+                    increment_sequence_index=True,
+                )
+            )
+            if output_folder == self.previous_default_output_folder:
+                # The user is using the default output folder. Just in case the
+                # sequence index has been updated or the date has changed, use the
+                # default_output dir obtained from new_sequence_details, as it is
+                # race-free, whereas the one from the UI may be out of date since we
+                # only update it once a second.
+                output_folder = default_output_dir
+            run_output_folder = output_folder
         self.check_output_folder_update()
-        run_output_folder = (
-            os.path.dirname(os.path.abspath(indexed_path_base))
-            if indexed_path_base is not None
-            else output_folder
-        )
         if indexed_path_base is not None:
             run_files = list(
                 runmanager.make_run_files(
