@@ -127,6 +127,13 @@ SUBMISSION_MODE_NEW_FOLDER = 'new_folder'
 SUBMISSION_MODE_ADD_SHOTS = 'add_shots'
 SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE = 'new_folder_clear_queue'
 SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE = 'add_shots_clear_queue'
+# Not on the Engage menu: what a remote submission does. Like "add shots to
+# last sequence", except that when the queue has emptied it carries on from the
+# shot last sent to BLACS rather than refusing. Between one remote submission
+# and the next -- submit, wait for the result, submit again -- an empty queue
+# is the normal state, and starting a new sequence each time would leave a run
+# of a hundred shots as a hundred sequences of one.
+SUBMISSION_MODE_CONTINUE_SEQUENCE = 'continue_sequence'
 
 
 def log_if_global(g, g_list, message):
@@ -2454,6 +2461,23 @@ class RunManager(LabscriptApplication):
             return None
         return os.path.abspath(queue_paths[-1])
 
+    def get_continuing_sequence_anchor(self):
+        """The shot a remote submission carries on from, or None for a new one.
+
+        The queue if there is anything in it, and otherwise the shot last sent
+        to BLACS -- which between one remote submission and the next is the
+        usual case, since a caller that waits for each result before sending
+        the next finds the queue empty every time. Carrying on from the last
+        shot sent is what keeps a run of such submissions one sequence with
+        continuing run numbers, rather than a sequence of one shot per
+        submission. Only a runmanager that has sent nothing at all answers
+        None, and then there is nothing to continue and a sequence is started.
+        """
+        return (
+            self.get_queue_append_filepath()
+            or self.get_last_sent_from_queue_filepath()
+        )
+
     def get_last_sent_from_queue_filepath(self):
         queue_state = self.queue_manager.get_queue_state()
         last_sent_from_queue = queue_state.get('last_sent_from_queue')
@@ -2526,102 +2550,119 @@ class RunManager(LabscriptApplication):
                     red=True,
                 )
                 return
-            queue_append_filepath = None
             if submission_mode != SUBMISSION_MODE_NEW_FOLDER:
-                queue_append_filepath = self.get_queue_append_filepath()
                 if not send_to_BLACS:
                     self.output_box.output(
                         "Warning: alternate queue submission modes require 'BLACS' to be selected.\n\n",
                         red=True,
                     )
                     return
-                if queue_append_filepath is None:
+                if self.get_queue_append_filepath() is None:
                     self.output_box.output(
                         'Warning: alternate queue submission modes require shots in the queue.\n\n',
                         red=True,
                     )
                     return
-            labscript_file = self.ui.lineEdit_labscript_file.text()
-            # even though we shuffle on a per global basis, if ALL of the globals are set to shuffle, then we may as well shuffle again. This helps shuffle shots more randomly than just shuffling within each level (because without this, you would still do all shots with the outer most variable the same, etc)
-            shuffle = self.ui.pushButton_shuffle.checkState() == QtCore.Qt.Checked
-            if not labscript_file:
-                raise Exception('Error: No labscript file selected')
-            output_folder = self.ui.lineEdit_shot_output_folder.text()
-            if not output_folder:
-                raise Exception('Error: No output folder selected')
-            logger.info('Parsing globals...')
-            active_groups = self.get_active_groups()
-            # Get ordering of expansion globals
-            expansion_order = {}
-            for i in range(self.axes_model.rowCount()):
-                item = self.axes_model.item(i, self.AXES_COL_NAME)
-                shuffle_item = self.axes_model.item(i, self.AXES_COL_SHUFFLE)
-                name = item.data(self.AXES_ROLE_NAME)
-                expansion_order[name] = {'order':i, 'shuffle':shuffle_item.checkState()}
-            
-            try:
-                sequenceglobals, shots, evaled_globals, global_hierarchy, expansions = self.parse_globals(active_groups, expansion_order=expansion_order)
-            except Exception as e:
-                raise Exception('Error parsing globals:\n%s\nCompilation aborted.' % str(e))
-            logger.info('Making h5 files')
-            globals_details = runmanager.get_globals_details(active_groups)
-            indexed_path_base = None
-            index_start = None
-            sequence_attrs = None
-            if submission_mode == SUBMISSION_MODE_ADD_SHOTS:
-                indexed_path_base = queue_append_filepath
-            elif submission_mode == SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE:
-                self.queue_manager.clear()
-            elif submission_mode == SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE:
-                indexed_path_base = (
-                    self.get_last_sent_from_queue_filepath() or queue_append_filepath
-                )
-                index_start = 0
-                # Read before the Clear rather than after it. With nothing yet
-                # sent to BLACS the shot being added to is a queued one, and
-                # the Clear takes its row and deletes its file -- so asked
-                # afterwards, nothing would be left to say which sequence the
-                # replacement batch is joining.
-                sequence_attrs = self.get_sequence_attrs_to_extend(indexed_path_base)
-                self.queue_manager.clear()
-            labscript_file, run_files = self.make_h5_files(
-                labscript_file,
-                output_folder,
-                sequenceglobals,
-                shots,
-                shuffle,
-                with_metadata=True,
-                indexed_path_base=indexed_path_base,
-                index_start=index_start,
-                sequence_attrs=sequence_attrs,
-            )
-            compile_mode = self.queue_compile_mode_combo.currentData()
-            queue_records = []
-            for run_file_info in run_files:
-                queue_records.append(
-                    {
-                        'path': run_file_info['path'],
-                        'labscript_file': labscript_file,
-                        'active_groups': dict(active_groups),
-                        'compile_mode': compile_mode,
-                        'compiled': False,
-                        'frozen_globals': runmanager.get_frozen_globals(
-                            globals_details,
-                            run_file_info['shot_globals'],
-                        ),
-                        'sequence_attrs': run_file_info['sequence_attrs'],
-                        'run_no': run_file_info['run_no'],
-                        'n_runs': run_file_info['n_runs'],
-                    }
-                )
-            self.compilation_aborted.clear()
-            self.ui.pushButton_abort.setEnabled(True)
-            self.queue_manager.compile_shots(
-                queue_records, send_to_BLACS, send_to_runviewer
+            self.compile_and_queue_shots(
+                submission_mode, send_to_BLACS, send_to_runviewer
             )
         except Exception as e:
             self.output_box.output('%s\n\n' % str(e), red=True)
         logger.info('end engage')
+
+    def compile_and_queue_shots(
+        self, submission_mode, send_to_BLACS, send_to_runviewer
+    ):
+        """Compile the pending shots and put them in the queue.
+
+        Everything Engage does once its own warnings are out of the way, and
+        the whole of what a remote submission does. Raises rather than writing
+        to the output box, because a caller that is not a person standing at
+        the window has no output box to read: Engage catches these and puts
+        them there itself.
+
+        Returns the queue records, each carrying the identifier its row has."""
+        queue_append_filepath = self.get_queue_append_filepath()
+        labscript_file = self.ui.lineEdit_labscript_file.text()
+        # even though we shuffle on a per global basis, if ALL of the globals are set to shuffle, then we may as well shuffle again. This helps shuffle shots more randomly than just shuffling within each level (because without this, you would still do all shots with the outer most variable the same, etc)
+        shuffle = self.ui.pushButton_shuffle.checkState() == QtCore.Qt.Checked
+        if not labscript_file:
+            raise Exception('Error: No labscript file selected')
+        output_folder = self.ui.lineEdit_shot_output_folder.text()
+        if not output_folder:
+            raise Exception('Error: No output folder selected')
+        logger.info('Parsing globals...')
+        active_groups = self.get_active_groups()
+        # Get ordering of expansion globals
+        expansion_order = {}
+        for i in range(self.axes_model.rowCount()):
+            item = self.axes_model.item(i, self.AXES_COL_NAME)
+            shuffle_item = self.axes_model.item(i, self.AXES_COL_SHUFFLE)
+            name = item.data(self.AXES_ROLE_NAME)
+            expansion_order[name] = {'order':i, 'shuffle':shuffle_item.checkState()}
+        
+        try:
+            sequenceglobals, shots, evaled_globals, global_hierarchy, expansions = self.parse_globals(active_groups, expansion_order=expansion_order)
+        except Exception as e:
+            raise Exception('Error parsing globals:\n%s\nCompilation aborted.' % str(e))
+        logger.info('Making h5 files')
+        globals_details = runmanager.get_globals_details(active_groups)
+        indexed_path_base = None
+        index_start = None
+        sequence_attrs = None
+        if submission_mode == SUBMISSION_MODE_ADD_SHOTS:
+            indexed_path_base = queue_append_filepath
+        elif submission_mode == SUBMISSION_MODE_CONTINUE_SEQUENCE:
+            indexed_path_base = self.get_continuing_sequence_anchor()
+        elif submission_mode == SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE:
+            self.queue_manager.clear()
+        elif submission_mode == SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE:
+            indexed_path_base = (
+                self.get_last_sent_from_queue_filepath() or queue_append_filepath
+            )
+            index_start = 0
+            # Read before the Clear rather than after it. With nothing yet
+            # sent to BLACS the shot being added to is a queued one, and
+            # the Clear takes its row and deletes its file -- so asked
+            # afterwards, nothing would be left to say which sequence the
+            # replacement batch is joining.
+            sequence_attrs = self.get_sequence_attrs_to_extend(indexed_path_base)
+            self.queue_manager.clear()
+        labscript_file, run_files = self.make_h5_files(
+            labscript_file,
+            output_folder,
+            sequenceglobals,
+            shots,
+            shuffle,
+            with_metadata=True,
+            indexed_path_base=indexed_path_base,
+            index_start=index_start,
+            sequence_attrs=sequence_attrs,
+        )
+        compile_mode = self.queue_compile_mode_combo.currentData()
+        queue_records = []
+        for run_file_info in run_files:
+            queue_records.append(
+                {
+                    'path': run_file_info['path'],
+                    'labscript_file': labscript_file,
+                    'active_groups': dict(active_groups),
+                    'compile_mode': compile_mode,
+                    'compiled': False,
+                    'frozen_globals': runmanager.get_frozen_globals(
+                        globals_details,
+                        run_file_info['shot_globals'],
+                    ),
+                    'sequence_attrs': run_file_info['sequence_attrs'],
+                    'run_no': run_file_info['run_no'],
+                    'n_runs': run_file_info['n_runs'],
+                }
+            )
+        self.compilation_aborted.clear()
+        self.ui.pushButton_abort.setEnabled(True)
+        return self.queue_manager.compile_shots(
+            queue_records, send_to_BLACS, send_to_runviewer
+        )
 
     def on_abort_clicked(self):
         self.compilation_aborted.set()
@@ -5052,6 +5093,80 @@ class RemoteServer(ZMQServer):
         Read-only, and not a GUI read: the policy lives in the queue
         controller, which is safe to ask from any thread."""
         return app.queue_manager.get_empty_queue_policy()
+
+    def handle_submit_shots(self, entries):
+        """Submit one shot per entry, each with the globals that entry names.
+
+        An entry is a dict of global name to value. The globals it names are
+        set in the window and left there, so that an operator watching can see
+        what is being run; globals it does not name are untouched, and keep
+        whatever the operator last gave them.
+
+        Returns one descriptor per entry -- shot_id, sequence_id, run_number
+        and path -- in the order submitted.
+
+        The whole loop is one call, so nothing an operator does can land
+        between a global being set and the shot that uses it being submitted.
+        Within the loop the window is free between entries, so an operator
+        editing a global that no entry names can still change the experiment
+        partway through a batch; that is no different from two consecutive
+        Engages, and holding the window for the length of a batch would be
+        worse.
+
+        Every entry is checked before any is submitted. That is what makes it
+        safe to raise: a refusal leaves the queue as it found it, so there is
+        no half-submitted batch whose shots the caller would never hear about.
+        Checking costs a second pass over the entries, and the globals of a
+        refused batch are left set -- but nothing is queued, and nothing runs.
+        """
+        entries = [dict(entry) for entry in entries]
+        for entry in entries:
+            self.handle_set_globals(entry)
+            if self.handle_error_in_globals():
+                raise ValueError(
+                    'Cannot submit %r: the globals it produces cannot be '
+                    'evaluated.' % entry
+                )
+            n_shots = self.handle_n_shots()
+            if n_shots != 1:
+                # A global with a scan enabled ignores the value just set for
+                # it, so this is not only the wrong number of shots: it is a
+                # shot that did not use the parameters it was asked for, and a
+                # cost attributed to parameters that never ran is worse than no
+                # cost at all. Refused rather than mended, because the scan is
+                # the operator's and turning it off under them is not this
+                # command's to do.
+                raise ValueError(
+                    'Cannot submit %r as one shot: the globals as they stand '
+                    'produce %d. Expanded by: %s.'
+                    % (entry, n_shots, ', '.join(self._expanding_globals()) or 'none')
+                )
+        send_to_runviewer = inmain(app.ui.checkBox_view_shots.isChecked)
+        descriptors = []
+        for entry in entries:
+            self.handle_set_globals(entry)
+            records = inmain(
+                app.compile_and_queue_shots,
+                SUBMISSION_MODE_CONTINUE_SEQUENCE,
+                True,
+                send_to_runviewer,
+            )
+            for record in records:
+                descriptors.append(
+                    {
+                        'shot_id': record['shot_id'],
+                        'sequence_id': record['sequence_attrs']['sequence_id'],
+                        'run_number': record['run_no'],
+                        'path': record['path'],
+                    }
+                )
+        return descriptors
+
+    def _expanding_globals(self):
+        """The globals that turn one set of values into more than one shot."""
+        return sorted(
+            name for name, expansion in app.previous_expansions.items() if expansion
+        )
 
     def handle_shot_status(self, shot_ids):
         """Whether each of these shots can still produce a result.

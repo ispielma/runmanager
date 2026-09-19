@@ -433,6 +433,7 @@ class FakeRunManager(object):
     offer_shot = RunManager.offer_shot
     get_queue_append_filepath = RunManager.get_queue_append_filepath
     get_last_sent_from_queue_filepath = RunManager.get_last_sent_from_queue_filepath
+    get_continuing_sequence_anchor = RunManager.get_continuing_sequence_anchor
     reindex_run_file_infos = RunManager.reindex_run_file_infos
     make_h5_files = RunManager.make_h5_files
     prepare_queue_shot = RunManager.prepare_queue_shot
@@ -1040,6 +1041,66 @@ class CompiledFlagOwnershipTests(unittest.TestCase):
             offered, 'an eagerly compiled shot is ready the moment it is queued'
         )
         self.assertEqual(offered['path'], '/tmp/eager.h5')
+
+
+class ContinuingSequenceAnchorTests(unittest.TestCase):
+    """What a remote submission carries on from.
+
+    A caller that submits a shot, waits for its result and submits the next
+    finds the queue empty every time it asks. If an empty queue meant a new
+    sequence, a run of a hundred such submissions would be a hundred sequences
+    of one shot, which is the opposite of what a sequence is for.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.app = FakeRunManager()
+        self.addCleanup(self.app.queue_manager.shutdown)
+
+    def enqueue(self, name):
+        path = os.path.join(self.directory, name)
+        open(path, 'w').close()
+        self.app.queue_manager.enqueue([queued_shot(path)])
+        return path
+
+    def test_a_queue_with_work_in_it_is_what_is_continued(self):
+        # BLACS running the first shot while the rest wait: the shot it was
+        # sent is not the end of the sequence, and numbering the next batch
+        # after that one would write it over the shots still waiting.
+        sent = self.enqueue('experiment_00.h5')
+        waiting = self.enqueue('experiment_01.h5')
+        self.app.offer_shot()
+
+        self.assertEqual(
+            self.app.get_last_sent_from_queue_filepath(),
+            sent,
+            'BLACS has the first shot',
+        )
+        self.assertEqual(
+            self.app.get_continuing_sequence_anchor(),
+            waiting,
+            'and the queue still ends where it ends',
+        )
+
+    def test_an_empty_queue_carries_on_from_the_shot_blacs_was_sent(self):
+        sent = self.enqueue('experiment_00.h5')
+        self.app.offer_shot()
+        self.app.queue_manager.shot_finished(
+            self.app.queue_manager.controller._items[0]['shot_id'], 'completed'
+        )
+
+        self.assertEqual(
+            self.app.queue_manager.get_queue_paths(), [], 'the queue is empty'
+        )
+        self.assertEqual(
+            self.app.get_continuing_sequence_anchor(),
+            sent,
+            'the shot that just ran is what the next submission continues',
+        )
+
+    def test_a_runmanager_that_has_sent_nothing_has_nothing_to_continue(self):
+        self.assertIsNone(self.app.get_continuing_sequence_anchor())
 
 
 class ShotIdBeforeCompileTests(unittest.TestCase):

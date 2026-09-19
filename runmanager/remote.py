@@ -167,6 +167,28 @@ class Client(ZMQClient):
         arrives to wait for."""
         return self.request('get_empty_queue_policy')
 
+    def submit_shots(self, entries):
+        """Submit one shot per entry, each with the globals that entry names.
+
+        ``entries`` is a list of ``{global_name: value}`` dicts; one entry is
+        one shot. The globals an entry names are set in runmanager's window and
+        left set, so that whoever is watching sees what is running; globals no
+        entry names keep whatever they had.
+
+        Returns one descriptor per entry, in the order submitted:
+        ``{'shot_id', 'sequence_id', 'run_number', 'path'}``. The shots are
+        added to the sequence runmanager is already working on, continuing its
+        run numbers, so a whole run of submissions is one sequence. The queue
+        is never cleared.
+
+        Raises, having submitted nothing at all, if the labscript file or
+        output folder is not set, if the globals cannot be evaluated, or if an
+        entry would produce anything other than exactly one shot -- which is
+        what happens when a global still has a scan enabled. A scan also means
+        the value asked for is not the value that runs, so this is refused
+        rather than submitted."""
+        return self.request('submit_shots', list(entries))
+
     def shot_status(self, shot_ids):
         """Whether each of these shots can still produce a result.
 
@@ -237,6 +259,7 @@ is_output_folder_default = _default_client.is_output_folder_default
 reset_shot_output_folder = _default_client.reset_shot_output_folder
 get_empty_queue_policy = _default_client.get_empty_queue_policy
 shot_status = _default_client.shot_status
+submit_shots = _default_client.submit_shots
 queue_exchange = _default_client.queue_exchange
 
 if __name__ == '__main__':
