@@ -27,6 +27,7 @@ import uuid
 from qtutils.qt import QtCore, QtGui, QtWidgets
 from qtutils.qt.QtCore import pyqtSignal as Signal
 
+from labscript_utils import shared_drive
 from labscript_utils.qtwidgets.shotqueue import ShotQueueWidget
 from zprocess import raise_exception_in_thread
 
@@ -577,6 +578,32 @@ class QueueController(object):
             self.last_sent_from_queue = value
             return True
 
+    def forget_last_sent(self, paths):
+        """Let go of the last shot sent if one of these paths is its file.
+
+        Called where a queued shot's file is deleted. What that value is for
+        is naming the shot a later batch is numbered after and reading the
+        sequence it belongs to out of; a file that has been deleted answers
+        neither, and no later event puts it back, so keeping the name is
+        keeping a sequence nothing can ever be added to. A caller that finds
+        nothing recorded here starts a sequence instead, which is what it does
+        before anything has run.
+
+        Compared as local paths, because what is recorded here is the
+        shared-drive-agnostic name BLACS was given. Returns True if it
+        changed."""
+        wanted = {os.path.abspath(path) for path in paths}
+        with self._lock:
+            if self.last_sent_from_queue is None:
+                return False
+            anchor = os.path.abspath(
+                shared_drive.path_to_local(self.last_sent_from_queue)
+            )
+            if anchor not in wanted:
+                return False
+            self.last_sent_from_queue = None
+            return True
+
     def export_state(self):
         with self._lock:
             return {
@@ -1040,6 +1067,14 @@ class QueueManager(QtCore.QObject):
             self.queueChanged.emit()
 
     def _delete_queue_files(self, paths):
+        """Delete the files of shots the queue has finished with.
+
+        Every path a queued shot's file is deleted by comes through here, so
+        this is where the shot last sent to BLACS is let go of if it was one
+        of them -- whether the file went or was already gone. A name that no
+        longer reaches a shot file is no use to the batch that would have been
+        added to that shot's sequence, and nothing puts it back."""
+        paths = list(paths)
         for path in paths:
             try:
                 os.remove(path)
@@ -1051,6 +1086,8 @@ class QueueManager(QtCore.QObject):
                     % (os.path.basename(path), str(exc)),
                     red=True,
                 )
+        if self.controller.forget_last_sent(paths):
+            self.queueChanged.emit()
 
     def set_empty_queue_policy(self, value):
         self.controller.set_empty_queue_policy(value)

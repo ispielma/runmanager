@@ -3017,5 +3017,101 @@ class SequenceContinuityTests(unittest.TestCase):
         )
 
 
+class DeletedAnchorTests(unittest.TestCase):
+    """What a sequence carries on from when that shot has been deleted.
+
+    The shot last sent to BLACS is what the next submission is numbered after
+    once the queue has emptied, and it is named by its file. That file can be
+    deleted while it is still the anchor: a shot that came back failed sits in
+    the queue in red until an operator deletes the row, and deleting a row
+    deletes its file.
+
+    Naming a file that is gone is not a sequence to add to, and it cannot
+    become one again. Every later submission asked for the sequence of a file
+    nothing can read and was refused -- permanently, and identically each
+    time. Letting go of the anchor with the file leaves the next submission in
+    the state it is in before anything has run, which is one it knows how to
+    be in: it starts a sequence.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.app = FakeRunManager()
+        self.addCleanup(self.app.queue_manager.shutdown)
+
+    def enqueue(self, app, name):
+        path = os.path.join(self.directory, name)
+        open(path, 'w').close()
+        app.queue_manager.enqueue([queued_shot(path)])
+        return path
+
+    def test_deleting_the_failed_shot_it_named_lets_go_of_the_anchor(self):
+        sent = self.enqueue(self.app, 'experiment_00.h5')
+        offered = self.app.offer_shot()
+        self.app.queue_manager.shot_finished(
+            offered['shot_id'], 'failed', 'Device error'
+        )
+
+        self.app.queue_manager.delete_rows([offered['shot_id']])
+
+        self.assertFalse(os.path.exists(sent), 'the row took its file with it')
+        self.assertIsNone(
+            self.app.get_continuing_sequence_anchor(),
+            'and a deleted shot is not a sequence for the next batch to join',
+        )
+
+    def test_deleting_another_shot_leaves_the_anchor_alone(self):
+        # Only the shot whose file is being deleted. An operator clearing the
+        # work waiting behind the one BLACS is running has not said anything
+        # about the sequence it belongs to.
+        sent = self.enqueue(self.app, 'experiment_00.h5')
+        self.enqueue(self.app, 'experiment_01.h5')
+        self.app.offer_shot()
+        waiting_id = self.app.queue_manager.controller._items[1]['shot_id']
+
+        self.app.queue_manager.delete_rows([waiting_id])
+
+        self.assertEqual(
+            self.app.get_last_sent_from_queue_filepath(),
+            sent,
+            'the shot BLACS was given is still what the sequence carries on '
+            'from',
+        )
+
+    def test_a_cancelled_shots_file_going_takes_the_anchor_with_it(self):
+        # The other way a shot BLACS was given loses its file: the operator
+        # deletes the row while BLACS has it, and the file goes at the next
+        # request, once nobody can be running it. Under the default-shot
+        # policy the gap that follows is filled by a shot runmanager made
+        # itself, which is deliberately never recorded as the anchor -- so
+        # nothing else would ever let go of the cancelled one.
+        labscript_file = os.path.join(self.directory, 'default.py')
+        open(labscript_file, 'w').close()
+        default_shot = os.path.join(self.directory, 'default_shot_0.h5')
+        open(default_shot, 'w').close()
+        app = FakeRunManager(default_shot_file=default_shot)
+        self.addCleanup(app.queue_manager.shutdown)
+        app.queue_manager.set_empty_queue_policy(EMPTY_QUEUE_DEFAULT_LABSCRIPT)
+        app.queue_manager.set_default_labscript_file(labscript_file)
+        sent = self.enqueue(app, 'experiment_00.h5')
+        offered = app.offer_shot()
+        app.queue_manager.delete_rows([offered['shot_id']])
+        # Runmanager discards the default shot it was holding as soon as the
+        # queue takes over, and prepares another off-thread once the queue
+        # empties again; this stands for the one that would then be ready.
+        app.default_shot_file = default_shot
+
+        filler = app.offer_shot()
+
+        self.assertEqual(filler['path'], default_shot, 'the gap was filled')
+        self.assertFalse(os.path.exists(sent), 'and the cancelled row went')
+        self.assertIsNone(
+            app.get_continuing_sequence_anchor(),
+            'a shot the operator cancelled and whose file has gone is not '
+            'what the next submission carries on from',
+        )
+
+
 if __name__ == '__main__':
     unittest.main()
