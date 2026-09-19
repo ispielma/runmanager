@@ -24,7 +24,6 @@ import runmanager.remote
 # application, once, for every test module. Importing
 # runmanager.__main__ here instead would show the startup banner.
 from fixtures import RemoteServer, RunManager, main_module
-from runmanager.__main__ import SUBMISSION_MODE_CONTINUE_SEQUENCE
 from runmanager.queueing import (
     BLACS_STATES,
     BLOCKED_SHOT_STATE,
@@ -468,7 +467,7 @@ class SubmitShotsTests(RemoteCommandTestCase):
 
         self.assertEqual(
             [mode for mode, _, _ in self.app.modes],
-            [SUBMISSION_MODE_CONTINUE_SEQUENCE],
+            [main_module.SUBMISSION_MODE_CONTINUE_SEQUENCE],
             'a remote submission continues the sequence already running and '
             'never clears the queue',
         )
