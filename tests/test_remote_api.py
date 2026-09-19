@@ -22,6 +22,7 @@ from fixtures import RemoteServer, main_module
 from runmanager.__main__ import SUBMISSION_MODE_CONTINUE_SEQUENCE
 from runmanager.queueing import (
     BLACS_STATES,
+    BLOCKED_SHOT_STATE,
     EMPTY_QUEUE_DEFAULT_LABSCRIPT,
     EMPTY_QUEUE_NOTHING,
     QueueManager,
@@ -279,28 +280,40 @@ class ShotStatusTests(RemoteCommandTestCase):
 
     A caller waiting on the results of shots it submitted needs to know when
     to stop waiting for one. ``pending`` answers exactly that, and answers it
-    as the queue itself would: it is true for the states the queue would still
-    hand the row over in, and false for the states it holds a row in until an
-    operator does something about it.
+    as the queue itself would: it is true while the queue would still hand the
+    row over, and false once the row is waiting on an operator instead.
+
+    A row is not only its own state. Only the head of the queue is ever
+    offered, so a row the queue will not hand over holds up every row behind
+    it, and a shot that will never run has to say so wherever it is sitting.
 
     Nothing is consumed by asking. The same question can be asked as often as
     the caller likes, about shots that finished long ago, and the queue is no
     different afterwards.
     """
 
-    # Every state a queue row can be in, and whether the queue would still
-    # offer it. offer_next() hands over a waiting row, a row already marked
-    # running -- which is the reclaim -- and a failed one, which is the retry.
-    # It refuses a rejected row, because offering it again would only be
-    # refused again; a cancelled row is never resent at all; and a
-    # compile_failed row can never compile however often it is asked for.
+    # Every state a queue row can be in: whether the queue would still hand
+    # that row over, and whether a row in it holds up the rows behind it.
+    #
+    # offer_next() hands over a waiting row, a row already marked running --
+    # which is the reclaim -- and a failed one, which is the retry. It refuses
+    # a rejected row, because offering it again would only be refused again,
+    # and a cancelled one, which the operator has said is not to be sent;
+    # claim_next_for_compile() refuses a compile_failed row, which can never
+    # compile however often it is asked for.
+    #
+    # Of the three refusals only the cancelled row clears itself: the queue
+    # drops it at the next request from BLACS, so the shots behind it are
+    # waiting their turn rather than waiting on somebody. The other two stay
+    # where they are until an operator deletes them.
     EXPECTED = {
-        '': True,
-        'running': True,
-        'failed': True,
-        'rejected': False,
-        'cancelled': False,
-        'compile_failed': False,
+        # state: (would be handed over, holds up the rows behind it)
+        '': (True, False),
+        'running': (True, False),
+        'failed': (True, False),
+        'rejected': (False, True),
+        'cancelled': (False, False),
+        'compile_failed': (False, True),
     }
 
     def enqueue(self, shot_id, state=''):
@@ -310,6 +323,18 @@ class ShotStatusTests(RemoteCommandTestCase):
         for item in self.app.queue_manager.controller._items:
             if item['shot_id'] == shot_id:
                 item['state'] = state
+
+    def queue(self, *rows):
+        """A queue holding exactly these ``(shot_id, state)`` rows, in order.
+
+        Replacing what is there rather than adding to it, because what is in
+        front of a row is half of its answer: the same row at the head of one
+        queue and behind a held one in another is being asked two different
+        questions.
+        """
+        self.app.queue_manager.restore_state({})
+        for shot_id, state in rows:
+            self.enqueue(shot_id, state=state)
 
     def test_every_state_a_row_can_be_in_has_an_answer(self):
         # Derived rather than listed, so that a state added to BLACS_STATES
@@ -322,11 +347,73 @@ class ShotStatusTests(RemoteCommandTestCase):
         )
 
     def test_pending_is_whether_the_queue_would_still_offer_the_row(self):
-        for state, pending in sorted(self.EXPECTED.items()):
+        for state, (pending, _) in sorted(self.EXPECTED.items()):
             with self.subTest(state=state):
-                self.enqueue(state or 'waiting', state=state)
+                self.queue((state or 'waiting', state))
                 answer = self.request('shot_status', [state or 'waiting'])
                 self.assertEqual(answer[state or 'waiting']['pending'], pending)
+
+    def test_a_row_behind_a_held_one_says_it_is_blocked(self):
+        # The row in front is the whole of the reason, so the answer is the
+        # same whatever the waiting row itself is doing: nothing behind a shot
+        # the queue will not hand over can be handed over either, and a caller
+        # polling for its result would otherwise wait for ever on a queue that
+        # is not moving.
+        for state, (_, holds_up) in sorted(self.EXPECTED.items()):
+            with self.subTest(state=state):
+                self.queue(('head', state), ('behind', ''))
+
+                answer = self.request('shot_status', ['behind'])
+
+                self.assertEqual(
+                    answer['behind'],
+                    {'pending': False, 'state': BLOCKED_SHOT_STATE}
+                    if holds_up
+                    else {'pending': True, 'state': ''},
+                )
+
+    def test_a_held_row_still_says_what_it_is(self):
+        # Blocked is what a row behind one of these is; the row itself has a
+        # reason, and that is what an operator has to act on.
+        self.queue(('head', 'rejected'), ('behind', ''))
+
+        answer = self.request('shot_status', ['head', 'behind'])
+
+        self.assertEqual(answer['head']['state'], 'rejected')
+        self.assertEqual(answer['behind']['state'], BLOCKED_SHOT_STATE)
+
+    def test_deleting_the_row_in_front_lets_the_ones_behind_run_again(self):
+        # Blocked says the queue is not moving, not that the shot is spoiled:
+        # the operator clears the row that stopped it and the work behind it
+        # is waiting its turn again.
+        self.queue(('head', 'rejected'), ('behind', ''))
+        self.assertEqual(
+            self.request('shot_status', ['behind'])['behind']['state'],
+            BLOCKED_SHOT_STATE,
+            'which is what the caller polling it is told meanwhile',
+        )
+
+        self.app.queue_manager.delete_rows(['head'])
+
+        self.assertEqual(
+            self.request('shot_status', ['behind'])['behind'],
+            {'pending': True, 'state': ''},
+            'the answer is read off the queue as it stands, so a row asked '
+            'about while it was stuck is not left carrying that',
+        )
+
+    def test_a_state_no_refusal_names_is_still_pending(self):
+        # What the queue does with a state it has no refusal for is offer the
+        # row, so that is what is answered about it. Listing the states that
+        # are pending instead would make every state added later read as a
+        # shot that will never run, which is the answer that makes a caller
+        # give up on a shot the apparatus is about to take.
+        self.queue(('novel', 'some-state-added-later'), ('behind', ''))
+
+        answer = self.request('shot_status', ['novel', 'behind'])
+
+        self.assertTrue(answer['novel']['pending'])
+        self.assertTrue(answer['behind']['pending'])
 
     def test_the_state_is_passed_through_for_somebody_reading_it(self):
         self.enqueue('one', state='failed')

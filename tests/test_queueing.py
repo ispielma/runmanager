@@ -1951,6 +1951,19 @@ class CancelledShotTests(unittest.TestCase):
             'it is proof nobody was running it, which is when its file is free',
         )
 
+    def test_the_queue_itself_will_not_hand_a_cancelled_row_over(self):
+        # "Never offered again" is the queue's own refusal, not something that
+        # holds only because the pass that frees the file gets to the row
+        # first. Ask the queue for a head that is still cancelled and it
+        # declines, which is also what makes the answer given about the shots
+        # behind it -- waiting their turn, not waiting on anybody -- true.
+        controller = QueueController()
+        controller.enqueue([queued_shot('/tmp/X.h5'), queued_shot('/tmp/Y.h5')])
+        offered = controller.offer_next()
+        controller.delete_rows([offered['shot_id']])
+
+        self.assertIsNone(controller.offer_next())
+
     def test_a_completed_outcome_still_reaches_analysis(self):
         app, shot_id = self.queue_with_a_shot_at_blacs()
         app.queue_manager.delete_rows([shot_id])

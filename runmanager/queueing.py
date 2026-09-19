@@ -75,14 +75,33 @@ SESSION_ONLY_FIELDS = ('compiling', 'state', 'message', 'reclaimed')
 # does mean a handover joins by being named here.
 BLACS_STATES = ('running', 'failed', 'rejected', 'cancelled')
 
-# The states a row can still be handed over in, which is what makes a shot
-# still able to produce a result. offer_next() hands over a waiting row, a row
-# already marked running -- the reclaim -- and a failed one, which is the
-# retry. It refuses a rejected row, because offering it again would only be
-# refused again; a cancelled row is never resent; and a compile_failed row can
-# never compile however often it is asked for. Each of those three waits on an
-# operator, not on the apparatus.
-PENDING_STATES = ('', 'running', 'failed')
+# The states the queue refuses to hand a row over in, each against whether a
+# row in it holds up the rows behind it as well. Written as the refusals that
+# exist rather than as the states that are left, so that a state added later
+# is one the queue would offer -- which is what offer_next() would do with it.
+# A shot reported dead because nobody listed it is a shot a caller gives up on
+# while the apparatus is about to run it.
+REFUSED_STATES = {
+    # offer_next(): BLACS could not read this shot at all -- a file that has
+    # gone, or a connection table that does not match the apparatus. Offering
+    # it again would only be refused again, so it is held at the head until an
+    # operator deletes it, and nothing behind it can be reached meanwhile.
+    'rejected': True,
+    # claim_next_for_compile(): a failed compile leaves data in the shot file
+    # that stops labscript ever compiling into it, so this row can never
+    # compile however often it is asked for. It is held the same way.
+    'compile_failed': True,
+    # offer_next(): the operator has said this shot is not to be sent. The
+    # queue clears the row itself, at the next request from BLACS -- see
+    # drop_cancelled_head() -- so the shots behind it are waiting their turn
+    # rather than waiting on anybody.
+    'cancelled': False,
+}
+# What a row the queue would hand over is answered with while a row it will
+# not hand over sits in front of it. Only the head is ever offered, so such a
+# row is not going anywhere either, and the empty state it is in would read as
+# work about to be done.
+BLOCKED_SHOT_STATE = 'blocked'
 # What a shot id with no row in the queue is answered with. Not the empty
 # state, which a row waiting its turn has.
 UNKNOWN_SHOT_STATE = 'unknown'
@@ -414,22 +433,43 @@ class QueueController(object):
         """Say, for each of these shot ids, whether its shot can still run.
 
         ``{shot_id: {'pending': bool, 'state': str}}``, one entry per id asked
-        about. ``pending`` is whether the queue would still hand that row over;
-        ``state`` is the row's own state, for a human reading it. An id with no
-        row is not pending, because nothing further will happen to it.
+        about. ``pending`` is whether the queue would still hand that row over.
+        That is a question about the row and about what is in front of it:
+        only the head is ever offered, so a row the queue refuses to hand over
+        and does not clear itself holds up every row behind it until an
+        operator moves it. Those rows are not pending either, and say
+        ``blocked``, which is the fact about them a caller waiting on their
+        results needs.
+
+        ``state`` is for a human reading it. An id with no row is not pending,
+        because nothing further will happen to it.
 
         Reads only. A caller may ask as often as it likes, about shots that
         finished long ago, and the queue is no different afterwards."""
+        statuses = {}
         with self._lock:
-            states = {item['shot_id']: item['state'] for item in self._items}
-        answer = {}
-        for shot_id in shot_ids:
-            state = states.get(shot_id, UNKNOWN_SHOT_STATE)
-            answer[shot_id] = {
-                'pending': state in PENDING_STATES,
-                'state': state,
-            }
-        return answer
+            held = False
+            for item in self._items:
+                state = item['state']
+                if state in REFUSED_STATES:
+                    # Its own reason, which is what an operator has to act on.
+                    statuses[item['shot_id']] = {'pending': False, 'state': state}
+                    held = held or REFUSED_STATES[state]
+                elif held:
+                    statuses[item['shot_id']] = {
+                        'pending': False,
+                        'state': BLOCKED_SHOT_STATE,
+                    }
+                else:
+                    statuses[item['shot_id']] = {'pending': True, 'state': state}
+        return {
+            shot_id: dict(
+                statuses.get(
+                    shot_id, {'pending': False, 'state': UNKNOWN_SHOT_STATE}
+                )
+            )
+            for shot_id in shot_ids
+        }
 
     def get_sequence_attrs(self, path):
         """Return the sequence attributes recorded for the queued shot at
@@ -647,14 +687,12 @@ class QueueController(object):
             if not self._items or not self._items[0]['compiled']:
                 return None
             item = self._items[0]
-            if item['state'] == 'rejected':
-                # BLACS could not read this shot at all -- a file that has gone,
-                # or a connection table that does not match the apparatus. That
-                # is this queue's problem and not the apparatus's, and offering
-                # it again would only be refused again, once per request. It is
-                # held here, red, until an operator deletes it or a restart
-                # clears the state. Meanwhile BLACS is free: it keeps asking,
-                # gets nothing, and runs its own shot.
+            if item['state'] in REFUSED_STATES:
+                # A row the queue will not hand over, for the reason recorded
+                # against its state in REFUSED_STATES. It is held here, marked,
+                # until an operator deletes it, the queue clears it, or a
+                # restart clears the state. Meanwhile BLACS is free: it keeps
+                # asking, gets nothing, and runs its own shot.
                 return None
             reclaimed = item['state'] == 'running'
             item['state'] = 'running'
@@ -731,13 +769,14 @@ class QueueController(object):
             item = self._items[0]
             if item['compiled']:
                 return None, False
-            if item['state'] == 'compile_failed':
-                # Already tried, and it went red. Not claimed again, and not
-                # merely to save the work: a compile that fails partway leaves
-                # the devices and calibrations groups in the shot file, and
-                # labscript refuses to compile into a file that has them. This
-                # row can never compile, however often it is asked for.
-                # Deleting it -- which takes its file with it -- is the way on.
+            if item['state'] in REFUSED_STATES:
+                # A row the queue will not hand over is not worth compiling.
+                # The one that gets here is compile_failed: already tried, and
+                # it went red. Not claimed again, and not merely to save the
+                # work -- a compile that fails partway leaves the devices and
+                # calibrations groups in the shot file, and labscript refuses
+                # to compile into a file that has them. Deleting the row --
+                # which takes its file with it -- is the way on.
                 return None, False
             if item['compiling']:
                 return None, True
