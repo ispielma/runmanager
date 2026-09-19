@@ -3210,5 +3210,149 @@ class EngageGuardTests(unittest.TestCase):
         self.assertTrue(window.output_box.said('neither'))
 
 
+class QueuedSequenceAttrsTests(unittest.TestCase):
+    def test_a_row_recording_no_sequence_is_not_the_same_as_no_row(self):
+        # Two different answers: this queue holds that shot and it belongs to
+        # no sequence, against this queue has never heard of it. The caller
+        # goes to the shot file for one of them and not for the other.
+        controller = QueueController()
+        controller.enqueue([queued_shot('/tmp/shot_a.h5')])
+
+        self.assertEqual(controller.get_sequence_attrs('/tmp/shot_a.h5'), {})
+        self.assertIsNone(controller.get_sequence_attrs('/tmp/shot_b.h5'))
+
+
+class MissingSequenceReportTests(unittest.TestCase):
+    """What an operator is told when the sequence cannot be read.
+
+    Whoever pressed Engage sees this sentence and nothing else -- the chained
+    cause is in the log, not in the output box -- so the sentence has to be
+    true of what actually happened. A file that is not there and a file that
+    cannot be read are different things to go and do something about.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.app = FakeRunManager()
+        self.addCleanup(self.app.queue_manager.shutdown)
+        self.path = os.path.join(self.directory, 'experiment_00.h5')
+
+    def test_a_shot_whose_file_has_gone_says_that_it_has_gone(self):
+        with self.assertRaises(Exception) as raised:
+            self.app.get_sequence_attrs_to_extend(self.path)
+
+        self.assertIn(self.path, str(raised.exception))
+        self.assertIn('not there', str(raised.exception))
+
+    def test_a_file_that_cannot_be_read_says_what_stopped_it(self):
+        # A file that is there and unreadable -- locked by another
+        # application, unreadable by this user, not a shot file at all -- is
+        # not a shot that has gone, and telling an operator it is sends them
+        # looking for the wrong thing.
+        with open(self.path, 'w') as f:
+            f.write('not an h5 file')
+
+        with self.assertRaises(Exception) as raised:
+            self.app.get_sequence_attrs_to_extend(self.path)
+
+        self.assertIn('OSError', str(raised.exception))
+        self.assertIsInstance(raised.exception.__cause__, OSError)
+
+
+class CallerChosenShotIdTests(unittest.TestCase):
+    """An id the caller chose names the same row every other id does.
+
+    compile_shots keeps whatever id a record arrives with, and the row made
+    from that record afterwards takes it as text. Anything else is an id that
+    is written into the shot file and reported to the caller as one thing and
+    held by the row as another, so the caller polls for a shot the queue has
+    never heard of while its shot runs.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.written = []
+        self.manager = QueueManager(
+            lambda item: self.written.append(item['shot_id']),
+            lambda labscript_file, path: True,
+            lambda path: None,
+            lambda *args, **kwargs: None,
+            threading.Event(),
+            lambda enabled: None,
+        )
+        self.addCleanup(self.manager.shutdown)
+
+    def test_the_queue_answers_about_the_id_the_caller_was_given(self):
+        records = self.manager.compile_shots(
+            [
+                {
+                    'path': os.path.join(self.directory, 'shot.h5'),
+                    'labscript_file': os.path.join(self.directory, 'e.py'),
+                    'compile_mode': COMPILE_MODE_EAGER,
+                    'compiled': False,
+                    'frozen_globals': {},
+                    'shot_id': 7,
+                }
+            ],
+            True,
+            False,
+        )
+        shot_id = records[0]['shot_id']
+        for _ in range(500):
+            if self.manager.get_queue_paths():
+                break
+            time.sleep(0.01)
+
+        self.assertTrue(
+            self.manager.get_shot_statuses([shot_id])[shot_id]['pending'],
+            'the queue holds the shot under the id its submitter was handed',
+        )
+        self.assertEqual(
+            self.written,
+            [self.manager.controller._items[0]['shot_id']],
+            'and the id written into the shot file is the one its row has',
+        )
+
+
+class QueuedShotFileTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.app = FakeRunManager()
+        self.addCleanup(self.app.queue_manager.shutdown)
+        self.globals_file = os.path.join(self.directory, 'globals.toml')
+        runmanager.new_globals_file(self.globals_file)
+        runmanager.new_group(self.globals_file, 'group')
+
+    def test_a_shot_with_no_id_is_written_without_the_attribute(self):
+        # No id means no attribute, which is how a shot nobody submitted is
+        # told apart from one that was. A record built without one is written,
+        # rather than raising inside the compile worker where the operator
+        # sees a traceback instead of a shot.
+        path = os.path.join(self.directory, 'experiment_00.h5')
+
+        self.app.prepare_queue_shot(
+            {
+                'path': path,
+                'active_groups': {'group': self.globals_file},
+                'frozen_globals': {},
+                'sequence_attrs': {
+                    'script_basename': 'experiment',
+                    'sequence_date': '2026-09-18',
+                    'sequence_index': 11,
+                    'sequence_id': '20260918T101112_experiment',
+                },
+                'run_no': 0,
+                'n_runs': 1,
+            }
+        )
+
+        with h5py.File(path, 'r') as f:
+            self.assertNotIn('shot_id', f.attrs)
+            self.assertEqual(f.attrs['run number'], 0)
+
+
 if __name__ == '__main__':
     unittest.main()

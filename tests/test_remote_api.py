@@ -262,9 +262,11 @@ class SubmittingApp(object):
             pushButton_shuffle=types.SimpleNamespace(checkState=lambda: 0),
             pushButton_abort=types.SimpleNamespace(setEnabled=lambda enabled: None),
         )
-        # What each submission asked the window to do, and the records of each
-        # batch that reached the queue.
+        # What each submission asked the window to do, where it asked for its
+        # shots to be sent, and the records of each batch that reached the
+        # queue.
         self.modes = []
+        self.destinations = []
         self.batches = []
         self.queue_manager = QueueManager(
             lambda item: None,
@@ -278,6 +280,7 @@ class SubmittingApp(object):
 
         def compile_shots(records, send_to_BLACS, send_to_runviewer):
             self.batches.append(records)
+            self.destinations.append((send_to_BLACS, send_to_runviewer))
             return submit_batch(records, send_to_BLACS, send_to_runviewer)
 
         self.queue_manager.compile_shots = compile_shots
@@ -437,6 +440,17 @@ class SubmitShotsTests(RemoteCommandTestCase):
             'and they are added to the sequence already running, not to one '
             'of their own',
         )
+
+    def test_a_submission_sends_its_shots_where_the_window_says(self):
+        # "View shot(s)" is the operator's, and a submission reads it the same
+        # way an Engage does -- the same read the remote protocol offers as
+        # get_view_shots. Shots go to BLACS either way: a submission is work
+        # asked for, not a look at what it would be.
+        self.app.ui.checkBox_view_shots.isChecked = lambda: True
+
+        self.submit({'x': 1})
+
+        self.assertEqual(self.app.destinations, [(True, True)])
 
     def test_a_batch_of_no_entries_submits_nothing_and_says_so(self):
         # A caller that generated no entries this round has asked for

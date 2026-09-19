@@ -522,13 +522,19 @@ class QueueController(object):
         """Return the sequence attributes recorded for the queued shot at
         ``path``, or None if no row holds that path.
 
+        A row that records no sequence answers with an empty dictionary, which
+        is a different answer: the queue holds that shot and has nothing to
+        say about its sequence, where None is that the queue has never heard
+        of it. A caller with somewhere else to look has to be able to tell
+        which of those it got.
+
         The last matching row answers. The queue does not set out to hold two
         rows with one path, and taking the last means the newer row wins if it
         ever does."""
         with self._lock:
             for item in reversed(self._items):
                 if item['path'] == path:
-                    return dict(item['sequence_attrs']) or None
+                    return dict(item['sequence_attrs'])
         return None
 
     def get_shot_path(self, shot_id):
@@ -974,8 +980,13 @@ class QueueManager(QtCore.QObject):
         about it."""
         records = list(records)
         for record in records:
-            if not record.get('shot_id'):
-                record['shot_id'] = new_shot_id()
+            # As text, which is what the row made from this record will hold
+            # it as: an id reported to the caller and written into the shot
+            # file as anything else names no row, so the caller polls for a
+            # shot the queue has never heard of while its shot runs.
+            record['shot_id'] = (
+                str(record['shot_id']) if record.get('shot_id') else new_shot_id()
+            )
         if send_to_BLACS:
             # Before the command goes on the worker's list, never after: the
             # worker can enqueue a record the moment it has one, and an id

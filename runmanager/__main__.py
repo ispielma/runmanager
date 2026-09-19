@@ -4444,28 +4444,46 @@ class RunManager(LabscriptApplication):
     def get_sequence_attrs_to_extend(self, path):
         """The sequence a batch added to the shot at ``path`` belongs to.
 
-        The queue row is asked first and the shot file only if there is no
-        row. It has to be that way round rather than simply reading the file:
-        a queued shot is not written until it is compiled, which under lazy
-        compilation is not until BLACS asks for it, so the shot a batch is
-        added to often has no file yet. A shot whose row has gone -- the one
-        last sent to BLACS, after "empty queue, then add shots to last
-        sequence" has emptied the queue -- has been written by then, and its
-        file still says which sequence it is in."""
+        The queue row is asked first, and the shot file only when no row holds
+        that path or the row records no sequence. It has to be that way round
+        rather than simply reading the file: a queued shot is not written
+        until it is compiled, which under lazy compilation is not until BLACS
+        asks for it, so the shot a batch is added to often has no file yet. A
+        shot whose row has gone -- the one last sent to BLACS, after "empty
+        queue, then add shots to last sequence" has emptied the queue -- has
+        been written by then, and its file still says which sequence it is in.
+
+        Reading the file takes the cross-process lock on it, because
+        runmanager opens shot files through labscript_utils' h5_lock, and it
+        takes it on whichever thread asks. A submission asks on the GUI
+        thread, so a shot file something else is holding stops the window
+        until the lock comes free or times out. Asking the row first is
+        therefore also the difference between a dictionary this process
+        already has and a locked read of a file across the network."""
         sequence_attrs = self.queue_manager.get_sequence_attrs(path)
         if sequence_attrs:
             return sequence_attrs
         try:
             return runmanager.get_sequence_attrs(path)
-        except Exception as exc:
-            # Said plainly, because on_engage_clicked shows this to whoever
-            # pressed Engage: an h5py message about a file that would not open
-            # does not tell them that the sequence they meant to add to is the
-            # thing that has gone.
+        except FileNotFoundError as exc:
+            # Said plainly, because on_engage_clicked shows this sentence and
+            # only this sentence to whoever pressed Engage: an h5py message
+            # about a file that would not open does not tell them that the
+            # sequence they meant to add to is the thing that has gone.
             raise Exception(
                 'Cannot add shots to the sequence of %s: it is not in the '
-                'queue, and its file does not say which sequence it is in.'
-                % path
+                'queue, and its file is not there to say which sequence it '
+                'is in.' % path
+            ) from exc
+        except Exception as exc:
+            # A file that is there and cannot be read for it: held by another
+            # application, not readable by this user, not a shot file, or
+            # missing the attributes. Which one it is has to reach the
+            # operator, because only the first of those goes away by itself.
+            raise Exception(
+                'Cannot add shots to the sequence of %s: it is not in the '
+                'queue, and its file could not be read for it. %s: %s'
+                % (path, type(exc).__name__, exc)
             ) from exc
 
     def make_h5_files(
@@ -4576,7 +4594,11 @@ class RunManager(LabscriptApplication):
             item['sequence_attrs'],
             item['run_no'],
             item['n_runs'],
-            shot_id=item['shot_id'],
+            # A record with no id is written without the attribute, which is
+            # how a shot nobody submitted is told apart from one that was.
+            # Every queue row has an id; a record that never became one may
+            # not.
+            shot_id=item.get('shot_id'),
         )
 
     def send_to_runviewer(self, run_file):
@@ -5254,7 +5276,7 @@ class RemoteServer(ZMQServer):
         for entry in entries:
             named.update(entry)
         baseline = self._operator_expressions(named)
-        send_to_runviewer = inmain(app.ui.checkBox_view_shots.isChecked)
+        send_to_runviewer = self.handle_get_view_shots()
         batch = []
         for entry in entries:
             restore = {
