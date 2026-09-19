@@ -191,13 +191,13 @@ class Client(ZMQClient):
         one nobody submitted -- runmanager writes the shots it makes itself,
         to keep the apparatus busy between submissions, without one.
 
-        Whether a whole run of submissions stays one sequence depends on the
-        empty-queue policy, which get_empty_queue_policy() answers. Under
-        ``'default_labscript'`` it does: the gaps between submissions are
-        filled by shots runmanager makes itself, which belong to no sequence
-        and leave the anchor alone. Under ``'nothing'`` runmanager lets go of
-        the anchor as soon as BLACS asks and finds the queue empty, so each
-        submission starts a sequence of its own.
+        A whole run of submissions stays one sequence, whatever the
+        empty-queue policy: a queue that empties between submissions does not
+        end the sequence the last shot belonged to, and the shots runmanager
+        makes itself to fill the gaps belong to no sequence and leave it
+        alone. A submission starts a sequence of its own only when there is no
+        last shot to carry on from -- a runmanager that has never sent one, or
+        one whose file has since been deleted.
 
         Raises, having submitted nothing at all, whatever it is that goes
         wrong. The whole batch is made and handed over in one go, so until

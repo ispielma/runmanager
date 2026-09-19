@@ -152,11 +152,14 @@ SubmissionMode = collections.namedtuple(
 # the first shot its sources find, and starts one when they find nothing.
 #
 # "Add shots to last sequence" falls back to the shot last sent to BLACS
-# because the queue empties on its own: BLACS can take the last shot between
-# the menu being drawn and the item being clicked, and in exactly that state
-# the shot last sent is the one the operator was looking at in the queue. On a
-# runmanager that has queued nothing and sent nothing there is no last
-# sequence at all, and starting one is the only thing the words can mean.
+# because the queue empties on its own: it drains as BLACS works through it,
+# and stands empty between batches. The shot last sent is the end of the last
+# sequence whether the queue still holds work, has just been drained, or has
+# been idle for hours -- so the fallback is the ordinary answer once a batch
+# has run, as much as it is the answer when BLACS takes the last shot between
+# the menu being drawn and the item being clicked. On a runmanager that has
+# queued nothing and sent nothing there is no last sequence at all, and
+# starting one is the only thing the words can mean.
 #
 # Emptying the queue takes the shot numbers of the deleted shots back, so a
 # batch replacing the queue is numbered from 0 again; and it throws away the
@@ -2532,10 +2535,11 @@ class RunManager(LabscriptApplication):
 
         A menu question and only that: their wording names a last sequence,
         so they are greyed out while there is none to name. It is asked as the
-        menu is about to be drawn, and the queue it describes can empty before
-        an action is chosen; nothing is decided on it. Which sequence a
-        submission joins is settled in get_submission_anchor, against the
-        queue the batch is written into."""
+        menu is about to be drawn, and which source names that sequence can
+        change before an action is chosen -- BLACS takes the last queued shot,
+        or the file of the shot last sent is deleted; nothing is decided on
+        it. Which sequence a submission joins is settled in
+        get_submission_anchor, against the queue the batch is written into."""
         return (
             self.ui.checkBox_run_shots.isChecked()
             and self.get_submission_anchor(SUBMISSION_MODE_ADD_SHOTS) is not None
@@ -4866,17 +4870,14 @@ class RunManager(LabscriptApplication):
                 or queue_state['n_items']
             ):
                 self.discard_default_shot()
-                if not queue_state['n_items']:
-                    # Only when there is genuinely nothing queued. This branch
-                    # is also reached with work still in the queue that simply
-                    # cannot be offered yet -- a rejected head, or one whose
-                    # compile failed -- and the anchor is about the shot last
-                    # sent to BLACS, not about whether a default shot was called
-                    # for. Clearing it there sent the next "add shots to last
-                    # sequence" batch to the folder of the last shot queued
-                    # instead, which is a different sequence as soon as two
-                    # batches have been engaged.
-                    self.queue_manager.set_last_sent_from_queue(None)
+                # Having nothing to offer leaves the anchor alone. An empty
+                # queue is the ordinary state between batches -- BLACS asks
+                # continuously, so it is reached within seconds of any batch
+                # finishing -- and it says nothing about which sequence the
+                # shot last sent belongs to. "Add shots to last sequence"
+                # means that sequence whether or not anything is queued now;
+                # the anchor is let go of only where that shot's file is
+                # deleted, and otherwise stands until another shot is sent.
                 return no_shot
             if not os.path.isfile(labscript_file):
                 raise RuntimeError(

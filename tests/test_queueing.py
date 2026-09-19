@@ -35,6 +35,7 @@ from runmanager.queueing import (
     COMPILE_MODE_EAGER,
     COMPILE_MODE_LAZY,
     EMPTY_QUEUE_DEFAULT_LABSCRIPT,
+    EMPTY_QUEUE_NOTHING,
     FAILED_ROW_BACKGROUND,
     PROVIDER_NONE,
     PROVIDER_SHOT,
@@ -1429,20 +1430,33 @@ class ContinuingSequenceAnchorTests(unittest.TestCase):
             'and the sequence still carries on from the submitted shot',
         )
 
-    def test_nothing_is_continued_once_blacs_has_found_the_queue_empty(self):
-        # The other policy, and the reason a remote caller is told to refuse
-        # it: with nothing to offer, runmanager lets go of the shot it last
-        # sent, so the next submission has no sequence to join and starts one.
-        # A run of submissions under this policy is a sequence per submission.
+    def test_the_anchor_survives_blacs_finding_the_queue_empty(self):
+        # A drained queue is not the end of a sequence. BLACS asks for work
+        # continuously, so it finds the queue empty within seconds of any
+        # batch finishing; if that let go of the shot last sent, "add shots to
+        # last sequence" would start a new one every time a batch had been
+        # allowed to finish, which is the one thing the mode exists to
+        # prevent. Under either policy, with nothing filling the gap, the
+        # shot last sent is still the last sequence.
         submitted = os.path.join(self.directory, 'experiment_00.h5')
-        filler = self.run_a_shot_and_let_blacs_ask_again(self.app)
+        for policy in (EMPTY_QUEUE_NOTHING, EMPTY_QUEUE_DEFAULT_LABSCRIPT):
+            with self.subTest(policy=policy):
+                app = FakeRunManager()
+                self.addCleanup(app.queue_manager.shutdown)
+                app.queue_manager.set_empty_queue_policy(policy)
 
-        self.assertEqual(filler['state'], PROVIDER_NONE, 'nothing filled the gap')
-        self.assertIsNone(
-            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
-            'and the shot that ran is no longer offered as the anchor',
-        )
-        self.assertTrue(os.path.exists(submitted))
+                filler = self.run_a_shot_and_let_blacs_ask_again(app)
+
+                self.assertEqual(
+                    filler['state'], PROVIDER_NONE, 'nothing filled the gap'
+                )
+                self.assertEqual(
+                    app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
+                    submitted,
+                    'and the shot that ran is what the next submission '
+                    'carries on from',
+                )
+                self.assertTrue(os.path.exists(submitted))
 
 
 class ShotIdBeforeCompileTests(unittest.TestCase):
@@ -2295,15 +2309,15 @@ class OutcomeWithNoRowTests(unittest.TestCase):
 
 
 class QueueBookkeepingUnderSubmissionTests(unittest.TestCase):
-    """Two things the queue records that a concurrent submission can spoil.
+    """Two things the queue records that its own churn can spoil.
 
     The anchor that "add shots to last sequence" writes alongside is the last
-    shot actually sent to BLACS, and it is cleared only when the queue is
-    genuinely empty. Clearing it on any branch reachable with work still queued
-    -- a head that cannot be offered, because it was rejected or its compile
-    failed -- would write the next replacement batch beside the last shot
-    *queued* instead, which is a different sequence folder as soon as two
-    batches have been engaged.
+    shot actually sent to BLACS, and what the queue happens to hold when BLACS
+    next asks does not decide it. A head that cannot be offered -- rejected, or
+    its compile failed -- and a queue that has gone empty are both ordinary
+    states between batches, and neither ends the sequence that shot belongs to.
+    The anchor is let go of where that shot's file is deleted, and nowhere
+    else.
 
     And the default shot is made because the queue is empty, on a different
     thread from the one that fills it. A batch landing in between leaves the
@@ -2335,7 +2349,7 @@ class QueueBookkeepingUnderSubmissionTests(unittest.TestCase):
             'to is still the one to add shots alongside',
         )
 
-    def test_the_anchor_goes_when_the_queue_is_genuinely_empty(self):
+    def test_the_anchor_survives_a_queue_that_has_gone_empty(self):
         app = self.app_with(queued_shot('/tmp/seq_00.h5'))
         offered = app.queue_manager.offer_next()
         app.queue_manager.controller.set_last_sent_from_queue(
@@ -2345,9 +2359,11 @@ class QueueBookkeepingUnderSubmissionTests(unittest.TestCase):
 
         app.offer_shot()
 
-        self.assertIsNone(
+        self.assertEqual(
             app.get_last_sent_from_queue_filepath(),
-            'nothing queued and nothing sent: there is no sequence to add to',
+            os.path.abspath(offered['path']),
+            'the shot that ran is still the sequence the next batch joins, '
+            'with nothing queued behind it',
         )
 
     def test_a_default_shot_behind_real_work_is_discarded_with_its_file(self):
