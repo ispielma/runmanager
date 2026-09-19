@@ -14,6 +14,7 @@ import unittest
 
 from unittest import mock
 
+import h5py
 import runmanager
 from labscript_utils.qtwidgets.shotqueue import RULE_BELOW_ROLE
 from qtutils.qt.QtCore import Qt
@@ -434,6 +435,7 @@ class FakeRunManager(object):
     get_last_sent_from_queue_filepath = RunManager.get_last_sent_from_queue_filepath
     reindex_run_file_infos = RunManager.reindex_run_file_infos
     make_h5_files = RunManager.make_h5_files
+    prepare_queue_shot = RunManager.prepare_queue_shot
     get_sequence_attrs_to_extend = RunManager.get_sequence_attrs_to_extend
 
     # make_h5_files reads these. The output folder it would keep up to date is
@@ -1086,6 +1088,53 @@ class ShotIdBeforeCompileTests(unittest.TestCase):
             app.queue_manager.controller._items[0]['shot_id'],
             'the id written into the file is the id of the row in the queue',
         )
+
+    def test_a_queued_shot_is_written_with_its_id(self):
+        # What the id is for: a result coming back through lyse is matched to
+        # the shot that produced it by reading this out of the file.
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        app = FakeRunManager()
+        self.addCleanup(app.queue_manager.shutdown)
+        path = os.path.join(directory, 'experiment_00.h5')
+        item = {
+            'path': path,
+            'active_groups': {'group': os.path.join(directory, 'globals.h5')},
+            'frozen_globals': {},
+            'sequence_attrs': {
+                'script_basename': 'experiment',
+                'sequence_date': '2026-09-18',
+                'sequence_index': 11,
+                'sequence_id': '20260918T101112_experiment',
+            },
+            'run_no': 0,
+            'n_runs': 1,
+            'shot_id': 'the-id',
+        }
+
+        # Evaluating globals is a globals file on disk and a compiler
+        # subprocess, and is not what writing the id turns on.
+        with mock.patch.object(
+            runmanager, 'get_queue_compile_globals', lambda groups, frozen: ({}, {})
+        ):
+            app.prepare_queue_shot(item)
+
+        with h5py.File(path, 'r') as f:
+            self.assertEqual(f.attrs['shot_id'], 'the-id')
+
+    def test_a_shot_written_without_an_id_carries_none(self):
+        # Runmanager's own default shots are written before they are queue rows
+        # and have no id. A file with no shot_id is visibly not a submitted
+        # shot, which is the answer wanted there, so the attribute is absent
+        # rather than empty.
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, 'default_0.h5')
+
+        runmanager.make_single_run_file(path, None, {}, {}, 0, 1)
+
+        with h5py.File(path, 'r') as f:
+            self.assertNotIn('shot_id', f.attrs)
 
     def test_an_id_a_record_arrives_with_is_the_one_it_keeps(self):
         app = FakeRunManager()

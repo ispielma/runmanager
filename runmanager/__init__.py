@@ -810,19 +810,28 @@ def make_run_files(
             yield runfilename
 
 
-def make_single_run_file(filename, sequenceglobals, runglobals, sequence_attrs, run_no, n_runs):
+def make_single_run_file(
+    filename, sequenceglobals, runglobals, sequence_attrs, run_no, n_runs, shot_id=None
+):
     """Does what it says. runglobals is a dict of this run's globals, the format being
     the same as that of one element of the list returned by expand_globals.
     sequence_globals is a nested dictionary of the type returned by get_globals.
     sequence_attrs is a dict of attributes pertaining to this sequence, as returned by
     new_sequence_details. run_no and n_runs must be provided, if this run file is part
     of a sequence, then they should reflect how many run files are being generated in
-    this sequence, all of which must have identical sequence_attrs."""
+    this sequence, all of which must have identical sequence_attrs.
+
+    shot_id, if given, is the identifier of the queue row this shot was written for,
+    so that a result coming back can be matched to the shot that was submitted. A file
+    written without one carries no such attribute at all, which is how a shot that
+    nobody submitted is told apart from one that was."""
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     with h5py.File(filename, 'w') as f:
         f.attrs.update(sequence_attrs)
         f.attrs['run number'] = run_no
         f.attrs['n_runs'] = n_runs
+        if shot_id is not None:
+            f.attrs['shot_id'] = shot_id
         f.create_group('globals')
         if sequenceglobals is not None:
             for groupname, groupvars in sequenceglobals.items():

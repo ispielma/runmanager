@@ -4421,6 +4421,7 @@ class RunManager(LabscriptApplication):
             item['sequence_attrs'],
             item['run_no'],
             item['n_runs'],
+            shot_id=item['shot_id'],
         )
 
     def send_to_runviewer(self, run_file):
@@ -4537,6 +4538,11 @@ class RunManager(LabscriptApplication):
                 start=start,
             )
             self._next_default_shot_index[run_file_base] = default_index + 1
+            # No shot_id, deliberately. A default shot is runmanager's own,
+            # produced to keep the apparatus busy, and it is written here --
+            # before it is a queue row and before it has an id. A file with no
+            # shot_id is visibly not a shot anybody submitted, which is the
+            # right answer for a caller matching results to what it asked for.
             runmanager.make_single_run_file(
                 run_file,
                 sequence_globals,
