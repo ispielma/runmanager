@@ -838,9 +838,16 @@ def make_single_run_file(
     the same as that of one element of the list returned by expand_globals.
     sequence_globals is a nested dictionary of the type returned by get_globals.
     sequence_attrs is a dict of attributes pertaining to this sequence, as returned by
-    new_sequence_details. run_no and n_runs must be provided, if this run file is part
-    of a sequence, then they should reflect how many run files are being generated in
-    this sequence, all of which must have identical sequence_attrs.
+    new_sequence_details, and is identical for every run of one sequence.
+
+    run_no is this run's number, which is unique within its sequence. n_runs is how far
+    that sequence reaches as of this file: the number of runs it has once this one is
+    written. For a sequence compiled in one go that is the number of runs being
+    generated, and every file of it carries the same value. For a sequence that is added
+    to afterwards it is not: the shots written earlier keep the smaller number they were
+    written with, since they may already have run and are not rewritten. So n_runs read
+    off one shot is not the size of its sequence, and the shots of one sequence need not
+    agree on it.
 
     shot_id, if given, is the identifier of the queue row this shot was written for,
     so that a result coming back can be matched to the shot that was submitted. A file

@@ -2600,20 +2600,23 @@ class RunManager(LabscriptApplication):
                 start=next_index,
             )
             run_file_info['path'] = run_file
-            # A sequence compiled in one go names each file after the run
-            # number written into it, so renumbering the files of a batch
-            # added to a sequence has to renumber its runs too. Otherwise the
-            # added shots restart at run 0 in a sequence that already has one,
-            # and lyse, which indexes a shot on its sequence and run number,
-            # has two shots with the same name.
+            # A shot file is named after the run number written into it, and
+            # a run number is unique within its sequence, so renumbering the
+            # files of a batch added to a sequence renumbers its runs with
+            # them. Left as they were, the added shots would restart at run 0
+            # in a sequence that already has one, each of them in a file named
+            # for a number other than its own.
             run_file_info['run_no'] = next_index
             next_index += 1
-        # The sequence now runs from 0 up to the highest number just written.
-        # Shots written before this batch keep the count they were written
-        # with: a sequence that can be added to has no one answer for how many
-        # runs it has, and files that may already have run are not rewritten
-        # to invent one.
-        runs_in_sequence = run_file_infos[-1]['run_no'] + 1
+        # n_runs is how far the sequence reaches as of the shot it is written
+        # into: runs 0 up to the highest just numbered exist once this batch
+        # is written. It is neither the size of this batch nor a total for the
+        # sequence, and it is not uniform across a sequence that has been
+        # added to -- the shots written before this batch keep the smaller
+        # number they were written with, and are not rewritten to agree,
+        # having possibly already run. So no one shot's n_runs says how many
+        # runs its sequence has.
+        runs_in_sequence = next_index
         for run_file_info in run_file_infos:
             run_file_info['n_runs'] = runs_in_sequence
         return run_file_infos

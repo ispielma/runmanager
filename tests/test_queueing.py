@@ -2886,6 +2886,30 @@ class SequenceContinuityTests(unittest.TestCase):
             'runs 0 to 5 of this sequence exist once these are written',
         )
 
+    def test_a_shot_written_earlier_keeps_the_extent_it_was_written_with(self):
+        # n_runs is how far the sequence reached as of the shot it is written
+        # into, so the shots of a sequence that has grown do not agree on it
+        # and no one of them says how many runs that sequence has. The shots
+        # written before this batch may already have run, and are not
+        # rewritten to agree with it.
+        anchor = self.path('experiment_00.h5')
+        runmanager.make_single_run_file(anchor, None, {}, self.existing, 0, 1)
+
+        added = self.add_shots(2, anchor)
+
+        self.assertEqual(
+            [info['n_runs'] for info in added],
+            [3, 3],
+            'runs 0 to 2 of this sequence exist once these are written',
+        )
+        with h5py.File(anchor, 'r') as f:
+            self.assertEqual(
+                f.attrs['n_runs'],
+                1,
+                'the shot that was already there still says what its sequence '
+                'was when it was written',
+            )
+
     def test_added_shots_belong_to_the_sequence_they_were_added_to(self):
         anchor = self.path('experiment_03.h5')
         self.app.queue_manager.enqueue(
