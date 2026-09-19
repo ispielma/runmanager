@@ -5172,9 +5172,16 @@ class RemoteServer(ZMQServer):
         return descriptors
 
     def _expanding_globals(self):
-        """The globals that turn one set of values into more than one shot."""
+        """The globals that turn one set of values into more than one shot.
+
+        Copied before it is read. The dictionary belongs to the preparse
+        thread, which assigns a guess into it per global, so a read that steps
+        through it raises as soon as a guess arrives partway -- and replaces
+        the refusal a caller can act on with an error about a dictionary."""
         return sorted(
-            name for name, expansion in app.previous_expansions.items() if expansion
+            name
+            for name, expansion in dict(app.previous_expansions).items()
+            if expansion
         )
 
     def handle_shot_status(self, shot_ids):

@@ -148,6 +148,24 @@ class EmptyQueuePolicyTests(RemoteCommandTestCase):
         self.assertEqual(sent, ['get_empty_queue_policy'])
 
 
+class ExpansionsBeingRewritten(dict):
+    """The preparse thread's expansions, read while that thread is writing.
+
+    ``previous_expansions`` belongs to the preparse thread, which assigns a
+    guess into it per global as it works. Iterating it from the server thread
+    is the read that breaks when a key arrives partway through, so this one
+    grows by a key after its first item is handed over -- which is what makes
+    the next step of a live iteration raise.
+    """
+
+    def items(self):
+        iterator = iter(super().items())
+        first = next(iterator)
+        self['guessed_while_reading'] = 'outer'
+        yield first
+        yield from iterator
+
+
 class SubmitShotsTests(RemoteCommandTestCase):
     """Submitting shots by naming the globals that differ between them.
 
@@ -241,6 +259,23 @@ class SubmitShotsTests(RemoteCommandTestCase):
             str(raised.exception),
             'a global that expands into nothing did not cause this',
         )
+
+    def test_the_refusal_survives_the_expansions_being_written_to(self):
+        # The refusal names the globals that expanded the entry, and the
+        # preparse thread is free to be guessing another one meanwhile. A
+        # caller told its scan is still on can turn it off; a caller told the
+        # dictionary changed size cannot do anything with that at all.
+        self.app.n_shots_for = {'a': 3}
+        self.app.previous_expansions = ExpansionsBeingRewritten(
+            {'width': 'outer', 'depth': '', 'height': 'x'}
+        )
+
+        with self.assertRaises(Exception) as raised:
+            self.submit('a')
+
+        self.assertIn('Cannot submit', str(raised.exception))
+        self.assertIn('width', str(raised.exception))
+        self.assertIn('height', str(raised.exception))
 
     def test_an_error_in_the_globals_is_refused_before_anything_is_submitted(self):
         self.app.error_in_globals = True
