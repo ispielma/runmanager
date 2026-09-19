@@ -202,8 +202,14 @@ class Client(ZMQClient):
         Answers ``{shot_id: {'pending': bool, 'state': str}}``, one entry per
         id asked about. ``pending`` is false once nothing further will happen
         to that shot -- it completed and left the queue, it was cancelled, or
-        it is held waiting on an operator. ``state`` is the queue row's own
-        state, for a human reading a log; an id runmanager has no row for is
+        it is held waiting on an operator.
+
+        ``state`` is the queue row's own state, for a human reading a log,
+        plus two answers no row is ever in. ``'submitted'`` is a shot
+        runmanager has taken on but has no row for yet, which is still
+        pending; ``'blocked'`` is a row runmanager would hand over sitting
+        behind one it will not, which is not pending until an operator moves
+        what is in front of it. An id runmanager knows nothing of at all is
         reported as ``'unknown'``.
 
         Reads only: nothing is consumed by asking, so the same ids can be asked

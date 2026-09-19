@@ -26,6 +26,8 @@ from runmanager.queueing import (
     EMPTY_QUEUE_DEFAULT_LABSCRIPT,
     EMPTY_QUEUE_NOTHING,
     QueueManager,
+    SUBMITTED_SHOT_STATE,
+    UNKNOWN_SHOT_STATE,
 )
 
 
@@ -480,6 +482,20 @@ class ShotStatusTests(RemoteCommandTestCase):
         self.request('shot_status', ['one', 'two', 'three'])
 
         self.assertEqual(self.app.queue_manager.controller._items, before)
+
+    def test_every_answer_the_state_can_carry_is_named_to_the_caller(self):
+        # Derived rather than listed. The client docstring is where a caller
+        # reads what an answer can say, so a state runmanager answers with and
+        # the docstring does not name is one the caller has to guess at --
+        # including whether a shot in it is still coming.
+        docstring = runmanager.remote.Client.shot_status.__doc__
+        for state in (
+            BLOCKED_SHOT_STATE,
+            SUBMITTED_SHOT_STATE,
+            UNKNOWN_SHOT_STATE,
+        ):
+            with self.subTest(state=state):
+                self.assertIn(repr(state), docstring)
 
     def test_the_client_asks_under_that_name(self):
         sent = []
