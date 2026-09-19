@@ -154,6 +154,19 @@ class Client(ZMQClient):
         """Reset the shot output folder to the default path"""
         return self.request('reset_shot_output_folder')
 
+    def get_empty_queue_policy(self):
+        """What runmanager does when its queue runs out.
+
+        ``'nothing'``: an empty queue produces nothing, and the apparatus
+        stands idle until something is submitted. ``'default_labscript'``:
+        runmanager compiles and offers a shot of its own to keep the apparatus
+        busy.
+
+        Worth asking before submitting work whose results are waited on: under
+        ``'nothing'`` a queue that empties produces no further shot, so nothing
+        arrives to wait for."""
+        return self.request('get_empty_queue_policy')
+
     def queue_exchange(self, outcome=None, request_shot=True):
         """Report how a shot turned out, and ask for the next one.
 
@@ -208,6 +221,7 @@ set_shot_output_folder = _default_client.set_shot_output_folder
 error_in_globals = _default_client.error_in_globals
 is_output_folder_default = _default_client.is_output_folder_default
 reset_shot_output_folder = _default_client.reset_shot_output_folder
+get_empty_queue_policy = _default_client.get_empty_queue_policy
 queue_exchange = _default_client.queue_exchange
 
 if __name__ == '__main__':

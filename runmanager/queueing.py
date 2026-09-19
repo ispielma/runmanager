@@ -271,6 +271,11 @@ class QueueController(object):
         with self._lock:
             self.empty_queue_policy = value
 
+    def get_empty_queue_policy(self):
+        """What happens when the queue runs out: one of the two policies."""
+        with self._lock:
+            return self.empty_queue_policy
+
     def set_default_labscript_file(self, value):
         with self._lock:
             self.default_labscript_file = os.path.abspath(value) if value else ''
@@ -873,6 +878,9 @@ class QueueManager(QtCore.QObject):
     def set_empty_queue_policy(self, value):
         self.controller.set_empty_queue_policy(value)
         self.queueChanged.emit()
+
+    def get_empty_queue_policy(self):
+        return self.controller.get_empty_queue_policy()
 
     def set_default_labscript_file(self, value):
         self.controller.set_default_labscript_file(value)
