@@ -27,8 +27,11 @@ import uuid
 from qtutils.qt import QtCore, QtGui, QtWidgets
 from qtutils.qt.QtCore import pyqtSignal as Signal
 
+from labscript_utils import shared_drive
 from labscript_utils.qtwidgets.shotqueue import ShotQueueWidget
 from zprocess import raise_exception_in_thread
+
+from runmanager import _plain_value
 
 EMPTY_QUEUE_NOTHING = 'nothing'
 EMPTY_QUEUE_DEFAULT_LABSCRIPT = 'default_labscript'
@@ -67,11 +70,51 @@ SESSION_ONLY_FIELDS = ('compiling', 'state', 'message', 'reclaimed')
 
 # The states a row reaches by being given to BLACS. Not every state is one:
 # 'compile_failed' is runmanager's own, reached without the row ever leaving
-# here, and reading it as a handover put a file BLACS had never seen into the
-# row reserved for the shot BLACS was given, kept it through a replacement
-# submission, and told the operator BLACS was running it. A new state that
-# does mean a handover joins by being named here.
+# here, and reading it as a handover would put a file BLACS has never seen in
+# the row reserved for the shot BLACS was given, keep it there through a
+# replacement submission, and tell the operator BLACS is running it. A new
+# state that does mean a handover joins by being named here.
 BLACS_STATES = ('running', 'failed', 'rejected', 'cancelled')
+
+# The states the queue refuses to hand a row over in, each against whether a
+# row in it holds up the rows behind it as well. Written as the refusals that
+# exist rather than as the states that are left, so that a state added later
+# is one the queue would offer -- which is what offer_next() would do with it.
+# A shot reported dead because nobody listed it is a shot a caller gives up on
+# while the apparatus is about to run it.
+REFUSED_STATES = {
+    # offer_next(): BLACS could not read this shot at all -- a file that has
+    # gone, or a connection table that does not match the apparatus. Offering
+    # it again would only be refused again, so it is held at the head until an
+    # operator deletes it, and nothing behind it can be reached meanwhile.
+    'rejected': True,
+    # claim_next_for_compile(): a failed compile leaves data in the shot file
+    # that stops labscript ever compiling into it, so this row can never
+    # compile however often it is asked for. It is held the same way.
+    'compile_failed': True,
+    # offer_next(): the operator has said this shot is not to be sent. The
+    # queue clears the row itself, at the next request from BLACS -- see
+    # drop_cancelled_head() -- so the shots behind it are waiting their turn
+    # rather than waiting on anybody.
+    'cancelled': False,
+}
+# What a row the queue would hand over is answered with while a row it will
+# not hand over sits in front of it. Only the head is ever offered, so such a
+# row is not going anywhere either, and the empty state it is in would read as
+# work about to be done.
+BLOCKED_SHOT_STATE = 'blocked'
+# What a shot the queue has taken on but has no row for yet is answered with.
+# The row is made when the worker reaches that record, which under eager
+# compilation is a whole labscript compile after the shot was submitted.
+SUBMITTED_SHOT_STATE = 'submitted'
+# What a shot id with no row in the queue is answered with. Not the empty
+# state, which a row waiting its turn has.
+UNKNOWN_SHOT_STATE = 'unknown'
+
+
+def new_shot_id():
+    """A fresh identifier for one queued shot."""
+    return uuid.uuid4().hex
 
 
 def sent_to_blacs(row):
@@ -211,6 +254,11 @@ class QueueController(object):
         self.paused = False
         self.last_sent_from_queue = None
         self._items = []
+        # Shots taken on for the queue that have no row yet; see
+        # register_accepted(). Of this session only, like a compile in
+        # progress: a batch being compiled when runmanager stops is not
+        # resumed by the one that starts next.
+        self._accepted = set()
         self._lock = threading.RLock()
 
     def _normalise_item(self, item):
@@ -223,7 +271,7 @@ class QueueController(object):
         # and across every retry of it. It names the row rather than a run of
         # it, so BLACS's outcome finds the row it was offered even when the
         # file it ran is a fresh copy with another name:
-        record['shot_id'] = str(record.get('shot_id') or uuid.uuid4().hex)
+        record['shot_id'] = str(record.get('shot_id') or new_shot_id())
         labscript_file = record.get('labscript_file', '')
         record['labscript_file'] = (
             os.path.abspath(str(labscript_file)) if labscript_file else ''
@@ -246,8 +294,14 @@ class QueueController(object):
             str(name): str(expression)
             for name, expression in record.get('frozen_globals', {}).items()
         }
+        # The values as well as the names, because a record is saved into the
+        # app config: a sequence read back out of a shot file arrives as h5py
+        # answered with it, and a queue holding one of those cannot be written
+        # at all. Where the caller read them is not the queue's business; that
+        # a queued shot can be saved is.
         record['sequence_attrs'] = {
-            str(name): value for name, value in record.get('sequence_attrs', {}).items()
+            str(name): _plain_value(value)
+            for name, value in record.get('sequence_attrs', {}).items()
         }
         record['active_groups'] = {
             str(name): os.path.abspath(str(path))
@@ -271,6 +325,11 @@ class QueueController(object):
         with self._lock:
             self.empty_queue_policy = value
 
+    def get_empty_queue_policy(self):
+        """What happens when the queue runs out: one of the two policies."""
+        with self._lock:
+            return self.empty_queue_policy
+
     def set_default_labscript_file(self, value):
         with self._lock:
             self.default_labscript_file = os.path.abspath(value) if value else ''
@@ -289,6 +348,40 @@ class QueueController(object):
         records = [self._normalise_item(item) for item in items]
         with self._lock:
             self._items.extend(records)
+            # Each shot has its row now, which is what answers for it from
+            # here on -- including once that row leaves, a completed shot
+            # being finished with however busy the batch it came in still is.
+            self._accepted.difference_update(
+                record['shot_id'] for record in records
+            )
+
+    def register_accepted(self, shot_ids):
+        """Take on these shot ids, before there is a row for any of them.
+
+        A shot is taken on when it is submitted; its row is made once the
+        worker has reached that record, which under eager compilation is a
+        whole labscript compile later. In between, the id is this queue's to
+        answer for. Without that the answer is that there is no such shot,
+        whose meaning is that nothing further will happen to it -- so a caller
+        polling for the results of what it has just submitted is told its work
+        was dropped, and submits it all over again.
+
+        Whatever registers ids releases them again: see forget_accepted."""
+        with self._lock:
+            self._accepted.update(str(shot_id) for shot_id in shot_ids)
+
+    def forget_accepted(self, shot_ids):
+        """Let go of ids that have no row and now never will.
+
+        The counterpart of register_accepted, for every way a record can be
+        abandoned. An id left on the books is called pending for the rest of
+        the session, for a shot that will never run, which strands a caller
+        waiting on it exactly as thoroughly as being told it was dropped.
+
+        Ids that did become rows are already gone from the set, so releasing a
+        whole batch releases precisely the records of it that never made one."""
+        with self._lock:
+            self._accepted.difference_update(str(shot_id) for shot_id in shot_ids)
 
     def delete_rows(self, shot_ids):
         """Delete the queued shots with these stable ids.
@@ -380,6 +473,67 @@ class QueueController(object):
                 if include_default_shots or not item['default_shot']
             ]
 
+    def get_shot_statuses(self, shot_ids):
+        """Say, for each of these shot ids, whether its shot can still run.
+
+        ``{shot_id: {'pending': bool, 'state': str}}``, one entry per id asked
+        about. ``pending`` is whether the queue would still hand that row over.
+        That is a question about the row and about what is in front of it:
+        only the head is ever offered, so a row the queue refuses to hand over
+        and does not clear itself holds up every row behind it until an
+        operator moves it. Those rows are not pending either, and say
+        ``blocked``, which is the fact about them a caller waiting on their
+        results needs.
+
+        ``state`` is for a human reading it. A shot that has been taken on but
+        has no row yet is pending and says ``submitted``; an id that is
+        neither is not pending, because nothing further will happen to it.
+
+        Reads only. A caller may ask as often as it likes, about shots that
+        finished long ago, and the queue is no different afterwards."""
+        statuses = {}
+        with self._lock:
+            held = False
+            for item in self._items:
+                state = item['state']
+                if state in REFUSED_STATES:
+                    # Its own reason, which is what an operator has to act on.
+                    statuses[item['shot_id']] = {'pending': False, 'state': state}
+                    held = held or REFUSED_STATES[state]
+                elif held:
+                    statuses[item['shot_id']] = {
+                        'pending': False,
+                        'state': BLOCKED_SHOT_STATE,
+                    }
+                else:
+                    statuses[item['shot_id']] = {'pending': True, 'state': state}
+            accepted = set(self._accepted)
+        answer = {}
+        for shot_id in shot_ids:
+            if shot_id in statuses:
+                answer[shot_id] = dict(statuses[shot_id])
+            elif shot_id in accepted:
+                answer[shot_id] = {'pending': True, 'state': SUBMITTED_SHOT_STATE}
+            else:
+                answer[shot_id] = {'pending': False, 'state': UNKNOWN_SHOT_STATE}
+        return answer
+
+    def get_queued_sequence_attrs(self, path):
+        """The sequence attributes of the queued shot at ``path``, or None.
+
+        None is that the queue has no sequence to give for that path, whether
+        because no row holds it or because the row that does records none. A
+        caller with somewhere else to look does the same thing either way.
+
+        The last matching row answers. The queue does not set out to hold two
+        rows with one path, and taking the last means the newer row wins if it
+        ever does."""
+        with self._lock:
+            for item in reversed(self._items):
+                if item['path'] == path:
+                    return dict(item['sequence_attrs']) or None
+        return None
+
     def get_shot_path(self, shot_id):
         """Return the path recorded for one queued shot, or None for no row.
 
@@ -425,6 +579,32 @@ class QueueController(object):
             if self.last_sent_from_queue == value:
                 return False
             self.last_sent_from_queue = value
+            return True
+
+    def forget_last_sent(self, paths):
+        """Let go of the last shot sent if one of these paths is its file.
+
+        Called where a queued shot's file is deleted. What that value is for
+        is naming the shot a later batch is numbered after and reading the
+        sequence it belongs to out of; a file that has been deleted answers
+        neither, and no later event puts it back, so keeping the name is
+        keeping a sequence nothing can ever be added to. A caller that finds
+        nothing recorded here starts a sequence instead, which is what it does
+        before anything has run.
+
+        Compared as local paths, because what is recorded here is the
+        shared-drive-agnostic name BLACS was given. Returns True if it
+        changed."""
+        wanted = {os.path.abspath(path) for path in paths}
+        with self._lock:
+            if self.last_sent_from_queue is None:
+                return False
+            anchor = os.path.abspath(
+                shared_drive.path_to_local(self.last_sent_from_queue)
+            )
+            if anchor not in wanted:
+                return False
+            self.last_sent_from_queue = None
             return True
 
     def export_state(self):
@@ -583,14 +763,12 @@ class QueueController(object):
             if not self._items or not self._items[0]['compiled']:
                 return None
             item = self._items[0]
-            if item['state'] == 'rejected':
-                # BLACS could not read this shot at all -- a file that has gone,
-                # or a connection table that does not match the apparatus. That
-                # is this queue's problem and not the apparatus's, and offering
-                # it again would only be refused again, once per request. It is
-                # held here, red, until an operator deletes it or a restart
-                # clears the state. Meanwhile BLACS is free: it keeps asking,
-                # gets nothing, and runs its own shot.
+            if item['state'] in REFUSED_STATES:
+                # A row the queue will not hand over, for the reason recorded
+                # against its state in REFUSED_STATES. It is held here, marked,
+                # until an operator deletes it, the queue clears it, or a
+                # restart clears the state. Meanwhile BLACS is free: it keeps
+                # asking, gets nothing, and runs its own shot.
                 return None
             reclaimed = item['state'] == 'running'
             item['state'] = 'running'
@@ -667,13 +845,14 @@ class QueueController(object):
             item = self._items[0]
             if item['compiled']:
                 return None, False
-            if item['state'] == 'compile_failed':
-                # Already tried, and it went red. Not claimed again, and not
-                # merely to save the work: a compile that fails partway leaves
-                # the devices and calibrations groups in the shot file, and
-                # labscript refuses to compile into a file that has them. This
-                # row can never compile, however often it is asked for.
-                # Deleting it -- which takes its file with it -- is the way on.
+            if item['state'] in REFUSED_STATES:
+                # A row the queue will not hand over is not worth compiling.
+                # The one that gets here is compile_failed: already tried, and
+                # it went red. Not claimed again, and not merely to save the
+                # work -- a compile that fails partway leaves the devices and
+                # calibrations groups in the shot file, and labscript refuses
+                # to compile into a file that has them. Deleting the row --
+                # which takes its file with it -- is the way on.
                 return None, False
             if item['compiling']:
                 return None, True
@@ -686,9 +865,9 @@ class QueueController(object):
         A shot that failed to compile stays where it is and goes red with the
         reason, like a shot that failed to run: only completion or an explicit
         deletion takes a row out of the queue, and a shot that never compiled
-        did not complete. It used to be dropped, which was quiet enough to be
-        mistaken for the queue draining normally — a queue emptying with no
-        shot ever running is exactly what one broken labscript file produced.
+        did not complete. Dropping it would be quiet enough to be mistaken for
+        the queue draining normally — a queue emptying with no shot ever
+        running is what one broken labscript file would then produce.
 
         It is not compiled again, though. See claim_next_for_compile: the
         failed compile leaves data in the shot file that stops labscript ever
@@ -734,7 +913,6 @@ class QueueManager(QtCore.QObject):
         compile_run_file,
         send_to_runviewer,
         output,
-        compilation_aborted,
         set_abort_enabled,
     ):
         QtCore.QObject.__init__(self)
@@ -744,7 +922,11 @@ class QueueManager(QtCore.QObject):
         self.compile_run_file_callback = compile_run_file
         self.send_to_runviewer_callback = send_to_runviewer
         self.output = output
-        self.compilation_aborted = compilation_aborted
+        # Set by abort() and let go of by the worker when the last batch it
+        # covers is done with. Nothing outside this class touches it: an
+        # abort is a thing the queue is asked for, not a flag to be raised
+        # behind its back.
+        self.compilation_aborted = threading.Event()
         self.set_abort_enabled = set_abort_enabled
         self.batches_pending = 0
         self.batches_lock = threading.Lock()
@@ -761,12 +943,61 @@ class QueueManager(QtCore.QObject):
         self.controller.enqueue(list(items))
         self.queueChanged.emit()
 
+    def abort(self):
+        """Stop the batches this queue is holding.
+
+        An abort is about work that has been submitted: the batch being
+        compiled and every batch waiting behind it. With none of them here
+        there is nothing to stop, and setting the flag anyway would leave it
+        set with nothing coming that would clear it -- which is every later
+        submission refused, by a runmanager that looks idle.
+
+        Counted under the same lock the worker gives a batch back under, so a
+        batch is either stopped by this abort or submitted after it, and never
+        both at once."""
+        with self.batches_lock:
+            if self.batches_pending:
+                self.compilation_aborted.set()
+
     def compile_shots(self, records, send_to_BLACS, send_to_runviewer):
+        """Compile these records and, if send_to_BLACS, queue them.
+
+        Returns the records, each now carrying the identifier its row will
+        have, for a caller that has to say which shots it submitted.
+
+        The id is settled here rather than in enqueue because the eager path
+        compiles a record before enqueueing it: a file written on that path
+        would have been written before its shot had an id to put in it. What
+        the id is does not change -- enqueue keeps whatever a record arrives
+        with, and a caller that chose its own keeps that.
+
+        A batch bound for the queue is taken on here too, id by id, so that
+        the whole of the compile it is about to wait through is answered for.
+        A batch that is not bound for the queue is compiled and looked at and
+        queues nothing, so the queue takes on nothing and has nothing to say
+        about it."""
+        records = list(records)
+        for record in records:
+            # As text, which is what the row made from this record will hold
+            # it as: an id reported to the caller and written into the shot
+            # file as anything else names no row, so the caller polls for a
+            # shot the queue has never heard of while its shot runs.
+            record['shot_id'] = (
+                str(record['shot_id']) if record.get('shot_id') else new_shot_id()
+            )
+        if send_to_BLACS:
+            # Before the command goes on the worker's list, never after: the
+            # worker can enqueue a record the moment it has one, and an id
+            # registered after its row was made is an id nothing clears.
+            self.controller.register_accepted(
+                record['shot_id'] for record in records
+            )
         with self.batches_lock:
             self.batches_pending += 1
         self.command_queue.put(
-            ('compile_shots', (list(records), send_to_BLACS, send_to_runviewer))
+            ('compile_shots', (records, send_to_BLACS, send_to_runviewer))
         )
+        return records
 
     def _compile_shot(self, item, send_to_runviewer=False):
         if 'frozen_globals' in item:
@@ -776,11 +1007,11 @@ class QueueManager(QtCore.QObject):
             self.send_to_runviewer_callback(item['path'])
         # Deliberately does not mark the record compiled. For a row already in
         # the queue that is the controller's to do, under its lock, in
-        # finish_compile: marking it here made it offerable before the compile
-        # was recorded, and the offer's running state was then wiped by the
-        # compile finishing -- so the row was handed to BLACS and offered again
-        # afterwards as though it never had been. The eager caller below marks
-        # its own record, which is not in the queue yet.
+        # finish_compile: marking it here would make it offerable before the
+        # compile is recorded, and the offer's running state would then be
+        # wiped by the compile finishing -- so the row would be handed to BLACS
+        # and offered again afterwards as though it never had been. The eager
+        # caller below marks its own record, which is not in the queue yet.
         return success
 
     def compile_next_in_background(self, send_to_runviewer):
@@ -845,6 +1076,14 @@ class QueueManager(QtCore.QObject):
             self.queueChanged.emit()
 
     def _delete_queue_files(self, paths):
+        """Delete the files of shots the queue has finished with.
+
+        Every path a queued shot's file is deleted by comes through here, so
+        this is where the shot last sent to BLACS is let go of if it was one
+        of them -- whether the file went or was already gone. A name that no
+        longer reaches a shot file is no use to the batch that would have been
+        added to that shot's sequence, and nothing puts it back."""
+        paths = list(paths)
         for path in paths:
             try:
                 os.remove(path)
@@ -856,10 +1095,15 @@ class QueueManager(QtCore.QObject):
                     % (os.path.basename(path), str(exc)),
                     red=True,
                 )
+        if self.controller.forget_last_sent(paths):
+            self.queueChanged.emit()
 
     def set_empty_queue_policy(self, value):
         self.controller.set_empty_queue_policy(value)
         self.queueChanged.emit()
+
+    def get_empty_queue_policy(self):
+        return self.controller.get_empty_queue_policy()
 
     def set_default_labscript_file(self, value):
         self.controller.set_default_labscript_file(value)
@@ -884,8 +1128,8 @@ class QueueManager(QtCore.QObject):
         The reason is read off the row, because the two callers keep rows for
         different reasons: Delete keeps only the row BLACS is executing, while
         Clear keeps everything that went to BLACS, which includes rows that came
-        back failed or rejected long ago. One message said "BLACS is running it"
-        for all of them, which for the second kind is untrue, and it is the
+        back failed or rejected long ago. One message saying "BLACS is running
+        it" for all of them would be untrue of the second kind, and it is the
         untruth most likely to send an operator to Abort on idle hardware.
         Returns the paths that were removed."""
         for row in protected:
@@ -961,6 +1205,12 @@ class QueueManager(QtCore.QObject):
     def get_queue_paths(self, include_default_shots=True):
         return self.controller.get_queue_paths(include_default_shots)
 
+    def get_shot_statuses(self, shot_ids):
+        return self.controller.get_shot_statuses(shot_ids)
+
+    def get_queued_sequence_attrs(self, path):
+        return self.controller.get_queued_sequence_attrs(path)
+
     def get_shot_path(self, shot_id):
         return self.controller.get_shot_path(shot_id)
 
@@ -1023,13 +1273,31 @@ class QueueManager(QtCore.QObject):
                         else:
                             self.output('Ready.\n\n')
                     finally:
-                        # The abort flag is cleared by the next Engage, not
-                        # here, so that aborting also stops batches already
-                        # queued behind this one. Abort stays available while
-                        # any of them are still pending:
+                        # However the batch ended -- every record queued, an
+                        # abort, a shot that would not compile, or a raise on
+                        # the way out -- nothing of it is merely taken on any
+                        # more. The records that reached the queue gave up
+                        # their place as they were enqueued, so this releases
+                        # exactly those that never got there, which would
+                        # otherwise be answered for as work still to come for
+                        # the rest of the session.
+                        self.controller.forget_accepted(
+                            record['shot_id'] for record in records
+                        )
+                        # An abort applies to every batch this queue is
+                        # holding, not only the one it interrupted, so the flag
+                        # outlives this batch while others are still pending --
+                        # including batches submitted while it was in force,
+                        # which are counted in under this same lock. It is let
+                        # go of with the last of them: whoever aborted has had
+                        # everything they asked for stopped, and a flag left
+                        # set would stop work nobody has asked for yet. Abort
+                        # stays available for exactly as long.
                         with self.batches_lock:
                             self.batches_pending -= 1
                             last_batch = self.batches_pending == 0
+                            if last_batch:
+                                self.compilation_aborted.clear()
                         if last_batch:
                             self.set_abort_enabled(False)
                 else:

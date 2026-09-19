@@ -154,6 +154,85 @@ class Client(ZMQClient):
         """Reset the shot output folder to the default path"""
         return self.request('reset_shot_output_folder')
 
+    def get_empty_queue_policy(self):
+        """What runmanager does when its queue runs out.
+
+        ``'nothing'``: an empty queue produces nothing, and the apparatus
+        stands idle until something is submitted. ``'default_labscript'``:
+        runmanager compiles and offers a shot of its own to keep the apparatus
+        busy.
+
+        Worth asking before submitting work whose results are waited on: under
+        ``'nothing'`` a queue that empties produces no further shot, so nothing
+        arrives to wait for."""
+        return self.request('get_empty_queue_policy')
+
+    def submit_shots(self, entries):
+        """Submit one shot per entry, each with the globals that entry names.
+
+        ``entries`` is a list of ``{global_name: value}`` dicts; one entry is
+        one shot. The globals an entry names are set in runmanager's window and
+        left set, so that whoever is watching sees what is running, and the
+        window is left holding the last entry submitted. A global that another
+        entry names but this one does not goes back to the operator's own
+        expression before this entry's shot is made, so a value asked for once
+        does not carry into the shots after it; globals no entry names are
+        untouched.
+
+        Returns one descriptor per entry, in the order submitted:
+        ``{'shot_id', 'sequence_id', 'run_number', 'path'}``. The shots are
+        added to the sequence runmanager is already working on, continuing its
+        run numbers. The queue is never cleared.
+
+        Each submitted shot is written with its ``shot_id`` as a root
+        attribute of its h5 file, which is where the id handed back here
+        reappears: it is how a result produced from that file is matched to
+        the entry that asked for it. A shot file carrying no such attribute is
+        one nobody submitted -- runmanager writes the shots it makes itself,
+        to keep the apparatus busy between submissions, without one.
+
+        Whether a whole run of submissions stays one sequence depends on the
+        empty-queue policy, which get_empty_queue_policy() answers. Under
+        ``'default_labscript'`` it does: the gaps between submissions are
+        filled by shots runmanager makes itself, which belong to no sequence
+        and leave the anchor alone. Under ``'nothing'`` runmanager lets go of
+        the anchor as soon as BLACS asks and finds the queue empty, so each
+        submission starts a sequence of its own.
+
+        Raises, having submitted nothing at all, whatever it is that goes
+        wrong. The whole batch is made and handed over in one go, so until
+        that succeeds there is nothing queued to take back and no shot running
+        under an identifier the caller was never given.
+
+        An entry that would produce anything other than exactly one shot is
+        refused this way, which is what happens when a global still has a scan
+        enabled: a scan means the value asked for is not the value that runs,
+        so it is refused rather than submitted. So are a labscript file or
+        output folder that is not set, globals that cannot be evaluated, and a
+        name no active group has. The globals set before a refusal are left
+        set; nothing is queued and nothing runs."""
+        return self.request('submit_shots', list(entries))
+
+    def shot_status(self, shot_ids):
+        """Whether each of these shots can still produce a result.
+
+        Answers ``{shot_id: {'pending': bool, 'state': str}}``, one entry per
+        id asked about. ``pending`` is false once nothing further will happen
+        to that shot -- it completed and left the queue, it was cancelled, or
+        it is held waiting on an operator.
+
+        ``state`` is the queue row's own state, for a human reading a log,
+        plus two answers no row is ever in. ``'submitted'`` is a shot
+        runmanager has taken on but has no row for yet, which is still
+        pending; ``'blocked'`` is a row runmanager would hand over sitting
+        behind one it will not, which is not pending until an operator moves
+        what is in front of it. An id runmanager knows nothing of at all is
+        reported as ``'unknown'``.
+
+        Reads only: nothing is consumed by asking, so the same ids can be asked
+        about as often as wanted."""
+        return self.request('shot_status', list(shot_ids))
+
     def queue_exchange(self, outcome=None, request_shot=True):
         """Report how a shot turned out, and ask for the next one.
 
@@ -208,6 +287,9 @@ set_shot_output_folder = _default_client.set_shot_output_folder
 error_in_globals = _default_client.error_in_globals
 is_output_folder_default = _default_client.is_output_folder_default
 reset_shot_output_folder = _default_client.reset_shot_output_folder
+get_empty_queue_policy = _default_client.get_empty_queue_policy
+shot_status = _default_client.shot_status
+submit_shots = _default_client.submit_shots
 queue_exchange = _default_client.queue_exchange
 
 if __name__ == '__main__':

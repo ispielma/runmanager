@@ -13,8 +13,11 @@
 """Runmanager GUI and supporting code
 """
 
+import collections
 import queue
+import logging
 import os
+import random
 import sys
 import labscript_utils.excepthook
 
@@ -110,6 +113,20 @@ GLOBAL_MONOSPACE_FONT = "Consolas" if os.name == 'nt' else "Ubuntu Mono"
 
 runmanager_dir = RUNMANAGER_DIR
 
+# Bound here as well as under __main__ below, so that the methods of this
+# module can be called by anything that imports it rather than only by the
+# application. setup_logging() attaches handlers to the logger of this name and
+# hands back that same object, so running runmanager rebinds this to what it
+# already refers to. Getting it here attaches nothing and opens no log file.
+logger = logging.getLogger(APPLICATION_NAME)
+
+# The running window, which RemoteServer's handlers reach through. Bound here
+# for the same reason the logger is: the name this module reads exists in it,
+# so anything importing the module can put its own window there rather than
+# inventing an attribute that was never declared. Running runmanager replaces
+# this with the application it builds.
+app = None
+
 process_tree = ProcessTree.instance()
 
 # Set a meaningful name for zprocess.locking's client id:
@@ -119,6 +136,48 @@ SUBMISSION_MODE_NEW_FOLDER = 'new_folder'
 SUBMISSION_MODE_ADD_SHOTS = 'add_shots'
 SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE = 'new_folder_clear_queue'
 SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE = 'add_shots_clear_queue'
+
+# The two places a sequence for a batch to join can be found, each named by
+# the method that looks there. get_submission_anchor tries a mode's sources in
+# the order they are given.
+ANCHOR_IN_QUEUE = 'get_queue_append_filepath'
+ANCHOR_LAST_SENT = 'get_last_sent_from_queue_filepath'
+
+SubmissionMode = collections.namedtuple(
+    'SubmissionMode', ['anchor_sources', 'clears_queue']
+)
+
+# Everything a submission mode decides, in one place. A mode with no anchor
+# source starts a sequence of its own; one with sources joins the sequence of
+# the first shot its sources find, and starts one when they find nothing.
+#
+# "Add shots to last sequence" falls back to the shot last sent to BLACS
+# because the queue empties on its own: BLACS can take the last shot between
+# the menu being drawn and the item being clicked, and in exactly that state
+# the shot last sent is the one the operator was looking at in the queue. On a
+# runmanager that has queued nothing and sent nothing there is no last
+# sequence at all, and starting one is the only thing the words can mean.
+#
+# Emptying the queue takes the shot numbers of the deleted shots back, so a
+# batch replacing the queue is numbered from 0 again; and it throws away the
+# work still waiting, so the sequence it joins is the one BLACS is running
+# rather than the one about to be deleted -- which need not be the same, since
+# a batch engaged as a new sequence while BLACS works through the last one
+# leaves the queue holding one sequence and BLACS running another.
+SUBMISSION_MODES = {
+    SUBMISSION_MODE_NEW_FOLDER: SubmissionMode(
+        anchor_sources=(), clears_queue=False
+    ),
+    SUBMISSION_MODE_ADD_SHOTS: SubmissionMode(
+        anchor_sources=(ANCHOR_IN_QUEUE, ANCHOR_LAST_SENT), clears_queue=False
+    ),
+    SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE: SubmissionMode(
+        anchor_sources=(), clears_queue=True
+    ),
+    SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE: SubmissionMode(
+        anchor_sources=(ANCHOR_LAST_SENT, ANCHOR_IN_QUEUE), clears_queue=True
+    ),
+}
 
 
 def log_if_global(g, g_list, message):
@@ -1769,8 +1828,6 @@ class RunManager(LabscriptApplication):
         self.output_box_window_verticalLayout.setContentsMargins(0, 0, 0, 0)
         self.output_box_window.setWindowTitle('runmanager output')
         self.output_box_window.resize(800, 1000)
-        # A flag telling the compilation worker to abort:
-        self.compilation_aborted = threading.Event()
         self.setup_config()
         self.setup_axes_tab()
         self.setup_groups_tab()
@@ -1797,7 +1854,6 @@ class RunManager(LabscriptApplication):
             compile_run_file=self.compile_run_file,
             send_to_runviewer=self.send_to_runviewer,
             output=self.output_box.output,
-            compilation_aborted=self.compilation_aborted,
             set_abort_enabled=lambda enabled: inmain(
                 self.ui.pushButton_abort.setEnabled, enabled
             ),
@@ -2394,6 +2450,12 @@ class RunManager(LabscriptApplication):
         self.engage_add_shots_action.triggered.connect(
             lambda: self.on_engage_clicked(submission_mode=SUBMISSION_MODE_ADD_SHOTS)
         )
+        self.engage_add_shots_action.setToolTip(
+            'Submit the new batch onto the same shot sequence as the queued shots.'
+        )
+        self.engage_add_shots_action.setStatusTip(
+            'Submit the new batch onto the same shot sequence as the queued shots.'
+        )
         self.engage_replace_queue_action = self.engage_submission_menu.addAction(
             'Empty queue, then add shots to new sequence'
         )
@@ -2447,10 +2509,36 @@ class RunManager(LabscriptApplication):
             return None
         return os.path.abspath(shared_drive.path_to_local(last_sent_from_queue))
 
+    def get_submission_anchor(self, submission_mode):
+        """The shot this mode numbers its batch after, or None for a new one.
+
+        The mode's anchor sources are tried in order and the first shot found
+        is the answer; None means there is no sequence to join, and a batch
+        with nothing to be numbered after starts one of its own.
+
+        Read here, where the answer is used, and once. The queue moves on its
+        own -- BLACS takes the last shot on the server thread -- so a mode
+        offered against a queue with work in it can be carried out against one
+        that has none, and a second read taken later answers about a different
+        queue than the one that was checked."""
+        for source in SUBMISSION_MODES[submission_mode].anchor_sources:
+            anchor = getattr(self, source)()
+            if anchor is not None:
+                return anchor
+        return None
+
     def can_use_alternate_submission_mode(self):
+        """Whether the menu offers the alternate submission modes right now.
+
+        A menu question and only that: their wording names a last sequence,
+        so they are greyed out while there is none to name. It is asked as the
+        menu is about to be drawn, and the queue it describes can empty before
+        an action is chosen; nothing is decided on it. Which sequence a
+        submission joins is settled in get_submission_anchor, against the
+        queue the batch is written into."""
         return (
             self.ui.checkBox_run_shots.isChecked()
-            and self.get_queue_append_filepath() is not None
+            and self.get_submission_anchor(SUBMISSION_MODE_ADD_SHOTS) is not None
         )
 
     def update_engage_submission_menu_actions(self):
@@ -2459,18 +2547,15 @@ class RunManager(LabscriptApplication):
         self.engage_replace_queue_action.setEnabled(enabled)
         self.engage_add_clear_action.setEnabled(enabled)
 
-    def reindex_run_file_infos(
-        self,
-        run_file_infos,
-        output_folder,
-        filename_prefix,
-        indexed_path_base=None,
-        index_start=None,
-    ):
+    def reindex_run_file_infos(self, run_file_infos, indexed_path_base, index_start=None):
+        """Name and number a batch after the shot it is being added to.
+
+        Both the directory and the filename stem come from
+        ``indexed_path_base``, which is the shot whose sequence this batch is
+        joining, so nothing about where a new sequence would have gone reaches
+        these files."""
         if not run_file_infos:
             return run_file_infos
-        if indexed_path_base is None:
-            indexed_path_base = os.path.join(output_folder, '{}.h5'.format(filename_prefix))
         candidate_stem = os.path.splitext(os.path.basename(indexed_path_base))[0]
         _, _, index_str = candidate_stem.rpartition('_')
         width = len(index_str) if index_str.isdigit() else 1
@@ -2483,7 +2568,25 @@ class RunManager(LabscriptApplication):
                 start=next_index,
             )
             run_file_info['path'] = run_file
+            # A shot file is named after the run number written into it, and
+            # a run number is unique within its sequence, so renumbering the
+            # files of a batch added to a sequence renumbers its runs with
+            # them. Left as they were, the added shots would restart at run 0
+            # in a sequence that already has one, each of them in a file named
+            # for a number other than its own.
+            run_file_info['run_no'] = next_index
             next_index += 1
+        # n_runs is how far the sequence reaches as of the shot it is written
+        # into: runs 0 up to the highest just numbered exist once this batch
+        # is written. It is neither the size of this batch nor a total for the
+        # sequence, and it is not uniform across a sequence that has been
+        # added to -- the shots written before this batch keep the smaller
+        # number they were written with, and are not rewritten to agree,
+        # having possibly already run. So no one shot's n_runs says how many
+        # runs its sequence has.
+        runs_in_sequence = next_index
+        for run_file_info in run_file_infos:
+            run_file_info['n_runs'] = runs_in_sequence
         return run_file_infos
 
     def on_engage_clicked(self, checked=False, submission_mode=SUBMISSION_MODE_NEW_FOLDER):
@@ -2497,97 +2600,153 @@ class RunManager(LabscriptApplication):
                     red=True,
                 )
                 return
-            queue_append_filepath = None
-            if submission_mode != SUBMISSION_MODE_NEW_FOLDER:
-                queue_append_filepath = self.get_queue_append_filepath()
-                if not send_to_BLACS:
-                    self.output_box.output(
-                        "Warning: alternate queue submission modes require 'BLACS' to be selected.\n\n",
-                        red=True,
-                    )
-                    return
-                if queue_append_filepath is None:
-                    self.output_box.output(
-                        'Warning: alternate queue submission modes require shots in the queue.\n\n',
-                        red=True,
-                    )
-                    return
-            labscript_file = self.ui.lineEdit_labscript_file.text()
-            # even though we shuffle on a per global basis, if ALL of the globals are set to shuffle, then we may as well shuffle again. This helps shuffle shots more randomly than just shuffling within each level (because without this, you would still do all shots with the outer most variable the same, etc)
-            shuffle = self.ui.pushButton_shuffle.checkState() == QtCore.Qt.Checked
-            if not labscript_file:
-                raise Exception('Error: No labscript file selected')
-            output_folder = self.ui.lineEdit_shot_output_folder.text()
-            if not output_folder:
-                raise Exception('Error: No output folder selected')
-            logger.info('Parsing globals...')
-            active_groups = self.get_active_groups()
-            # Get ordering of expansion globals
-            expansion_order = {}
-            for i in range(self.axes_model.rowCount()):
-                item = self.axes_model.item(i, self.AXES_COL_NAME)
-                shuffle_item = self.axes_model.item(i, self.AXES_COL_SHUFFLE)
-                name = item.data(self.AXES_ROLE_NAME)
-                expansion_order[name] = {'order':i, 'shuffle':shuffle_item.checkState()}
-            
-            try:
-                sequenceglobals, shots, evaled_globals, global_hierarchy, expansions = self.parse_globals(active_groups, expansion_order=expansion_order)
-            except Exception as e:
-                raise Exception('Error parsing globals:\n%s\nCompilation aborted.' % str(e))
-            logger.info('Making h5 files')
-            globals_details = runmanager.get_globals_details(active_groups)
-            indexed_path_base = None
-            index_start = None
-            if submission_mode == SUBMISSION_MODE_ADD_SHOTS:
-                indexed_path_base = queue_append_filepath
-            elif submission_mode == SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE:
-                self.queue_manager.clear()
-            elif submission_mode == SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE:
-                indexed_path_base = (
-                    self.get_last_sent_from_queue_filepath() or queue_append_filepath
+            mode = SUBMISSION_MODES[submission_mode]
+            if (mode.anchor_sources or mode.clears_queue) and not send_to_BLACS:
+                # A mode that reads the queue for a sequence to join, or
+                # empties it, is about the queue -- so with nothing going to
+                # BLACS there is nothing for it to do.
+                self.output_box.output(
+                    "Warning: alternate queue submission modes require 'BLACS' to be selected.\n\n",
+                    red=True,
                 )
-                index_start = 0
-                self.queue_manager.clear()
-            labscript_file, run_files = self.make_h5_files(
-                labscript_file,
-                output_folder,
-                sequenceglobals,
-                shots,
-                shuffle,
-                with_metadata=True,
-                indexed_path_base=indexed_path_base,
-                index_start=index_start,
-            )
-            compile_mode = self.queue_compile_mode_combo.currentData()
-            queue_records = []
-            for run_file_info in run_files:
-                queue_records.append(
-                    {
-                        'path': run_file_info['path'],
-                        'labscript_file': labscript_file,
-                        'active_groups': dict(active_groups),
-                        'compile_mode': compile_mode,
-                        'compiled': False,
-                        'frozen_globals': runmanager.get_frozen_globals(
-                            globals_details,
-                            run_file_info['shot_globals'],
-                        ),
-                        'sequence_attrs': run_file_info['sequence_attrs'],
-                        'run_no': run_file_info['run_no'],
-                        'n_runs': run_file_info['n_runs'],
-                    }
-                )
-            self.compilation_aborted.clear()
-            self.ui.pushButton_abort.setEnabled(True)
-            self.queue_manager.compile_shots(
-                queue_records, send_to_BLACS, send_to_runviewer
+                return
+            self.compile_and_queue_shots(
+                submission_mode,
+                send_to_BLACS,
+                send_to_runviewer,
+                self.expand_pending_shots(),
             )
         except Exception as e:
             self.output_box.output('%s\n\n' % str(e), red=True)
         logger.info('end engage')
 
+    def expand_pending_shots(self):
+        """The shots the window's globals stand for, in the order to make them.
+
+        One ``(shot globals, globals to freeze)`` pair per shot. The pair is
+        the unit because a shot's globals have to travel with it: the file it
+        is written to is named from the globals it is made with, and the
+        record it is compiled from carries the same ones frozen. Two lists
+        side by side are two things that can be reordered apart, and a shot
+        named for one set of parameters and run with another is a result
+        recorded against parameters that never ran.
+
+        The shuffle button reorders the pairs, which is the only place
+        anything is reordered: everything downstream makes the batch in the
+        order it is given."""
+        active_groups = self.get_active_groups()
+        # Get ordering of expansion globals
+        expansion_order = {}
+        for i in range(self.axes_model.rowCount()):
+            item = self.axes_model.item(i, self.AXES_COL_NAME)
+            shuffle_item = self.axes_model.item(i, self.AXES_COL_SHUFFLE)
+            name = item.data(self.AXES_ROLE_NAME)
+            expansion_order[name] = {'order':i, 'shuffle':shuffle_item.checkState()}
+        logger.info('Parsing globals...')
+        try:
+            _, shots, _, _, _ = self.parse_globals(
+                active_groups, expansion_order=expansion_order
+            )
+        except Exception as e:
+            raise Exception('Error parsing globals:\n%s\nCompilation aborted.' % str(e))
+        globals_details = runmanager.get_globals_details(active_groups)
+        pending = [
+            (
+                shot_globals,
+                runmanager.get_frozen_globals(globals_details, shot_globals),
+            )
+            for shot_globals in shots
+        ]
+        if self.ui.pushButton_shuffle.checkState() == QtCore.Qt.Checked:
+            # Globals are shuffled one expansion at a time as they are
+            # expanded, so even with every one of them shuffled the batch is
+            # still ordered by the outermost. Shuffling the whole batch is
+            # what takes the last of that order out of it.
+            random.shuffle(pending)
+        return pending
+
+    def compile_and_queue_shots(
+        self, submission_mode, send_to_BLACS, send_to_runviewer, batch
+    ):
+        """Make the shots of one batch and put them in the queue.
+
+        ``batch`` is one ``(shot globals, globals to freeze)`` pair per shot,
+        in the order the shots are to be made: what the window's globals
+        expand into for an Engage, and what the caller named entry by entry
+        for a remote submission. Made in one go because that is what tells the
+        shots apart -- a filename and a run number are claimed by the batch
+        being made, so shots made one at a time would each find the same
+        number free.
+
+        Raises rather than writing to the output box, because a caller that is
+        not a person standing at the window has no output box to read: Engage
+        catches these and puts them there itself.
+
+        Returns the queue records, each carrying the identifier its row has,
+        in the order the shots were given."""
+        mode = SUBMISSION_MODES[submission_mode]
+        indexed_path_base = self.get_submission_anchor(submission_mode)
+        labscript_file = self.ui.lineEdit_labscript_file.text()
+        if not labscript_file:
+            raise Exception('Error: No labscript file selected')
+        output_folder = self.ui.lineEdit_shot_output_folder.text()
+        if not output_folder:
+            raise Exception('Error: No output folder selected')
+        active_groups = self.get_active_groups()
+        index_start = None
+        sequence_attrs = None
+        if mode.clears_queue:
+            if indexed_path_base is not None:
+                # Read before the Clear rather than after it. With nothing yet
+                # sent to BLACS the shot being added to is a queued one, and
+                # the Clear takes its row and deletes its file -- so asked
+                # afterwards, nothing would be left to say which sequence the
+                # replacement batch is joining.
+                sequence_attrs = self.get_sequence_attrs_to_extend(indexed_path_base)
+                # Numbering starts from 0 again, taking back the names the
+                # shots being deleted gave up; the ones whose files are still
+                # there are skipped over.
+                index_start = 0
+            self.queue_manager.clear()
+        logger.info('Making h5 files')
+        labscript_file, run_files = self.make_h5_files(
+            labscript_file,
+            output_folder,
+            [shot_globals for shot_globals, _ in batch],
+            with_metadata=True,
+            indexed_path_base=indexed_path_base,
+            index_start=index_start,
+            sequence_attrs=sequence_attrs,
+        )
+        compile_mode = self.queue_compile_mode_combo.currentData()
+        queue_records = []
+        for run_file_info, (_, frozen) in zip(run_files, batch):
+            queue_records.append(
+                {
+                    'path': run_file_info['path'],
+                    'labscript_file': labscript_file,
+                    'active_groups': dict(active_groups),
+                    'compile_mode': compile_mode,
+                    'compiled': False,
+                    'frozen_globals': frozen,
+                    'sequence_attrs': run_file_info['sequence_attrs'],
+                    'run_no': run_file_info['run_no'],
+                    'n_runs': run_file_info['n_runs'],
+                }
+            )
+        self.ui.pushButton_abort.setEnabled(True)
+        return self.queue_manager.compile_shots(
+            queue_records, send_to_BLACS, send_to_runviewer
+        )
+
     def on_abort_clicked(self):
-        self.compilation_aborted.set()
+        """Stop the batches that have been submitted and not yet compiled.
+
+        The queue decides what that means and how long it lasts, because it is
+        the queue that knows which batches are still in hand. Nothing here
+        calls an abort off again: a submission is work asked for, not a reason
+        to stop stopping."""
+        self.queue_manager.abort()
 
     def on_restart_subprocess_clicked(self):
         # Kill and restart the compilation subprocess
@@ -4257,50 +4416,94 @@ class RunManager(LabscriptApplication):
 
         return expansion_types_changed
 
+    def get_sequence_attrs_to_extend(self, path):
+        """The sequence a batch added to the shot at ``path`` belongs to.
+
+        The queue row is asked first, and the shot file only when no row holds
+        that path or the row records no sequence. It has to be that way round
+        rather than simply reading the file: a queued shot is not written
+        until it is compiled, which under lazy compilation is not until BLACS
+        asks for it, so the shot a batch is added to often has no file yet. A
+        shot whose row has gone -- the one last sent to BLACS, after "empty
+        queue, then add shots to last sequence" has emptied the queue -- has
+        been written by then, and its file still says which sequence it is in.
+
+        Reading the file takes the cross-process lock on it, because
+        runmanager opens shot files through labscript_utils' h5_lock, and it
+        takes it on whichever thread asks. A submission asks on the GUI
+        thread, so a shot file something else is holding stops the window
+        until the lock comes free or times out. Asking the row first is
+        therefore also the difference between a dictionary this process
+        already has and a locked read of a file across the network."""
+        sequence_attrs = self.queue_manager.get_queued_sequence_attrs(path)
+        if sequence_attrs is not None:
+            return sequence_attrs
+        try:
+            return runmanager.get_sequence_attrs(path)
+        except FileNotFoundError as exc:
+            # Said plainly, because on_engage_clicked shows this sentence and
+            # only this sentence to whoever pressed Engage: an h5py message
+            # about a file that would not open does not tell them that the
+            # sequence they meant to add to is the thing that has gone.
+            raise Exception(
+                'Cannot add shots to the sequence of %s: it is not in the '
+                'queue, and its file is not there to say which sequence it '
+                'is in.' % path
+            ) from exc
+        except Exception as exc:
+            # A file that is there and cannot be read for it: held by another
+            # application, not readable by this user, not a shot file, or
+            # missing the attributes. Which one it is has to reach the
+            # operator, because only the first of those goes away by itself.
+            raise Exception(
+                'Cannot add shots to the sequence of %s: it is not in the '
+                'queue, and its file could not be read for it. %s: %s'
+                % (path, type(exc).__name__, exc)
+            ) from exc
+
     def make_h5_files(
         self,
         labscript_file,
         output_folder,
-        sequence_globals,
         shots,
-        shuffle,
+        sequence_globals=None,
         with_metadata=False,
         indexed_path_base=None,
         index_start=None,
+        sequence_attrs=None,
     ):
-        sequence_attrs, default_output_dir, filename_prefix = runmanager.new_sequence_details(
-            labscript_file, config=self.exp_config, increment_sequence_index=True
-        )
-        if output_folder == self.previous_default_output_folder:
-            # The user is using dthe efault output folder. Just in case the sequence
-            # index has been updated or the date has changed, use the default_output dir
-            # obtained from new_sequence_details, as it is race-free, whereas the one
-            # from the UI may be out of date since we only update it once a second.
-            output_folder = default_output_dir
-        self.check_output_folder_update()
-        run_output_folder = (
-            os.path.dirname(os.path.abspath(indexed_path_base))
-            if indexed_path_base is not None
-            else output_folder
-        )
+        """Make one shot file per entry of ``shots``, in the order given.
+
+        ``indexed_path_base`` is a shot whose sequence this batch is joining,
+        or None for a sequence of its own.
+
+        ``sequence_globals`` are written into the files, so they are needed
+        only when this writes them. With ``with_metadata`` it does not: it
+        hands back a record per shot for a caller to write later, from
+        whatever globals that caller is holding.
+        """
         if indexed_path_base is not None:
-            run_files = list(
-                runmanager.make_run_files(
-                    run_output_folder,
-                    sequence_globals,
-                    shots,
-                    sequence_attrs,
-                    filename_prefix,
-                    shuffle,
-                    return_infos=True,
-                    create_files=False,
-                )
-            )
+            # A batch given a shot to be numbered after is being added to that
+            # shot's sequence, so everything a new sequence would be given
+            # comes from that shot instead: the folder it is in, the filename
+            # stem it is one of, and the sequence it belongs to. None of it is
+            # asked of new_sequence_details, which takes a lock on shot storage
+            # and claims a sequence index -- and an index claimed for a
+            # sequence that is never started is one no sequence will ever
+            # carry. A caller that had to read the sequence earlier than this
+            # passes it in; see compile_and_queue_shots.
+            if sequence_attrs is None:
+                sequence_attrs = self.get_sequence_attrs_to_extend(indexed_path_base)
+            self.check_output_folder_update()
             run_files = self.reindex_run_file_infos(
-                run_files,
-                run_output_folder,
-                filename_prefix,
-                indexed_path_base=indexed_path_base,
+                [
+                    {
+                        'shot_globals': shot_globals,
+                        'sequence_attrs': sequence_attrs,
+                    }
+                    for shot_globals in shots
+                ],
+                indexed_path_base,
                 index_start=index_start,
             )
             if not with_metadata:
@@ -4315,13 +4518,27 @@ class RunManager(LabscriptApplication):
                     )
                 run_files = [run_file_info['path'] for run_file_info in run_files]
         else:
+            sequence_attrs, default_output_dir, filename_prefix = (
+                runmanager.new_sequence_details(
+                    labscript_file,
+                    config=self.exp_config,
+                    increment_sequence_index=True,
+                )
+            )
+            if output_folder == self.previous_default_output_folder:
+                # The user is using the default output folder. Just in case the
+                # sequence index has been updated or the date has changed, use the
+                # default_output dir obtained from new_sequence_details, as it is
+                # race-free, whereas the one from the UI may be out of date since we
+                # only update it once a second.
+                output_folder = default_output_dir
+            self.check_output_folder_update()
             run_files = runmanager.make_run_files(
-                run_output_folder,
+                output_folder,
                 sequence_globals,
                 shots,
                 sequence_attrs,
                 filename_prefix,
-                shuffle,
                 return_infos=with_metadata,
                 create_files=not with_metadata,
             )
@@ -4344,6 +4561,11 @@ class RunManager(LabscriptApplication):
             item['sequence_attrs'],
             item['run_no'],
             item['n_runs'],
+            # A record with no id is written without the attribute, which is
+            # how a shot nobody submitted is told apart from one that was.
+            # Every queue row has an id; a record that never became one may
+            # not.
+            shot_id=item.get('shot_id'),
         )
 
     def send_to_runviewer(self, run_file):
@@ -4363,16 +4585,16 @@ class RunManager(LabscriptApplication):
                                  creationflags=creationflags, stdout=None, stderr=None,
                                  close_fds=True)
             else:
-                # start_new_session does the setsid this used to fork to reach,
-                # and reaches it without running Python in a forked child.
-                # os.fork() here was unsafe and did not work: runmanager runs
-                # half a dozen threads, so the child got only this one, holding
-                # whatever locks the others held at the instant of the fork --
-                # including the allocator's, which subprocess needs. It
-                # deadlocked before starting anything, silently, and Python 3.12
-                # started warning about it. Worse, had Popen raised instead, the
-                # os._exit(0) below it would never have run and the child would
-                # have carried on as a second copy of runmanager.
+                # start_new_session reaches the setsid a fork would be used
+                # for, and reaches it without running Python in a forked child.
+                # os.fork() here is unsafe: runmanager runs half a dozen
+                # threads, so the child gets only this one, holding whatever
+                # locks the others hold at the instant of the fork -- including
+                # the allocator's, which subprocess needs. It deadlocks before
+                # starting anything, silently, and Python 3.12 warns about it.
+                # Worse, a Popen that raises in such a child skips the
+                # os._exit(0) that has to follow it, and the child carries on
+                # as a second copy of runmanager.
                 subprocess.Popen(
                     [sys.executable, '-m', 'runviewer'],
                     stdin=subprocess.DEVNULL,
@@ -4460,6 +4682,11 @@ class RunManager(LabscriptApplication):
                 start=start,
             )
             self._next_default_shot_index[run_file_base] = default_index + 1
+            # No shot_id, deliberately. A default shot is runmanager's own,
+            # produced to keep the apparatus busy, and it is written here --
+            # before it is a queue row and before it has an id. A file with no
+            # shot_id is visibly not a shot anybody submitted, which is the
+            # right answer for a caller matching results to what it asked for.
             runmanager.make_single_run_file(
                 run_file,
                 sequence_globals,
@@ -4510,9 +4737,9 @@ class RunManager(LabscriptApplication):
             # Report it where an operator will see it and answer normally.
             #
             # This covers applying the outcome as well as choosing the offer.
-            # It used to cover only the offer, which was the wrong half: by the
-            # time applying an outcome can raise, the row it retired is already
-            # gone, so the resend it provokes can never put the analysis
+            # Covering only the offer would be the wrong half: by the time
+            # applying an outcome can raise, the row it retired is already
+            # gone, so the resend it provokes could never put the analysis
             # submission back.
             self.output_box.output(
                 'Runmanager could not answer BLACS: %s\n' % str(exc), red=True
@@ -4962,6 +5189,189 @@ class RemoteServer(ZMQServer):
     @inmain_decorator()
     def handle_reset_shot_output_folder(self):
         app.on_reset_shot_output_folder_clicked(None)
+
+    def handle_get_empty_queue_policy(self):
+        """What runmanager does when the queue runs out.
+
+        Read-only, and not a GUI read: the policy lives in the queue
+        controller, which is safe to ask from any thread."""
+        return app.queue_manager.get_empty_queue_policy()
+
+    def handle_submit_shots(self, entries):
+        """Submit one shot per entry, each with the globals that entry names.
+
+        An entry is a dict of global name to value. The globals it names are
+        set in the window and left there, so that an operator watching can see
+        what is being run; globals no entry names are untouched, and keep
+        whatever the operator last gave them.
+
+        Returns one descriptor per entry -- shot_id, sequence_id, run_number
+        and path -- in the order submitted.
+
+        The window holds one entry's globals at a time, which is what the
+        operator sees and what that entry's shot is evaluated against. A
+        global another entry names but this one does not is put back to the
+        operator's own expression first, so that nothing an earlier entry
+        asked for reaches a later entry's shot -- a result recorded against
+        parameters that never ran is worse than no result. The window is left
+        holding the last entry submitted.
+
+        Every entry is evaluated before any shot is made, and the whole batch
+        is then made and submitted in one go. That is what makes it safe to
+        raise: until the last entry has been evaluated there is nothing in the
+        queue to take back, so a refusal leaves the queue as it found it and
+        there is no half-submitted batch whose shots the caller would never
+        hear about. It is also what tells the shots apart: a filename and a
+        run number are claimed by the batch being made, so entries submitted
+        one at a time would each find the same number free.
+
+        The globals of a refused batch are left set, at whichever entry the
+        refusal reached. Nothing is queued and nothing runs.
+
+        Within the batch the window is free between entries, so an operator
+        editing a global that no entry names can still change the experiment
+        partway through; that is no different from two consecutive Engages,
+        and holding the window for the length of a batch would be worse.
+        """
+        entries = [dict(entry) for entry in entries]
+        if not entries:
+            # A caller that produced no entries this round has asked for
+            # nothing, rather than asked wrongly. Nothing is made, so nothing
+            # claims a filename or a run number.
+            return []
+        named = set()
+        for entry in entries:
+            named.update(entry)
+        baseline = self._operator_expressions(named)
+        send_to_runviewer = self.handle_get_view_shots()
+        batch = []
+        for entry in entries:
+            restore = {
+                name: baseline[name] for name in sorted(named - set(entry))
+            }
+            if restore:
+                self.handle_set_globals(restore, raw=True)
+            self.handle_set_globals(entry)
+            # Setting a global asks the preparse thread to run again, and the
+            # preparse is what writes each global's expansion type and rebuilds
+            # the axes the shots are expanded along. Reading either while it is
+            # being rewritten is reading it half done -- see handle_engage,
+            # which waits for the same reason.
+            app.wait_until_preparse_complete()
+            if self.handle_error_in_globals():
+                raise ValueError(
+                    'Cannot submit %r: the globals it produces cannot be '
+                    'evaluated.' % entry
+                )
+            batch.append(self._shot_for_entry(entry))
+        # Added to the last sequence, which between one submission and the
+        # next is the shot last sent to BLACS: a caller that waits for each
+        # result before sending the next finds the queue empty every time, and
+        # a new sequence each time would leave a run of a hundred shots as a
+        # hundred sequences of one. On a runmanager that has run nothing there
+        # is no last sequence, and the batch starts one.
+        records = inmain(
+            app.compile_and_queue_shots,
+            SUBMISSION_MODE_ADD_SHOTS,
+            True,
+            send_to_runviewer,
+            batch,
+        )
+        return [
+            {
+                'shot_id': record['shot_id'],
+                'sequence_id': record['sequence_attrs']['sequence_id'],
+                'run_number': record['run_no'],
+                'path': record['path'],
+            }
+            for record in records
+        ]
+
+    def _operator_expressions(self, names):
+        """What the operator has these globals set to, before any entry is.
+
+        Read once, at the start, and put back around every entry that does not
+        name them. Without that the window ends up holding the union of every
+        entry's globals, and each shot is compiled with the values of the
+        entries before it as well as its own.
+
+        Expressions and not values: what the operator wrote may be in terms of
+        other globals, and a number frozen out of it stops following them.
+
+        A name no active group has is refused here rather than at the entry
+        that carries it, because the globals of a refused batch are left set
+        and this one can be refused before any of them are.
+        """
+        expressions = self.handle_get_default_globals(raw=True)
+        missing = sorted(set(names) - set(expressions))
+        if missing:
+            raise ValueError('Global %s not found in any active group' % missing[0])
+        return {
+            name: self._without_trailing_comment(expressions[name]) for name in names
+        }
+
+    @staticmethod
+    def _without_trailing_comment(expression):
+        """An expression without the comment the window keeps on the end of it.
+
+        Setting a global puts back whatever comment the expression it replaces
+        ended with, so an expression handed back with its own comment still
+        attached would return carrying two of them."""
+        comments = runmanager.find_comments(expression)
+        if comments and comments[-1][1] == len(expression):
+            return expression[: comments[-1][0]]
+        return expression
+
+    @inmain_decorator()
+    def _shot_for_entry(self, entry):
+        """The one shot the window now stands for, and what to freeze with it.
+
+        Both read here, while the window is holding this entry's globals and
+        nothing else's: the expressions a queue record freezes are the ones
+        standing in the window when its shot was evaluated, and a batch that
+        read them once at the end would carry the last entry's for every shot
+        in it.
+
+        Anything but one shot is refused. A global with a scan enabled ignores
+        the value just set for it, so this is not only the wrong number of
+        shots: it is a shot that did not use the parameters it was asked for,
+        and a cost attributed to parameters that never ran is worse than no
+        cost at all. Refused rather than mended, because the scan is the
+        operator's and turning it off under them is not this command's to do.
+        Refused here, too, where one shot per entry is first relied on, rather
+        than counted afterwards when the shots are already queued.
+        """
+        active_groups = app.get_active_groups(interactive=False)
+        _, shots, _, _, _ = app.parse_globals(active_groups)
+        if len(shots) != 1:
+            raise ValueError(
+                'Cannot submit %r as one shot: the globals as they stand '
+                'produce %d. Expanded by: %s.'
+                % (entry, len(shots), ', '.join(self._expanding_globals()) or 'none')
+            )
+        globals_details = runmanager.get_globals_details(active_groups)
+        return shots[0], runmanager.get_frozen_globals(globals_details, shots[0])
+
+    def _expanding_globals(self):
+        """The globals that turn one set of values into more than one shot.
+
+        Copied before it is read. The dictionary belongs to the preparse
+        thread, which assigns a guess into it per global, so a read that steps
+        through it raises as soon as a guess arrives partway -- and replaces
+        the refusal a caller can act on with an error about a dictionary."""
+        return sorted(
+            name
+            for name, expansion in dict(app.previous_expansions).items()
+            if expansion
+        )
+
+    def handle_shot_status(self, shot_ids):
+        """Whether each of these shots can still produce a result.
+
+        Read-only and batched: a caller waiting on many shots asks once. Like
+        the policy above, the queue controller is safe to ask from any thread,
+        so this is not a GUI read."""
+        return app.queue_manager.get_shot_statuses(list(shot_ids))
 
     def handle_queue_exchange(self, outcome=None, request_shot=True):
         return app.queue_exchange(outcome, bool(request_shot))

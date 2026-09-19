@@ -600,6 +600,46 @@ def expand_globals(sequence_globals, evaled_globals, expansion_config = None, re
     else:
         return shots
 
+
+#: The attributes that say which sequence a shot belongs to. Written into
+#: every shot file by make_single_run_file, and read back out of one by
+#: get_sequence_attrs when a later batch is added to an existing sequence.
+#: new_sequence_details produces exactly these.
+SEQUENCE_ATTRS = (
+    'script_basename',
+    'sequence_date',
+    'sequence_index',
+    'sequence_id',
+)
+
+
+def _plain_value(value):
+    """The plain Python value an h5 attribute stands for.
+
+    h5py answers with numpy scalars, which are equal to the numbers they stand
+    for without being them, and the difference tells wherever a value has to
+    be one rather than merely compare equal to one: a TOML app config holds
+    strings, numbers and booleans, so a queue record carrying a numpy integer
+    cannot be saved at all.
+
+    A value that is not a numpy scalar is returned untouched. This says what
+    one scalar is and makes no claim about anything else."""
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def get_sequence_attrs(filename):
+    """Return the sequence attributes of an existing shot file.
+
+    The inverse of what make_single_run_file writes, for adding shots to the
+    sequence a shot already on disk belongs to. The values come back as the
+    plain ones that were written: they are written again into every shot added
+    to the sequence and kept in those shots' queue records, which are saved."""
+    with h5py.File(filename, 'r') as f:
+        return {name: _plain_value(f.attrs[name]) for name in SEQUENCE_ATTRS}
+
+
 def next_sequence_index(shot_basedir, dt, increment=True):
     """Return the next sequence index for sequences in the given base directory (i.e.
     <experiment_shot_storage>/<script_basename>) and the date of the given datetime
@@ -754,13 +794,19 @@ def make_run_files(
     new_sequence_details(), so preferably these should be used.
 
     Shuffle will randomise the order that the run files are generated in with respect to
-    which element of shots they come from. This function returns a *generator*. The run
-    files are not actually created until you loop over this generator (which gives you
-    the filepaths). This is useful for not having to clean up as many unused files in
-    the event of failed compilation of labscripts. If you want all the run files to be
-    created at some point, simply convert the returned generator to a list. The
-    filenames the run files are given is simply the sequence_id with increasing integers
-    appended."""
+    which element of shots they come from. Shuffled or not, what is yielded comes in run
+    number order rather than in the order of shots, and each yielded item describes the
+    shot that went into it: with return_infos the info carries that shot's globals
+    beside its path and run number, and without them the file at the yielded path holds
+    them. So a caller that shuffles needs no separate note of where each element of
+    shots ended up.
+
+    This function returns a *generator*. The run files are not actually created until
+    you loop over this generator (which gives you the filepaths). This is useful for not
+    having to clean up as many unused files in the event of failed compilation of
+    labscripts. If you want all the run files to be created at some point, simply
+    convert the returned generator to a list. The filenames the run files are given is
+    simply the sequence_id with increasing integers appended."""
     indexed_shots = list(enumerate(shots))
     nruns = len(indexed_shots)
     ndigits = int(np.ceil(np.log10(nruns)))
@@ -788,19 +834,35 @@ def make_run_files(
             yield runfilename
 
 
-def make_single_run_file(filename, sequenceglobals, runglobals, sequence_attrs, run_no, n_runs):
+def make_single_run_file(
+    filename, sequenceglobals, runglobals, sequence_attrs, run_no, n_runs, shot_id=None
+):
     """Does what it says. runglobals is a dict of this run's globals, the format being
     the same as that of one element of the list returned by expand_globals.
     sequence_globals is a nested dictionary of the type returned by get_globals.
     sequence_attrs is a dict of attributes pertaining to this sequence, as returned by
-    new_sequence_details. run_no and n_runs must be provided, if this run file is part
-    of a sequence, then they should reflect how many run files are being generated in
-    this sequence, all of which must have identical sequence_attrs."""
+    new_sequence_details, and is identical for every run of one sequence.
+
+    run_no is this run's number, which is unique within its sequence. n_runs is how far
+    that sequence reaches as of this file: the number of runs it has once this one is
+    written. For a sequence compiled in one go that is the number of runs being
+    generated, and every file of it carries the same value. For a sequence that is added
+    to afterwards it is not: the shots written earlier keep the smaller number they were
+    written with, since they may already have run and are not rewritten. So n_runs read
+    off one shot is not the size of its sequence, and the shots of one sequence need not
+    agree on it.
+
+    shot_id, if given, is the identifier of the queue row this shot was written for,
+    so that a result coming back can be matched to the shot that was submitted. A file
+    written without one carries no such attribute at all, which is how a shot that
+    nobody submitted is told apart from one that was."""
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     with h5py.File(filename, 'w') as f:
         f.attrs.update(sequence_attrs)
         f.attrs['run number'] = run_no
         f.attrs['n_runs'] = n_runs
+        if shot_id is not None:
+            f.attrs['shot_id'] = shot_id
         f.create_group('globals')
         if sequenceglobals is not None:
             for groupname, groupvars in sequenceglobals.items():

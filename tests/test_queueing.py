@@ -12,15 +12,25 @@ import time
 import types
 import unittest
 
+from unittest import mock
+
+# h5_lock must be imported before h5py is, by anything in the process, and
+# it is what runmanager imports h5py through. Naming it here rather than
+# relying on runmanager below, so that this file can be run on its own.
+import labscript_utils.h5_lock  # noqa: F401
+import h5py
+import numpy as np
+import runmanager
 from labscript_utils.qtwidgets.shotqueue import RULE_BELOW_ROLE
 from qtutils.qt.QtCore import Qt
 from qtutils.qt.QtWidgets import QApplication
 
 from labscript_utils import shared_drive
+from labscript_utils.labconfig import load_appconfig, save_appconfig
 # fixtures stubs the splash and does the guarded import of the
 # application, once, for every test module. Importing
 # runmanager.__main__ here instead would show the startup banner.
-from fixtures import RunManager
+from fixtures import RunManager, main_module
 from runmanager.queueing import (
     COMPILE_MODE_EAGER,
     COMPILE_MODE_LAZY,
@@ -29,7 +39,9 @@ from runmanager.queueing import (
     PROVIDER_NONE,
     PROVIDER_SHOT,
     ROW_BACKGROUNDS,
+    SUBMITTED_SHOT_STATE,
     TINTED_ROW_FOREGROUND,
+    UNKNOWN_SHOT_STATE,
     QueueController,
     QueueManager,
     RunmanagerQueueWidget,
@@ -122,6 +134,68 @@ class QueueIdentityTests(unittest.TestCase):
         )
 
 
+class SavedQueueValueTests(unittest.TestCase):
+    """A queue can be saved whatever its shots' values came from.
+
+    The queue is written into the app config, which holds strings, numbers and
+    booleans and nothing else. A record carrying anything else stops every
+    save from then on, the one offered on the way out included -- and that one
+    failing is a whole queue lost rather than a setting.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.attrs = {
+            'script_basename': 'experiment',
+            'sequence_date': '2026-09-18',
+            'sequence_index': 11,
+            'sequence_id': '20260918T101112_experiment',
+        }
+
+    def save(self, controller):
+        """Save the queue the way the application saves it, and read it back."""
+        path = os.path.join(self.directory, 'runmanager.toml')
+        save_appconfig(
+            path, {'runmanager_state': {'queue_state': controller.export_state()}}
+        )
+        return load_appconfig(path)['runmanager_state']['queue_state']
+
+    def test_a_queue_whose_sequence_came_off_a_shot_file_can_be_saved(self):
+        # The ordinary path between one submission and the next: the queue is
+        # empty, so the sequence the batch is added to is read back out of the
+        # shot file rather than off a row.
+        shot = os.path.join(self.directory, 'experiment_00.h5')
+        runmanager.make_single_run_file(shot, None, {}, self.attrs, 0, 1)
+        controller = QueueController()
+        controller.enqueue(
+            [queued_shot(shot, sequence_attrs=runmanager.get_sequence_attrs(shot))]
+        )
+
+        saved = self.save(controller)
+
+        self.assertEqual(saved['items'][0]['sequence_attrs'], self.attrs)
+
+    def test_a_record_is_saveable_whatever_its_sequence_arrived_as(self):
+        # A record is normalised on the way into the queue -- its paths, its
+        # names, its run numbers -- and that is what makes a queue saveable.
+        # Its sequence attributes are part of the record and are no exception,
+        # so the queue does not have to know where a caller read them.
+        controller = QueueController()
+        controller.enqueue(
+            [
+                queued_shot(
+                    os.path.join(self.directory, 'experiment_00.h5'),
+                    sequence_attrs=dict(self.attrs, sequence_index=np.int64(11)),
+                )
+            ]
+        )
+
+        saved = self.save(controller)
+
+        self.assertEqual(saved['items'][0]['sequence_attrs'], self.attrs)
+
+
 class QueuePauseTests(unittest.TestCase):
     """Pause is this runmanager's policy on its own queue.
 
@@ -142,8 +216,9 @@ class QueuePauseTests(unittest.TestCase):
         self.assertTrue(restored.get_queue_state()['paused'])
 
     def test_a_saved_queue_with_no_pause_state_loads_unpaused(self):
-        # An older configuration was written before there was a pause control,
-        # and must not open with the queue silently stopped.
+        # A configuration carrying no pause state -- one saved by a runmanager
+        # without the pause control -- must not open with the queue silently
+        # stopped.
         controller = QueueController()
         controller.set_paused(True)
         controller.restore_state({'items': [queued_shot('/tmp/shot_a.h5')]})
@@ -429,7 +504,22 @@ class FakeRunManager(object):
     offer_shot = RunManager.offer_shot
     get_queue_append_filepath = RunManager.get_queue_append_filepath
     get_last_sent_from_queue_filepath = RunManager.get_last_sent_from_queue_filepath
+    get_submission_anchor = RunManager.get_submission_anchor
+    can_use_alternate_submission_mode = RunManager.can_use_alternate_submission_mode
     reindex_run_file_infos = RunManager.reindex_run_file_infos
+    make_h5_files = RunManager.make_h5_files
+    prepare_queue_shot = RunManager.prepare_queue_shot
+    get_sequence_attrs_to_extend = RunManager.get_sequence_attrs_to_extend
+
+    # make_h5_files reads these. The output folder it would keep up to date is
+    # a line edit and a labscript file it does not have, and choosing the
+    # folder is not what any of this is about: the folder a batch added to a
+    # sequence is written to comes from the shot it is added to.
+    exp_config = None
+    previous_default_output_folder = None
+
+    def check_output_folder_update(self):
+        pass
 
     def __init__(self, default_shot_file=None, compiles=True):
         self.output_box = FakeOutputBox()
@@ -443,7 +533,6 @@ class FakeRunManager(object):
             self.compile_run_file,
             lambda path: None,
             self.output_box.output,
-            threading.Event(),
             lambda enabled: None,
         )
         self.analysis_submission = FakeAnalysisSubmission()
@@ -451,8 +540,10 @@ class FakeRunManager(object):
         self.default_shots_taken = 0
         # Read only when a compile actually starts, and read on this thread
         # before the compile thread is started, so no event loop is needed:
+        self.run_shots = True
         self.ui = types.SimpleNamespace(
-            checkBox_view_shots=types.SimpleNamespace(isChecked=lambda: False)
+            checkBox_view_shots=types.SimpleNamespace(isChecked=lambda: False),
+            checkBox_run_shots=types.SimpleNamespace(isChecked=lambda: self.run_shots),
         )
 
     def compile_run_file(self, labscript_file, path):
@@ -696,9 +787,9 @@ class DefaultShotTests(unittest.TestCase):
 class LazyCompileFailureTests(unittest.TestCase):
     """A queued shot that cannot be compiled must not just disappear.
 
-    It used to be dropped. That is indistinguishable from the queue draining
-    normally, which is exactly what one broken labscript file looked like: rows
-    vanishing one per request with no shot ever running and nothing in the
+    Dropping it would be indistinguishable from the queue draining normally,
+    which is what one broken labscript file would then look like: rows
+    vanishing one per request, with no shot ever running and nothing in the
     queue to say why. A shot that never compiled did not complete, so the row
     stays where it is and goes red with the reason, like any other failure.
 
@@ -806,15 +897,16 @@ class LazyCompileFailureTests(unittest.TestCase):
 class CompileFailureIsNotAHandoverTests(unittest.TestCase):
     """A shot that never compiled has not been given to BLACS.
 
-    Both kinds of failure were recorded with the same word, and sent_to_blacs
-    read any state at all as proof of a handover. So a compile failure -- a row
-    that never left runmanager -- was drawn in the reserved first row, the one
-    that means "the shot BLACS was given"; a replacement submission refused to
-    clear it; and the operator was told BLACS was running a file it had never
-    seen.
+    Recording both kinds of failure with the same word, so that sent_to_blacs
+    read any state at all as proof of a handover, would draw a compile failure
+    -- a row that never left runmanager -- in the reserved first row, the one
+    that means "the shot BLACS was given"; a replacement submission would
+    refuse to clear it; and the operator would be told BLACS was running a file
+    it had never seen.
 
     What the operator chose stays: the row is still red, still at the head, and
-    still a dead end until it is deleted. Only the claim that BLACS has it goes.
+    still a dead end until it is deleted. What it does not carry is any claim
+    that BLACS has it.
     """
 
     def failed_compile_queue(self):
@@ -951,14 +1043,14 @@ class KeptRowReasonTests(unittest.TestCase):
 class CompiledFlagOwnershipTests(unittest.TestCase):
     """The controller owns ``compiled`` for a row that is already in the queue.
 
-    The background compile used to write it a second time, outside the lock,
-    before handing the outcome to the controller. In that gap an exchange
-    arriving on the server thread saw a row ready to hand over, took it, and
-    marked it running -- and the compile then finished and cleared the state it
-    had just been given. The row lost the protection that state carries, left
-    the reserved display row, and the next request offered the same shot again
-    as a fresh offer, with nothing to say it had been offered before. The same
-    file ran twice on hardware.
+    A background compile writing it a second time, outside the lock, before
+    handing the outcome to the controller would leave a gap. An exchange
+    arriving on the server thread inside it sees a row ready to hand over,
+    takes it, and marks it running -- and the compile then finishes and clears
+    the state it has just been given. The row loses the protection that state
+    carries, leaves the reserved display row, and the next request offers the
+    same shot again as a fresh offer, with nothing to say it has been offered
+    before. The same file runs twice on hardware.
 
     These drive the two steps by hand rather than through the compile thread,
     because what is pinned here is the state between them, and a test that has
@@ -1023,6 +1115,456 @@ class CompiledFlagOwnershipTests(unittest.TestCase):
             offered, 'an eagerly compiled shot is ready the moment it is queued'
         )
         self.assertEqual(offered['path'], '/tmp/eager.h5')
+
+
+class SubmittedShotTests(unittest.TestCase):
+    """A shot runmanager has taken on but has no row for yet.
+
+    Submitting hands a batch to the worker thread; the row appears when the
+    worker reaches that record, which under eager compilation is a whole
+    labscript compile away -- seconds, or minutes. A caller that submits and
+    asks straight away is asking about that gap, and being told the queue has
+    never heard of the shot means that nothing further will happen to it,
+    which is an invitation to submit the same work again.
+
+    The other half is as important: every way a record can be abandoned has to
+    let go of it again. An id runmanager keeps calling pending, for a shot
+    that will never run, strands the caller just as thoroughly.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.compiles = True
+        self.compiled = []
+        # A compile the test can stop partway, to ask what is true while the
+        # worker is in the middle of a batch. Held compiles are released
+        # before the worker is shut down, so nothing is left waiting.
+        self.compiling = threading.Event()
+        self.release = threading.Event()
+        self.release.set()
+        self.hold_from = 1
+        # The application's Abort button, which goes out when the last batch
+        # is finished with. Waiting on it rather than on a sleep: it is set
+        # after the worker has let go of the batch, so what this test asks
+        # afterwards is what the worker left behind.
+        self.batch_finished = threading.Event()
+        self.manager = QueueManager(
+            lambda item: None,
+            self.compile_run_file,
+            lambda path: None,
+            lambda *args, **kwargs: None,
+            self.note_abort_enabled,
+        )
+        self.addCleanup(self.manager.shutdown)
+        self.addCleanup(self.release.set)
+
+    def note_abort_enabled(self, enabled):
+        if not enabled:
+            self.batch_finished.set()
+
+    def compile_run_file(self, labscript_file, path):
+        self.compiled.append(path)
+        self.compiling.set()
+        if len(self.compiled) >= self.hold_from:
+            self.release.wait(5)
+        if isinstance(self.compiles, Exception):
+            raise self.compiles
+        return self.compiles
+
+    def submit(self, count=1, send_to_BLACS=True):
+        records = self.manager.compile_shots(
+            [
+                {
+                    'path': os.path.join(self.directory, 'shot_%d.h5' % n),
+                    'labscript_file': os.path.join(self.directory, 'e.py'),
+                    'compile_mode': COMPILE_MODE_EAGER,
+                    'compiled': False,
+                }
+                for n in range(count)
+            ],
+            send_to_BLACS,
+            False,
+        )
+        return [record['shot_id'] for record in records]
+
+    def status(self, shot_ids):
+        return self.manager.get_shot_statuses(shot_ids)
+
+    def wait_until(self, predicate):
+        for _ in range(500):
+            if predicate():
+                return True
+            time.sleep(0.01)
+        return False
+
+    def test_a_shot_just_submitted_is_pending_before_it_has_a_row(self):
+        self.release.clear()
+        [shot_id] = self.submit()
+        self.assertTrue(
+            self.wait_until(self.compiling.is_set), 'the worker has the batch'
+        )
+
+        self.assertEqual(self.manager.get_queue_paths(), [], 'and no row yet')
+        self.assertEqual(
+            self.status([shot_id])[shot_id],
+            {'pending': True, 'state': SUBMITTED_SHOT_STATE},
+            'the shot was taken on when it was submitted, and a caller told '
+            'its id is owed an answer about it from that moment',
+        )
+
+    def test_the_row_answers_for_the_shot_once_there_is_one(self):
+        [shot_id] = self.submit()
+        self.assertTrue(self.wait_until(lambda: self.manager.get_queue_paths()))
+
+        self.assertEqual(
+            self.status([shot_id])[shot_id], {'pending': True, 'state': ''}
+        )
+
+    def test_a_shot_that_completed_before_its_batch_did_is_finished_with(self):
+        # The shots ahead of a long batch are queued, offered and completed
+        # while the rest of it is still compiling. A shot that has produced
+        # its result is finished with, whatever the batch it arrived in is
+        # still doing.
+        self.hold_from = 2
+        self.release.clear()
+        first, _second = self.submit(count=2)
+        self.assertTrue(self.wait_until(lambda: self.manager.get_queue_paths()))
+        offered = self.manager.offer_next()
+        self.manager.shot_finished(offered['shot_id'], 'completed')
+
+        self.assertEqual(
+            self.status([first])[first],
+            {'pending': False, 'state': UNKNOWN_SHOT_STATE},
+        )
+
+    def test_an_aborted_batch_is_let_go_of(self):
+        # An abort is about work in hand, and covers the batches behind the
+        # one it interrupts as well, so a batch submitted into a queue that is
+        # already aborting is stopped before its first record: no row is ever
+        # made for any of them and none of them will run.
+        self.release.clear()
+        self.submit()
+        self.assertTrue(
+            self.wait_until(self.compiling.is_set), 'the worker has a batch'
+        )
+        self.manager.abort()
+
+        shot_ids = self.submit(count=3)
+        self.release.set()
+
+        self.assertTrue(self.batch_finished.wait(5))
+        self.assertEqual(
+            self.status(shot_ids),
+            {
+                shot_id: {'pending': False, 'state': UNKNOWN_SHOT_STATE}
+                for shot_id in shot_ids
+            },
+        )
+
+    def test_a_batch_stopped_by_a_shot_that_would_not_compile_is_let_go_of(self):
+        # A failed compile stops the batch where it stands, so neither that
+        # record nor the ones behind it reach the queue.
+        self.compiles = False
+        shot_ids = self.submit(count=3)
+
+        self.assertTrue(self.batch_finished.wait(5))
+        self.assertEqual(self.manager.get_queue_paths(), [], 'nothing queued')
+        self.assertEqual(
+            self.status(shot_ids),
+            {
+                shot_id: {'pending': False, 'state': UNKNOWN_SHOT_STATE}
+                for shot_id in shot_ids
+            },
+        )
+
+    def test_a_batch_that_raised_partway_through_is_let_go_of(self):
+        # A compile that cannot even start raises, which leaves the batch by a
+        # third way again. The records behind it are no more queued than the
+        # ones an abort left.
+        self.compiles = RuntimeError('the compiler could not be reached')
+        shot_ids = self.submit(count=2)
+
+        self.assertTrue(self.batch_finished.wait(5))
+        self.assertEqual(
+            self.status(shot_ids),
+            {
+                shot_id: {'pending': False, 'state': UNKNOWN_SHOT_STATE}
+                for shot_id in shot_ids
+            },
+        )
+
+    def test_a_batch_that_is_not_going_to_the_queue_is_not_taken_on(self):
+        # Compiling a batch for a look at it in runviewer queues nothing, so
+        # there is no queued shot for the queue to answer about.
+        self.release.clear()
+        [shot_id] = self.submit(send_to_BLACS=False)
+        self.assertTrue(
+            self.wait_until(self.compiling.is_set), 'the worker has the batch'
+        )
+
+        self.assertEqual(
+            self.status([shot_id])[shot_id],
+            {'pending': False, 'state': UNKNOWN_SHOT_STATE},
+        )
+
+
+class ContinuingSequenceAnchorTests(unittest.TestCase):
+    """What a remote submission carries on from.
+
+    A caller that submits a shot, waits for its result and submits the next
+    finds the queue empty every time it asks. If an empty queue meant a new
+    sequence, a run of a hundred such submissions would be a hundred sequences
+    of one shot, which is the opposite of what a sequence is for.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.app = FakeRunManager()
+        self.addCleanup(self.app.queue_manager.shutdown)
+
+    def enqueue(self, name):
+        path = os.path.join(self.directory, name)
+        open(path, 'w').close()
+        self.app.queue_manager.enqueue([queued_shot(path)])
+        return path
+
+    def test_a_queue_with_work_in_it_is_what_is_continued(self):
+        # BLACS running the first shot while the rest wait: the shot it was
+        # sent is not the end of the sequence, and numbering the next batch
+        # after that one would write it over the shots still waiting.
+        sent = self.enqueue('experiment_00.h5')
+        waiting = self.enqueue('experiment_01.h5')
+        self.app.offer_shot()
+
+        self.assertEqual(
+            self.app.get_last_sent_from_queue_filepath(),
+            sent,
+            'BLACS has the first shot',
+        )
+        self.assertEqual(
+            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
+            waiting,
+            'and the queue still ends where it ends',
+        )
+
+    def test_an_empty_queue_carries_on_from_the_shot_blacs_was_sent(self):
+        sent = self.enqueue('experiment_00.h5')
+        self.app.offer_shot()
+        self.app.queue_manager.shot_finished(
+            self.app.queue_manager.controller._items[0]['shot_id'], 'completed'
+        )
+
+        self.assertEqual(
+            self.app.queue_manager.get_queue_paths(), [], 'the queue is empty'
+        )
+        self.assertEqual(
+            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
+            sent,
+            'the shot that just ran is what the next submission continues',
+        )
+
+    def test_a_runmanager_that_has_sent_nothing_has_nothing_to_continue(self):
+        self.assertIsNone(
+            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
+            'and a batch with nothing to be numbered after starts a sequence',
+        )
+
+    def run_a_shot_and_let_blacs_ask_again(self, app, default_shot=None):
+        """Submit one shot, run it to completion, and let BLACS ask for more.
+
+        Which is the state a caller that waits for each result finds: its shot
+        has left the queue, and BLACS has already asked for the next one.
+
+        ``default_shot`` is the file the next default shot is made from.
+        Runmanager discards the one it was holding as soon as the queue takes
+        over, and prepares another off-thread once the queue empties again, so
+        it is put back here to stand for the one that would then be ready.
+        Without it the request finds nothing to offer and no default shot is
+        made, which is the other policy's behaviour and not this one's.
+        """
+        path = os.path.join(self.directory, 'experiment_00.h5')
+        open(path, 'w').close()
+        app.queue_manager.enqueue([queued_shot(path)])
+        offered = app.offer_shot()
+        app.queue_exchange(
+            outcome={
+                'shot_id': offered['shot_id'],
+                'status': 'completed',
+                'path': offered['path'],
+            },
+            request_shot=False,
+        )
+        app.default_shot_file = default_shot
+        return app.offer_shot()
+
+    def test_a_default_shot_in_the_gap_does_not_become_what_is_continued(self):
+        # With the default-shot policy on -- which is the arrangement a remote
+        # caller needs, since under the other one nothing runs between
+        # submissions -- the gaps are filled by shots runmanager made itself.
+        # Those belong to no sequence and live in the daily default folder, so
+        # continuing from one would take the next submission with it.
+        labscript_file = os.path.join(self.directory, 'default.py')
+        open(labscript_file, 'w').close()
+        default_shot = os.path.join(self.directory, 'default_shot_0.h5')
+        open(default_shot, 'w').close()
+        app = FakeRunManager(default_shot_file=default_shot)
+        self.addCleanup(app.queue_manager.shutdown)
+        app.queue_manager.set_empty_queue_policy(EMPTY_QUEUE_DEFAULT_LABSCRIPT)
+        app.queue_manager.set_default_labscript_file(labscript_file)
+
+        submitted = os.path.join(self.directory, 'experiment_00.h5')
+        filler = self.run_a_shot_and_let_blacs_ask_again(app, default_shot=default_shot)
+
+        self.assertEqual(
+            filler['path'],
+            default_shot,
+            'the gap was filled by a shot runmanager made itself, which is '
+            'what BLACS is running while the caller works out what to send',
+        )
+        self.assertEqual(
+            app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
+            submitted,
+            'and the sequence still carries on from the submitted shot',
+        )
+
+    def test_nothing_is_continued_once_blacs_has_found_the_queue_empty(self):
+        # The other policy, and the reason a remote caller is told to refuse
+        # it: with nothing to offer, runmanager lets go of the shot it last
+        # sent, so the next submission has no sequence to join and starts one.
+        # A run of submissions under this policy is a sequence per submission.
+        submitted = os.path.join(self.directory, 'experiment_00.h5')
+        filler = self.run_a_shot_and_let_blacs_ask_again(self.app)
+
+        self.assertEqual(filler['state'], PROVIDER_NONE, 'nothing filled the gap')
+        self.assertIsNone(
+            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
+            'and the shot that ran is no longer offered as the anchor',
+        )
+        self.assertTrue(os.path.exists(submitted))
+
+
+class ShotIdBeforeCompileTests(unittest.TestCase):
+    """A shot has its identifier before anything writes its file.
+
+    The eager path compiles a record before it is enqueued, so an identifier
+    assigned by enqueue would come too late: a file written on that path would
+    have been written before its shot had an id to put in it. It is settled at
+    the compile instead. What the id is does not change -- enqueue keeps
+    whatever a record arrives with -- so what is pinned here is when it is
+    decided, not what it is.
+    """
+
+    def test_a_record_is_compiled_with_the_id_its_row_will_have(self):
+        app = FakeRunManager()
+        self.addCleanup(app.queue_manager.shutdown)
+        prepared = []
+        app.queue_manager.prepare_run_file_callback = lambda item: prepared.append(
+            dict(item)
+        )
+
+        app.queue_manager.compile_shots(
+            [
+                {
+                    'path': '/tmp/eager.h5',
+                    'labscript_file': '/tmp/e.py',
+                    'compile_mode': COMPILE_MODE_EAGER,
+                    'compiled': False,
+                    'frozen_globals': {},
+                }
+            ],
+            True,
+            False,
+        )
+        for _ in range(200):
+            if app.queue_manager.controller._items:
+                break
+            time.sleep(0.01)
+
+        self.assertTrue(prepared, 'the record reached the step that writes its file')
+        self.assertTrue(
+            prepared[0].get('shot_id'),
+            'and had its identifier by then, which is what a file can carry',
+        )
+        self.assertEqual(
+            prepared[0]['shot_id'],
+            app.queue_manager.controller._items[0]['shot_id'],
+            'the id written into the file is the id of the row in the queue',
+        )
+
+    def test_a_queued_shot_is_written_with_its_id(self):
+        # What the id is for: a shot carries the id of the queue row it was
+        # written for, so that a result coming back can be matched to the
+        # shot that was submitted.
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        app = FakeRunManager()
+        self.addCleanup(app.queue_manager.shutdown)
+        path = os.path.join(directory, 'experiment_00.h5')
+        item = {
+            'path': path,
+            'active_groups': {'group': os.path.join(directory, 'globals.h5')},
+            'frozen_globals': {},
+            'sequence_attrs': {
+                'script_basename': 'experiment',
+                'sequence_date': '2026-09-18',
+                'sequence_index': 11,
+                'sequence_id': '20260918T101112_experiment',
+            },
+            'run_no': 0,
+            'n_runs': 1,
+            'shot_id': 'the-id',
+        }
+
+        # Evaluating globals is a globals file on disk and a compiler
+        # subprocess, and is not what writing the id turns on.
+        with mock.patch.object(
+            runmanager, 'get_queue_compile_globals', lambda groups, frozen: ({}, {})
+        ):
+            app.prepare_queue_shot(item)
+
+        with h5py.File(path, 'r') as f:
+            self.assertEqual(f.attrs['shot_id'], 'the-id')
+
+    def test_a_shot_written_without_an_id_carries_none(self):
+        # Runmanager's own default shots are written before they are queue rows
+        # and have no id. A file with no shot_id is visibly not a submitted
+        # shot, which is the answer wanted there, so the attribute is absent
+        # rather than empty.
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, 'default_0.h5')
+
+        runmanager.make_single_run_file(path, None, {}, {}, 0, 1)
+
+        with h5py.File(path, 'r') as f:
+            self.assertNotIn('shot_id', f.attrs)
+
+    def test_an_id_a_record_arrives_with_is_the_one_it_keeps(self):
+        app = FakeRunManager()
+        self.addCleanup(app.queue_manager.shutdown)
+
+        queued = app.queue_manager.compile_shots(
+            [
+                {
+                    'path': '/tmp/eager.h5',
+                    'labscript_file': '/tmp/e.py',
+                    'compile_mode': COMPILE_MODE_EAGER,
+                    'compiled': False,
+                    'shot_id': 'given',
+                }
+            ],
+            True,
+            False,
+        )
+
+        self.assertEqual(
+            [record['shot_id'] for record in queued],
+            ['given'],
+            'the caller is told the ids it submitted under, and an id it chose '
+            'itself is not replaced',
+        )
 
 
 class QueueEditingTests(unittest.TestCase):
@@ -1236,11 +1778,7 @@ class QueueEditingTests(unittest.TestCase):
 
         anchor = self.app.get_last_sent_from_queue_filepath()
         replacements = self.app.reindex_run_file_infos(
-            [{}, {}],
-            self.directory,
-            'sequence',
-            indexed_path_base=anchor,
-            index_start=0,
+            [{}, {}], anchor, index_start=0
         )
 
         self.assertEqual(anchor, running, 'the sequence added to is the running shot')
@@ -1612,6 +2150,19 @@ class CancelledShotTests(unittest.TestCase):
             'it is proof nobody was running it, which is when its file is free',
         )
 
+    def test_the_queue_itself_will_not_hand_a_cancelled_row_over(self):
+        # "Never offered again" is the queue's own refusal, not something that
+        # holds only because the pass that frees the file gets to the row
+        # first. Ask the queue for a head that is still cancelled and it
+        # declines, which is also what makes the answer given about the shots
+        # behind it -- waiting their turn, not waiting on anybody -- true.
+        controller = QueueController()
+        controller.enqueue([queued_shot('/tmp/X.h5'), queued_shot('/tmp/Y.h5')])
+        offered = controller.offer_next()
+        controller.delete_rows([offered['shot_id']])
+
+        self.assertIsNone(controller.offer_next())
+
     def test_a_completed_outcome_still_reaches_analysis(self):
         app, shot_id = self.queue_with_a_shot_at_blacs()
         app.queue_manager.delete_rows([shot_id])
@@ -1677,11 +2228,11 @@ class OutcomeWithNoRowTests(unittest.TestCase):
     in its queue under that id.
 
     The queue is left alone -- there is nothing there to change -- but the shot
-    ran and wrote data, so the completion is passed on. It used to be dropped,
-    on the grounds that a resent outcome for a row already retired would be
-    reported twice. That was runmanager deciding what the far end could cope
-    with, which is not its to decide: reporting a completion is its part, and
-    one it has withheld is one nothing downstream can ask for later.
+    ran and wrote data, so the completion is passed on. Dropping it, on the
+    grounds that a resent outcome for a row already retired would be reported
+    twice, would be runmanager deciding what the far end can cope with, which
+    is not its to decide: reporting a completion is its part, and one it
+    withholds is one nothing downstream can ask for later.
     """
 
     def app(self):
@@ -1747,12 +2298,12 @@ class QueueBookkeepingUnderSubmissionTests(unittest.TestCase):
     """Two things the queue records that a concurrent submission can spoil.
 
     The anchor that "add shots to last sequence" writes alongside is the last
-    shot actually sent to BLACS. It used to be cleared only when the queue was
-    genuinely empty. A later condition made the same branch reachable with work
-    still queued -- a head that cannot be offered, because it was rejected or
-    its compile failed -- and the clearing came along with it, so the next
-    replacement batch was written beside the last shot *queued* instead, which
-    is a different sequence folder as soon as two batches have been engaged.
+    shot actually sent to BLACS, and it is cleared only when the queue is
+    genuinely empty. Clearing it on any branch reachable with work still queued
+    -- a head that cannot be offered, because it was rejected or its compile
+    failed -- would write the next replacement batch beside the last shot
+    *queued* instead, which is a different sequence folder as soon as two
+    batches have been engaged.
 
     And the default shot is made because the queue is empty, on a different
     thread from the one that fills it. A batch landing in between leaves the
@@ -2007,11 +2558,10 @@ class SentToBlacsRowTests(unittest.TestCase):
         )
 
     def test_the_running_row_can_be_selected_and_says_what_delete_does(self):
-        # Delete used to be refused, so the selection was refused too, to say
-        # so where an operator would see it. Delete now cancels the shot
-        # instead, so there is something to aim at -- and the tooltip says what
-        # aiming at it will do, since it is not the outright removal that
-        # Delete means everywhere else.
+        # Delete cancels the running shot rather than removing it, so there is
+        # something to aim at and the row has to be selectable -- and the
+        # tooltip says what aiming at it will do, since it is not the outright
+        # removal that Delete means everywhere else.
         controller = QueueController()
         controller.enqueue([queued_shot('/tmp/shot_a.h5')])
         controller.offer_next()
@@ -2232,6 +2782,643 @@ class LostRowTests(unittest.TestCase):
             all(isinstance(path, str) for path in app.analysis_submission.submitted),
             'lyse is given a path, whatever shape BLACS sent',
         )
+
+
+class SequenceContinuityTests(unittest.TestCase):
+    """Shots added to the last sequence are part of that sequence.
+
+    "Add shots to last sequence" means what it says: the added shots belong to
+    the sequence already there, not to a new one written alongside it. A
+    sequence is identified by the attributes its shots carry and not by the
+    folder they sit in, so a batch carrying freshly minted sequence attributes
+    is a separate sequence however its files are named. And a run number is
+    unique within its sequence, so a batch sharing those attributes while
+    restarting run numbers at 0 collides with the shots already in it. Both
+    halves have to hold.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.app = FakeRunManager()
+        self.addCleanup(self.app.queue_manager.shutdown)
+        self.existing = {
+            'script_basename': 'experiment',
+            'sequence_date': '2026-09-18',
+            'sequence_index': 11,
+            'sequence_id': '20260918T101112_experiment',
+        }
+        # What new_sequence_details would answer if asked for a new sequence.
+        # Minting one is a labconfig read, a timestamp and a counter file under
+        # a zlock; what is under test is what runmanager does with the answer,
+        # and -- for a batch being added to a sequence -- whether it asks at
+        # all.
+        self.fresh = {
+            'script_basename': 'experiment',
+            'sequence_date': '2026-09-18',
+            'sequence_index': 12,
+            'sequence_id': '20260918T120000_experiment',
+        }
+        self.claimed_a_sequence_index = []
+        patcher = mock.patch.object(
+            runmanager, 'new_sequence_details', self.fake_new_sequence_details
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def fake_new_sequence_details(
+        self, script_path, config=None, increment_sequence_index=True, **kwargs
+    ):
+        self.claimed_a_sequence_index.append(increment_sequence_index)
+        return dict(self.fresh), self.directory, 'experiment'
+
+    def path(self, name):
+        return os.path.join(self.directory, name)
+
+    def add_shots(self, count, anchor, index_start=None, sequence_attrs=None):
+        """Compile a batch onto the sequence the anchor shot belongs to."""
+        _, run_files = self.app.make_h5_files(
+            self.path('experiment.py'),
+            self.directory,
+            [{'x': n} for n in range(count)],
+            with_metadata=True,
+            indexed_path_base=anchor,
+            index_start=index_start,
+            sequence_attrs=sequence_attrs,
+        )
+        return list(run_files)
+
+    def test_an_added_shot_is_numbered_by_the_filename_it_is_given(self):
+        # A sequence compiled in one go names each file after the run number
+        # written into it. Renumbering the files of an added batch without
+        # renumbering its runs breaks that, and restarts run numbers at 0
+        # inside a sequence that already has a shot 0.
+        anchor = self.path('experiment_03.h5')
+        self.app.queue_manager.enqueue(
+            [queued_shot(anchor, sequence_attrs=self.existing)]
+        )
+
+        added = self.add_shots(2, anchor)
+
+        self.assertEqual(
+            [(os.path.basename(info['path']), info['run_no']) for info in added],
+            [('experiment_04.h5', 4), ('experiment_05.h5', 5)],
+            'the run number and the filename index are the same number',
+        )
+
+    def test_an_added_shot_takes_the_run_number_of_the_file_it_reuses(self):
+        # "Empty queue, then add shots to last sequence" numbers from 0 again,
+        # taking back what the deleted shots gave up. The run numbers have to
+        # come back with the filenames: a shot written as experiment_01.h5
+        # while calling itself run 0 is a second run 0 in a sequence that
+        # already had one.
+        anchor = self.path('experiment_00.h5')
+        runmanager.make_single_run_file(anchor, None, {}, self.existing, 0, 1)
+
+        added = self.add_shots(2, anchor, index_start=0)
+
+        self.assertEqual(
+            [(os.path.basename(info['path']), info['run_no']) for info in added],
+            [('experiment_01.h5', 1), ('experiment_02.h5', 2)],
+            'index 0 is taken by a file that is still there, and so is run 0',
+        )
+
+    def test_an_extended_sequence_says_how_many_runs_it_now_has(self):
+        anchor = self.path('experiment_03.h5')
+        self.app.queue_manager.enqueue(
+            [queued_shot(anchor, sequence_attrs=self.existing)]
+        )
+
+        added = self.add_shots(2, anchor)
+
+        self.assertEqual(
+            [info['n_runs'] for info in added],
+            [6, 6],
+            'runs 0 to 5 of this sequence exist once these are written',
+        )
+
+    def test_a_shot_written_earlier_keeps_the_extent_it_was_written_with(self):
+        # n_runs is how far the sequence reached as of the shot it is written
+        # into, so the shots of a sequence that has grown do not agree on it
+        # and no one of them says how many runs that sequence has. The shots
+        # written before this batch may already have run, and are not
+        # rewritten to agree with it.
+        anchor = self.path('experiment_00.h5')
+        runmanager.make_single_run_file(anchor, None, {}, self.existing, 0, 1)
+
+        added = self.add_shots(2, anchor)
+
+        self.assertEqual(
+            [info['n_runs'] for info in added],
+            [3, 3],
+            'runs 0 to 2 of this sequence exist once these are written',
+        )
+        with h5py.File(anchor, 'r') as f:
+            self.assertEqual(
+                f.attrs['n_runs'],
+                1,
+                'the shot that was already there still says what its sequence '
+                'was when it was written',
+            )
+
+    def test_added_shots_belong_to_the_sequence_they_were_added_to(self):
+        anchor = self.path('experiment_03.h5')
+        self.app.queue_manager.enqueue(
+            [queued_shot(anchor, sequence_attrs=self.existing)]
+        )
+
+        added = self.add_shots(2, anchor)
+
+        self.assertEqual(
+            [info['sequence_attrs'] for info in added],
+            [self.existing, self.existing],
+            'the sequence added to is the sequence the added shots are in',
+        )
+
+    def test_adding_shots_to_a_sequence_claims_no_new_sequence_index(self):
+        anchor = self.path('experiment_03.h5')
+        self.app.queue_manager.enqueue(
+            [queued_shot(anchor, sequence_attrs=self.existing)]
+        )
+
+        self.add_shots(2, anchor)
+
+        self.assertEqual(
+            self.claimed_a_sequence_index,
+            [],
+            'a sequence index claimed for a sequence that was never started '
+            'is one no sequence will ever carry, and minting one to throw it '
+            'away costs a lock on shot storage that every submission waits in',
+        )
+
+    def test_a_batch_of_its_own_does_claim_a_sequence_index(self):
+        # The other half of the same rule: a batch that is not being added to
+        # anything is a new sequence, and has to take a number for it.
+        self.app.make_h5_files(
+            self.path('experiment.py'),
+            self.directory,
+            [{'x': 0}],
+            with_metadata=True,
+        )
+
+        self.assertEqual(self.claimed_a_sequence_index, [True])
+
+    def test_the_newer_row_answers_for_a_path_two_rows_hold(self):
+        # Nothing sets out to queue one path twice, so which row answers is a
+        # rule rather than a situation: the one added most recently.
+        path = self.path('experiment_00.h5')
+        later = dict(self.existing, sequence_id='20260918T140000_experiment')
+        self.app.queue_manager.enqueue([queued_shot(path, sequence_attrs=self.existing)])
+        self.app.queue_manager.enqueue([queued_shot(path, sequence_attrs=later)])
+
+        self.assertEqual(self.app.queue_manager.get_queued_sequence_attrs(path), later)
+
+    def test_a_row_holding_no_sequence_sends_the_caller_to_the_shot_file(self):
+        # The row is the quick answer, not the only one. A queue that holds
+        # the shot and has no sequence for it is no more use than a queue that
+        # has never heard of it, so the file is read in both cases; handing
+        # back the nothing the row holds would put the batch in no sequence at
+        # all, under a run number that means nothing without one.
+        path = self.path('experiment_00.h5')
+        runmanager.make_single_run_file(path, None, {}, self.existing, 0, 1)
+        self.app.queue_manager.enqueue([queued_shot(path)])
+
+        self.assertEqual(
+            self.app.get_sequence_attrs_to_extend(path), self.existing
+        )
+
+    def test_no_row_and_no_file_is_no_sequence_to_add_to(self):
+        # Reported rather than quietly compiled onto a sequence of its own:
+        # a batch added to a sequence that cannot be found is not a batch that
+        # should go anywhere. on_engage_clicked puts this in the output box.
+        missing = self.path('experiment_00.h5')
+        with self.assertRaises(Exception) as raised:
+            self.add_shots(1, missing)
+
+        self.assertIn(missing, str(raised.exception))
+
+    def test_a_cleared_queue_still_knows_the_sequence_it_was_adding_to(self):
+        # "Empty queue, then add shots to last sequence" with nothing yet sent
+        # to BLACS: the shot being added to is a queued one, and the Clear
+        # removes its row and deletes its file. Whatever says which sequence
+        # this is has to be read before that happens, or the mode has nothing
+        # left to add to.
+        anchor = self.path('experiment_00.h5')
+        open(anchor, 'w').close()
+        self.app.queue_manager.enqueue(
+            [queued_shot(anchor, sequence_attrs=self.existing)]
+        )
+
+        sequence = self.app.get_sequence_attrs_to_extend(anchor)
+        self.app.queue_manager.clear()
+        added = self.add_shots(1, anchor, index_start=0, sequence_attrs=sequence)
+
+        self.assertFalse(os.path.exists(anchor), 'the Clear deleted its file')
+        self.assertEqual(
+            [info['sequence_attrs'] for info in added],
+            [self.existing],
+            'the batch replacing the queue is in the sequence it replaced',
+        )
+
+    def test_a_replacement_batch_resumes_after_the_shots_blacs_has(self):
+        # The shots BLACS has been given keep their files, so the numbering
+        # picks up after them; the shots it has not keep nothing, so their
+        # numbers are free for the replacement batch to take back.
+        sent = self.path('experiment_00.h5')
+        open(sent, 'w').close()
+        waiting = self.path('experiment_01.h5')
+        open(waiting, 'w').close()
+        self.app.queue_manager.enqueue(
+            [
+                queued_shot(sent, sequence_attrs=self.existing),
+                queued_shot(waiting, sequence_attrs=self.existing),
+            ]
+        )
+        self.app.offer_shot()
+
+        sequence = self.app.get_sequence_attrs_to_extend(sent)
+        self.app.queue_manager.clear()
+        added = self.add_shots(2, sent, index_start=0, sequence_attrs=sequence)
+
+        self.assertTrue(os.path.exists(sent), 'BLACS has this one; it stays')
+        self.assertFalse(os.path.exists(waiting), 'this one was only waiting')
+        self.assertEqual(
+            [(os.path.basename(info['path']), info['run_no']) for info in added],
+            [('experiment_01.h5', 1), ('experiment_02.h5', 2)],
+            'numbering resumes at the first run whose file has gone',
+        )
+
+    def test_the_sequence_is_read_off_the_shot_when_the_queue_has_lost_it(self):
+        # "Empty queue, then add shots to last sequence" empties the queue
+        # first, so the shot being added to is the one last sent to BLACS,
+        # whose row may be gone. Its file has been written by then, and carries
+        # what the queue no longer holds.
+        anchor = self.path('experiment_00.h5')
+        runmanager.make_single_run_file(anchor, None, {}, self.existing, 0, 1)
+
+        added = self.add_shots(1, anchor, index_start=0)
+
+        self.assertEqual(
+            [info['sequence_attrs'] for info in added],
+            [self.existing],
+            'the shot file answers for the sequence when no row does',
+        )
+
+
+class DeletedAnchorTests(unittest.TestCase):
+    """What a sequence carries on from when that shot has been deleted.
+
+    The shot last sent to BLACS is what the next submission is numbered after
+    once the queue has emptied, and it is named by its file. That file can be
+    deleted while it is still the anchor: a shot that came back failed sits in
+    the queue in red until an operator deletes the row, and deleting a row
+    deletes its file.
+
+    Naming a file that is gone is not a sequence to add to, and it cannot
+    become one again. Every later submission asked for the sequence of a file
+    nothing can read and was refused -- permanently, and identically each
+    time. Letting go of the anchor with the file leaves the next submission in
+    the state it is in before anything has run, which is one it knows how to
+    be in: it starts a sequence.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.app = FakeRunManager()
+        self.addCleanup(self.app.queue_manager.shutdown)
+
+    def enqueue(self, app, name):
+        path = os.path.join(self.directory, name)
+        open(path, 'w').close()
+        app.queue_manager.enqueue([queued_shot(path)])
+        return path
+
+    def test_deleting_the_failed_shot_it_named_lets_go_of_the_anchor(self):
+        sent = self.enqueue(self.app, 'experiment_00.h5')
+        offered = self.app.offer_shot()
+        self.app.queue_manager.shot_finished(
+            offered['shot_id'], 'failed', 'Device error'
+        )
+
+        self.app.queue_manager.delete_rows([offered['shot_id']])
+
+        self.assertFalse(os.path.exists(sent), 'the row took its file with it')
+        self.assertIsNone(
+            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
+            'and a deleted shot is not a sequence for the next batch to join',
+        )
+
+    def test_deleting_another_shot_leaves_the_anchor_alone(self):
+        # Only the shot whose file is being deleted. An operator clearing the
+        # work waiting behind the one BLACS is running has not said anything
+        # about the sequence it belongs to.
+        sent = self.enqueue(self.app, 'experiment_00.h5')
+        self.enqueue(self.app, 'experiment_01.h5')
+        self.app.offer_shot()
+        waiting_id = self.app.queue_manager.controller._items[1]['shot_id']
+
+        self.app.queue_manager.delete_rows([waiting_id])
+
+        self.assertEqual(
+            self.app.get_last_sent_from_queue_filepath(),
+            sent,
+            'the shot BLACS was given is still what the sequence carries on '
+            'from',
+        )
+
+    def test_a_cancelled_shots_file_going_takes_the_anchor_with_it(self):
+        # The other way a shot BLACS was given loses its file: the operator
+        # deletes the row while BLACS has it, and the file goes at the next
+        # request, once nobody can be running it. Under the default-shot
+        # policy the gap that follows is filled by a shot runmanager made
+        # itself, which is deliberately never recorded as the anchor -- so
+        # nothing else would ever let go of the cancelled one.
+        labscript_file = os.path.join(self.directory, 'default.py')
+        open(labscript_file, 'w').close()
+        default_shot = os.path.join(self.directory, 'default_shot_0.h5')
+        open(default_shot, 'w').close()
+        app = FakeRunManager(default_shot_file=default_shot)
+        self.addCleanup(app.queue_manager.shutdown)
+        app.queue_manager.set_empty_queue_policy(EMPTY_QUEUE_DEFAULT_LABSCRIPT)
+        app.queue_manager.set_default_labscript_file(labscript_file)
+        sent = self.enqueue(app, 'experiment_00.h5')
+        offered = app.offer_shot()
+        app.queue_manager.delete_rows([offered['shot_id']])
+        # Runmanager discards the default shot it was holding as soon as the
+        # queue takes over, and prepares another off-thread once the queue
+        # empties again; this stands for the one that would then be ready.
+        app.default_shot_file = default_shot
+
+        filler = app.offer_shot()
+
+        self.assertEqual(filler['path'], default_shot, 'the gap was filled')
+        self.assertFalse(os.path.exists(sent), 'and the cancelled row went')
+        self.assertIsNone(
+            app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
+            'a shot the operator cancelled and whose file has gone is not '
+            'what the next submission carries on from',
+        )
+
+
+class EngageWindow(object):
+    """The window Engage reads, over what its own warnings need.
+
+    ``expand_pending_shots`` stands for the globals the window would expand,
+    and ``compile_and_queue_shots`` records what reached it rather than
+    compiling anything.
+    """
+
+    on_engage_clicked = RunManager.on_engage_clicked
+
+    def __init__(self, run_shots=True, view_shots=False):
+        self.output_box = FakeOutputBox()
+        self.submitted = []
+        self.ui = types.SimpleNamespace(
+            checkBox_run_shots=types.SimpleNamespace(isChecked=lambda: run_shots),
+            checkBox_view_shots=types.SimpleNamespace(isChecked=lambda: view_shots),
+        )
+
+    def expand_pending_shots(self):
+        return [({'x': 0}, {'x': '0'})]
+
+    def compile_and_queue_shots(self, submission_mode, *args):
+        self.submitted.append(submission_mode)
+
+
+class AlternateSubmissionMenuTests(unittest.TestCase):
+    """When the Engage menu offers to add shots to the last sequence.
+
+    The items name a last sequence, so they are offered while there is one to
+    name: a shot still in the queue, or -- once BLACS has taken the last of
+    them -- the shot it was sent. A runmanager that has queued nothing and
+    sent nothing has no last sequence, and an item promising one there would
+    be promising something that does not exist.
+
+    They are all about the queue, so none of them is offered while nothing is
+    going to BLACS at all.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.app = FakeRunManager()
+        self.addCleanup(self.app.queue_manager.shutdown)
+
+    def path(self, name):
+        return os.path.join(self.directory, name)
+
+    def test_a_queued_shot_is_a_sequence_to_add_to(self):
+        self.app.queue_manager.enqueue([queued_shot(self.path('experiment_00.h5'))])
+
+        self.assertTrue(self.app.can_use_alternate_submission_mode())
+
+    def test_the_shot_blacs_was_sent_is_a_sequence_to_add_to(self):
+        # BLACS takes the last queued shot on a thread of its own, so an
+        # operator reaching for the menu can find the queue empty underneath
+        # them. The shot it was sent is the one they were looking at.
+        self.app.queue_manager.enqueue([queued_shot(self.path('experiment_00.h5'))])
+        offered = self.app.offer_shot()
+        self.app.queue_manager.shot_finished(offered['shot_id'], 'completed')
+
+        self.assertEqual(self.app.queue_manager.get_queue_paths(), [])
+        self.assertTrue(self.app.can_use_alternate_submission_mode())
+
+    def test_nothing_queued_and_nothing_sent_offers_nothing(self):
+        self.assertFalse(self.app.can_use_alternate_submission_mode())
+
+    def test_nothing_is_offered_while_no_shots_are_going_to_blacs(self):
+        self.app.queue_manager.enqueue([queued_shot(self.path('experiment_00.h5'))])
+        self.app.run_shots = False
+
+        self.assertFalse(self.app.can_use_alternate_submission_mode())
+
+
+class EngageGuardTests(unittest.TestCase):
+    """What Engage refuses before it compiles anything.
+
+    Its warnings are about the window: which destinations are ticked, and
+    whether the mode the operator picked from the menu can be used with them.
+    Anything about the queue is settled where the queue is read, because the
+    queue moves on its own between the two.
+    """
+
+    def test_a_mode_that_has_somewhere_to_send_its_shots_is_engaged(self):
+        # The other side of the warning below: the modes about the queue are
+        # refused for want of BLACS and for nothing else, and what Engage
+        # hands on is the mode the operator picked.
+        window = EngageWindow()
+
+        window.on_engage_clicked(
+            submission_mode=main_module.SUBMISSION_MODE_ADD_SHOTS
+        )
+
+        self.assertEqual(
+            window.submitted, [main_module.SUBMISSION_MODE_ADD_SHOTS]
+        )
+        self.assertEqual(window.output_box.lines, [], 'and nothing was warned about')
+
+    def test_an_alternate_mode_still_needs_shots_to_be_sent_to_blacs(self):
+        window = EngageWindow(run_shots=False, view_shots=True)
+
+        window.on_engage_clicked(
+            submission_mode=main_module.SUBMISSION_MODE_ADD_SHOTS
+        )
+
+        self.assertEqual(window.submitted, [], 'nothing was submitted')
+        self.assertTrue(window.output_box.said('BLACS'))
+
+    def test_a_new_sequence_needs_only_somewhere_to_send_its_shots(self):
+        # The warning above is for the modes about the queue, and only those.
+        # A new sequence asks nothing of the queue, so looking at the shots in
+        # runviewer without running them is a whole use of Engage.
+        window = EngageWindow(run_shots=False, view_shots=True)
+
+        window.on_engage_clicked()
+
+        self.assertEqual(
+            window.submitted, [main_module.SUBMISSION_MODE_NEW_FOLDER]
+        )
+        self.assertEqual(window.output_box.lines, [])
+
+    def test_engaging_with_nowhere_to_send_the_shots_is_refused(self):
+        window = EngageWindow(run_shots=False, view_shots=False)
+
+        window.on_engage_clicked()
+
+        self.assertEqual(window.submitted, [])
+        self.assertTrue(window.output_box.said('neither'))
+
+
+class MissingSequenceReportTests(unittest.TestCase):
+    """What an operator is told when the sequence cannot be read.
+
+    Whoever pressed Engage sees this sentence and nothing else -- the chained
+    cause is in the log, not in the output box -- so the sentence has to be
+    true of what actually happened. A file that is not there and a file that
+    cannot be read are different things to go and do something about.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.app = FakeRunManager()
+        self.addCleanup(self.app.queue_manager.shutdown)
+        self.path = os.path.join(self.directory, 'experiment_00.h5')
+
+    def test_a_shot_whose_file_has_gone_says_that_it_has_gone(self):
+        with self.assertRaises(Exception) as raised:
+            self.app.get_sequence_attrs_to_extend(self.path)
+
+        self.assertIn(self.path, str(raised.exception))
+        self.assertIn('not there', str(raised.exception))
+
+    def test_a_file_that_cannot_be_read_says_what_stopped_it(self):
+        # A file that is there and unreadable -- locked by another
+        # application, unreadable by this user, not a shot file at all -- is
+        # not a shot that has gone, and telling an operator it is sends them
+        # looking for the wrong thing.
+        with open(self.path, 'w') as f:
+            f.write('not an h5 file')
+
+        with self.assertRaises(Exception) as raised:
+            self.app.get_sequence_attrs_to_extend(self.path)
+
+        self.assertIn('OSError', str(raised.exception))
+        self.assertIsInstance(raised.exception.__cause__, OSError)
+
+
+class CallerChosenShotIdTests(unittest.TestCase):
+    """An id the caller chose names the same row every other id does.
+
+    compile_shots keeps whatever id a record arrives with, and the row made
+    from that record afterwards takes it as text. Anything else is an id that
+    is written into the shot file and reported to the caller as one thing and
+    held by the row as another, so the caller polls for a shot the queue has
+    never heard of while its shot runs.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.written = []
+        self.manager = QueueManager(
+            lambda item: self.written.append(item['shot_id']),
+            lambda labscript_file, path: True,
+            lambda path: None,
+            lambda *args, **kwargs: None,
+            lambda enabled: None,
+        )
+        self.addCleanup(self.manager.shutdown)
+
+    def test_the_queue_answers_about_the_id_the_caller_was_given(self):
+        records = self.manager.compile_shots(
+            [
+                {
+                    'path': os.path.join(self.directory, 'shot.h5'),
+                    'labscript_file': os.path.join(self.directory, 'e.py'),
+                    'compile_mode': COMPILE_MODE_EAGER,
+                    'compiled': False,
+                    'frozen_globals': {},
+                    'shot_id': 7,
+                }
+            ],
+            True,
+            False,
+        )
+        shot_id = records[0]['shot_id']
+        for _ in range(500):
+            if self.manager.get_queue_paths():
+                break
+            time.sleep(0.01)
+
+        self.assertTrue(
+            self.manager.get_shot_statuses([shot_id])[shot_id]['pending'],
+            'the queue holds the shot under the id its submitter was handed',
+        )
+        self.assertEqual(
+            self.written,
+            [self.manager.controller._items[0]['shot_id']],
+            'and the id written into the shot file is the one its row has',
+        )
+
+
+class QueuedShotFileTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.app = FakeRunManager()
+        self.addCleanup(self.app.queue_manager.shutdown)
+        self.globals_file = os.path.join(self.directory, 'globals.toml')
+        runmanager.new_globals_file(self.globals_file)
+        runmanager.new_group(self.globals_file, 'group')
+
+    def test_a_shot_with_no_id_is_written_without_the_attribute(self):
+        # No id means no attribute, which is how a shot nobody submitted is
+        # told apart from one that was. A record built without one is written,
+        # rather than raising inside the compile worker where the operator
+        # sees a traceback instead of a shot.
+        path = os.path.join(self.directory, 'experiment_00.h5')
+
+        self.app.prepare_queue_shot(
+            {
+                'path': path,
+                'active_groups': {'group': self.globals_file},
+                'frozen_globals': {},
+                'sequence_attrs': {
+                    'script_basename': 'experiment',
+                    'sequence_date': '2026-09-18',
+                    'sequence_index': 11,
+                    'sequence_id': '20260918T101112_experiment',
+                },
+                'run_no': 0,
+                'n_runs': 1,
+            }
+        )
+
+        with h5py.File(path, 'r') as f:
+            self.assertNotIn('shot_id', f.attrs)
+            self.assertEqual(f.attrs['run number'], 0)
 
 
 if __name__ == '__main__':
