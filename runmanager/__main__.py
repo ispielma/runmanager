@@ -118,6 +118,13 @@ runmanager_dir = RUNMANAGER_DIR
 # already refers to. Getting it here attaches nothing and opens no log file.
 logger = logging.getLogger(APPLICATION_NAME)
 
+# The running window, which RemoteServer's handlers reach through. Bound here
+# for the same reason the logger is: the name this module reads exists in it,
+# so anything importing the module can put its own window there rather than
+# inventing an attribute that was never declared. Running runmanager replaces
+# this with the application it builds.
+app = None
+
 process_tree = ProcessTree.instance()
 
 # Set a meaningful name for zprocess.locking's client id:

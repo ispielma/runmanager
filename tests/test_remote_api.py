@@ -82,7 +82,7 @@ class RemoteCommandTestCase(unittest.TestCase):
         # RemoteServer's handlers reach the application through this module
         # global, which the application assigns to itself on startup. Nothing
         # starts here, so the test puts it there and takes it away again.
-        patcher = mock.patch.object(main_module, 'app', self.app, create=True)
+        patcher = mock.patch.object(main_module, 'app', self.app)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.server = LoopbackRemoteServer()
@@ -108,18 +108,40 @@ class EmptyQueuePolicyTests(RemoteCommandTestCase):
                 self.app.queue_manager.set_empty_queue_policy(policy)
                 self.assertEqual(self.request('get_empty_queue_policy'), policy)
 
-    def test_the_client_asks_under_that_name(self):
-        sent = []
-        with mock.patch.object(
-            runmanager.remote.Client,
-            'request',
-            lambda self, command, *args, **kwargs: sent.append(command),
-        ):
-            runmanager.remote.Client.get_empty_queue_policy(
-                runmanager.remote.Client.__new__(runmanager.remote.Client)
-            )
 
-        self.assertEqual(sent, ['get_empty_queue_policy'])
+class ClientCommandNameTests(unittest.TestCase):
+    """Each client method asks under the name the server answers to.
+
+    The name is the whole of what crosses the wire, so a method sending
+    anything else reaches a handler that is not there -- or, worse, one that
+    is. What travels with the name is the caller's own arguments and is not
+    fixed here: that is the shape of a request rather than the protocol, and
+    the handlers are exercised through ``handler`` above.
+    """
+
+    #: One call per command, carrying arguments only where the method takes
+    #: them. A command added to the client belongs here.
+    CALLS = {
+        'get_empty_queue_policy': (),
+        'shot_status': (['one'],),
+        'submit_shots': ([{'x': 1}],),
+    }
+
+    def test_each_command_is_asked_for_under_its_own_name(self):
+        for command, args in sorted(self.CALLS.items()):
+            with self.subTest(command=command):
+                sent = []
+                with mock.patch.object(
+                    runmanager.remote.Client,
+                    'request',
+                    lambda self, name, *a, **kw: sent.append(name),
+                ):
+                    getattr(runmanager.remote.Client, command)(
+                        runmanager.remote.Client.__new__(runmanager.remote.Client),
+                        *args,
+                    )
+
+                self.assertEqual(sent, [command])
 
 
 class ExpansionsBeingRewritten(dict):
@@ -667,21 +689,6 @@ class SubmitShotsTests(RemoteCommandTestCase):
             ['1 # metres', '2 # metres', '3 # metres'],
         )
 
-    def test_the_client_asks_under_that_name(self):
-        sent = []
-        with mock.patch.object(
-            runmanager.remote.Client,
-            'request',
-            lambda self, command, *args, **kwargs: sent.append((command, args)),
-        ):
-            runmanager.remote.Client.submit_shots(
-                runmanager.remote.Client.__new__(runmanager.remote.Client),
-                [{'x': 1}],
-            )
-
-        self.assertEqual(sent, [('submit_shots', ([{'x': 1}],))])
-
-
 class ShotStatusTests(RemoteCommandTestCase):
     """Whether a shot that was submitted can still produce a result.
 
@@ -854,9 +861,10 @@ class ShotStatusTests(RemoteCommandTestCase):
         self.assertEqual(self.app.queue_manager.controller._items, before)
 
     def test_every_answer_the_state_can_carry_is_named_to_the_caller(self):
-        # Derived rather than listed. The client docstring is where a caller
-        # reads what an answer can say, so a state runmanager answers with and
-        # the docstring does not name is one the caller has to guess at --
+        # Derived rather than listed, and the state's own name rather than any
+        # of the words around it: the client docstring is where a caller reads
+        # what an answer can say, so a state runmanager answers with and the
+        # docstring does not name is one the caller has to guess at --
         # including whether a shot in it is still coming.
         docstring = runmanager.remote.Client.shot_status.__doc__
         for state in (
@@ -865,20 +873,7 @@ class ShotStatusTests(RemoteCommandTestCase):
             UNKNOWN_SHOT_STATE,
         ):
             with self.subTest(state=state):
-                self.assertIn(repr(state), docstring)
-
-    def test_the_client_asks_under_that_name(self):
-        sent = []
-        with mock.patch.object(
-            runmanager.remote.Client,
-            'request',
-            lambda self, command, *args, **kwargs: sent.append((command, args)),
-        ):
-            runmanager.remote.Client.shot_status(
-                runmanager.remote.Client.__new__(runmanager.remote.Client), ['one']
-            )
-
-        self.assertEqual(sent, [('shot_status', (['one'],))])
+                self.assertIn(state, docstring)
 
 
 class AbortDuringSubmissionTests(RemoteCommandTestCase):
