@@ -518,15 +518,12 @@ class QueueController(object):
                 answer[shot_id] = {'pending': False, 'state': UNKNOWN_SHOT_STATE}
         return answer
 
-    def get_sequence_attrs(self, path):
-        """Return the sequence attributes recorded for the queued shot at
-        ``path``, or None if no row holds that path.
+    def get_queued_sequence_attrs(self, path):
+        """The sequence attributes of the queued shot at ``path``, or None.
 
-        A row that records no sequence answers with an empty dictionary, which
-        is a different answer: the queue holds that shot and has nothing to
-        say about its sequence, where None is that the queue has never heard
-        of it. A caller with somewhere else to look has to be able to tell
-        which of those it got.
+        None is that the queue has no sequence to give for that path, whether
+        because no row holds it or because the row that does records none. A
+        caller with somewhere else to look does the same thing either way.
 
         The last matching row answers. The queue does not set out to hold two
         rows with one path, and taking the last means the newer row wins if it
@@ -534,7 +531,7 @@ class QueueController(object):
         with self._lock:
             for item in reversed(self._items):
                 if item['path'] == path:
-                    return dict(item['sequence_attrs'])
+                    return dict(item['sequence_attrs']) or None
         return None
 
     def get_shot_path(self, shot_id):
@@ -1211,8 +1208,8 @@ class QueueManager(QtCore.QObject):
     def get_shot_statuses(self, shot_ids):
         return self.controller.get_shot_statuses(shot_ids)
 
-    def get_sequence_attrs(self, path):
-        return self.controller.get_sequence_attrs(path)
+    def get_queued_sequence_attrs(self, path):
+        return self.controller.get_queued_sequence_attrs(path)
 
     def get_shot_path(self, shot_id):
         return self.controller.get_shot_path(shot_id)

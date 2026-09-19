@@ -2971,7 +2971,21 @@ class SequenceContinuityTests(unittest.TestCase):
         self.app.queue_manager.enqueue([queued_shot(path, sequence_attrs=self.existing)])
         self.app.queue_manager.enqueue([queued_shot(path, sequence_attrs=later)])
 
-        self.assertEqual(self.app.queue_manager.get_sequence_attrs(path), later)
+        self.assertEqual(self.app.queue_manager.get_queued_sequence_attrs(path), later)
+
+    def test_a_row_holding_no_sequence_sends_the_caller_to_the_shot_file(self):
+        # The row is the quick answer, not the only one. A queue that holds
+        # the shot and has no sequence for it is no more use than a queue that
+        # has never heard of it, so the file is read in both cases; handing
+        # back the nothing the row holds would put the batch in no sequence at
+        # all, under a run number that means nothing without one.
+        path = self.path('experiment_00.h5')
+        runmanager.make_single_run_file(path, None, {}, self.existing, 0, 1)
+        self.app.queue_manager.enqueue([queued_shot(path)])
+
+        self.assertEqual(
+            self.app.get_sequence_attrs_to_extend(path), self.existing
+        )
 
     def test_no_row_and_no_file_is_no_sequence_to_add_to(self):
         # Reported rather than quietly compiled onto a sequence of its own:
@@ -3274,18 +3288,6 @@ class EngageGuardTests(unittest.TestCase):
 
         self.assertEqual(window.submitted, [])
         self.assertTrue(window.output_box.said('neither'))
-
-
-class QueuedSequenceAttrsTests(unittest.TestCase):
-    def test_a_row_recording_no_sequence_is_not_the_same_as_no_row(self):
-        # Two different answers: this queue holds that shot and it belongs to
-        # no sequence, against this queue has never heard of it. The caller
-        # goes to the shot file for one of them and not for the other.
-        controller = QueueController()
-        controller.enqueue([queued_shot('/tmp/shot_a.h5')])
-
-        self.assertEqual(controller.get_sequence_attrs('/tmp/shot_a.h5'), {})
-        self.assertIsNone(controller.get_sequence_attrs('/tmp/shot_b.h5'))
 
 
 class MissingSequenceReportTests(unittest.TestCase):

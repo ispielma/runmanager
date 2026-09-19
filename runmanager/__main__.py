@@ -4435,8 +4435,8 @@ class RunManager(LabscriptApplication):
         until the lock comes free or times out. Asking the row first is
         therefore also the difference between a dictionary this process
         already has and a locked read of a file across the network."""
-        sequence_attrs = self.queue_manager.get_sequence_attrs(path)
-        if sequence_attrs:
+        sequence_attrs = self.queue_manager.get_queued_sequence_attrs(path)
+        if sequence_attrs is not None:
             return sequence_attrs
         try:
             return runmanager.get_sequence_attrs(path)

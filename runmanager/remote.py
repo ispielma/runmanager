@@ -184,6 +184,13 @@ class Client(ZMQClient):
         added to the sequence runmanager is already working on, continuing its
         run numbers. The queue is never cleared.
 
+        Each submitted shot is written with its ``shot_id`` as a root
+        attribute of its h5 file, which is where the id handed back here
+        reappears: it is how a result produced from that file is matched to
+        the entry that asked for it. A shot file carrying no such attribute is
+        one nobody submitted -- runmanager writes the shots it makes itself,
+        to keep the apparatus busy between submissions, without one.
+
         Whether a whole run of submissions stays one sequence depends on the
         empty-queue policy, which get_empty_queue_policy() answers. Under
         ``'default_labscript'`` it does: the gaps between submissions are
