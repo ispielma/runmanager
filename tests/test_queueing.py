@@ -1479,8 +1479,9 @@ class ShotIdBeforeCompileTests(unittest.TestCase):
         )
 
     def test_a_queued_shot_is_written_with_its_id(self):
-        # What the id is for: a result coming back through lyse is matched to
-        # the shot that produced it by reading this out of the file.
+        # What the id is for: a shot carries the id of the queue row it was
+        # written for, so that a result coming back can be matched to the
+        # shot that was submitted.
         directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, directory, True)
         app = FakeRunManager()
@@ -2777,11 +2778,13 @@ class SequenceContinuityTests(unittest.TestCase):
     """Shots added to the last sequence are part of that sequence.
 
     "Add shots to last sequence" means what it says: the added shots belong to
-    the sequence already there, not to a new one written alongside it. lyse
-    indexes a shot on (sequence_index, run number, run repeat), so a batch
-    carrying freshly minted sequence attributes is a separate sequence however
-    its files are named, and a batch sharing them while restarting run numbers
-    at 0 collides with the shots already in it. Both halves have to hold.
+    the sequence already there, not to a new one written alongside it. A
+    sequence is identified by the attributes its shots carry and not by the
+    folder they sit in, so a batch carrying freshly minted sequence attributes
+    is a separate sequence however its files are named. And a run number is
+    unique within its sequence, so a batch sharing those attributes while
+    restarting run numbers at 0 collides with the shots already in it. Both
+    halves have to hold.
     """
 
     def setUp(self):
