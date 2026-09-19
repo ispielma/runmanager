@@ -5053,6 +5053,14 @@ class RemoteServer(ZMQServer):
         controller, which is safe to ask from any thread."""
         return app.queue_manager.get_empty_queue_policy()
 
+    def handle_shot_status(self, shot_ids):
+        """Whether each of these shots can still produce a result.
+
+        Read-only and batched: a caller waiting on many shots asks once. Like
+        the policy above, the queue controller is safe to ask from any thread,
+        so this is not a GUI read."""
+        return app.queue_manager.get_shot_statuses(list(shot_ids))
+
     def handle_queue_exchange(self, outcome=None, request_shot=True):
         return app.queue_exchange(outcome, bool(request_shot))
 

@@ -167,6 +167,20 @@ class Client(ZMQClient):
         arrives to wait for."""
         return self.request('get_empty_queue_policy')
 
+    def shot_status(self, shot_ids):
+        """Whether each of these shots can still produce a result.
+
+        Answers ``{shot_id: {'pending': bool, 'state': str}}``, one entry per
+        id asked about. ``pending`` is false once nothing further will happen
+        to that shot -- it completed and left the queue, it was cancelled, or
+        it is held waiting on an operator. ``state`` is the queue row's own
+        state, for a human reading a log; an id runmanager has no row for is
+        reported as ``'unknown'``.
+
+        Reads only: nothing is consumed by asking, so the same ids can be asked
+        about as often as wanted."""
+        return self.request('shot_status', list(shot_ids))
+
     def queue_exchange(self, outcome=None, request_shot=True):
         """Report how a shot turned out, and ask for the next one.
 
@@ -222,6 +236,7 @@ error_in_globals = _default_client.error_in_globals
 is_output_folder_default = _default_client.is_output_folder_default
 reset_shot_output_folder = _default_client.reset_shot_output_folder
 get_empty_queue_policy = _default_client.get_empty_queue_policy
+shot_status = _default_client.shot_status
 queue_exchange = _default_client.queue_exchange
 
 if __name__ == '__main__':

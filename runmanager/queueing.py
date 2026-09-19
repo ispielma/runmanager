@@ -73,6 +73,18 @@ SESSION_ONLY_FIELDS = ('compiling', 'state', 'message', 'reclaimed')
 # does mean a handover joins by being named here.
 BLACS_STATES = ('running', 'failed', 'rejected', 'cancelled')
 
+# The states a row can still be handed over in, which is what makes a shot
+# still able to produce a result. offer_next() hands over a waiting row, a row
+# already marked running -- the reclaim -- and a failed one, which is the
+# retry. It refuses a rejected row, because offering it again would only be
+# refused again; a cancelled row is never resent; and a compile_failed row can
+# never compile however often it is asked for. Each of those three waits on an
+# operator, not on the apparatus.
+PENDING_STATES = ('', 'running', 'failed')
+# What a shot id with no row in the queue is answered with. Not the empty
+# state, which a row waiting its turn has.
+UNKNOWN_SHOT_STATE = 'unknown'
+
 
 def new_shot_id():
     """A fresh identifier for one queued shot."""
@@ -389,6 +401,27 @@ class QueueController(object):
                 for item in self._items
                 if include_default_shots or not item['default_shot']
             ]
+
+    def get_shot_statuses(self, shot_ids):
+        """Say, for each of these shot ids, whether its shot can still run.
+
+        ``{shot_id: {'pending': bool, 'state': str}}``, one entry per id asked
+        about. ``pending`` is whether the queue would still hand that row over;
+        ``state`` is the row's own state, for a human reading it. An id with no
+        row is not pending, because nothing further will happen to it.
+
+        Reads only. A caller may ask as often as it likes, about shots that
+        finished long ago, and the queue is no different afterwards."""
+        with self._lock:
+            states = {item['shot_id']: item['state'] for item in self._items}
+        answer = {}
+        for shot_id in shot_ids:
+            state = states.get(shot_id, UNKNOWN_SHOT_STATE)
+            answer[shot_id] = {
+                'pending': state in PENDING_STATES,
+                'state': state,
+            }
+        return answer
 
     def get_sequence_attrs(self, path):
         """Return the sequence attributes recorded for the queued shot at
@@ -1001,6 +1034,9 @@ class QueueManager(QtCore.QObject):
 
     def get_queue_paths(self, include_default_shots=True):
         return self.controller.get_queue_paths(include_default_shots)
+
+    def get_shot_statuses(self, shot_ids):
+        return self.controller.get_shot_statuses(shot_ids)
 
     def get_sequence_attrs(self, path):
         return self.controller.get_sequence_attrs(path)
