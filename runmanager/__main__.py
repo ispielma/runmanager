@@ -4618,16 +4618,16 @@ class RunManager(LabscriptApplication):
                                  creationflags=creationflags, stdout=None, stderr=None,
                                  close_fds=True)
             else:
-                # start_new_session does the setsid this used to fork to reach,
-                # and reaches it without running Python in a forked child.
-                # os.fork() here was unsafe and did not work: runmanager runs
-                # half a dozen threads, so the child got only this one, holding
-                # whatever locks the others held at the instant of the fork --
-                # including the allocator's, which subprocess needs. It
-                # deadlocked before starting anything, silently, and Python 3.12
-                # started warning about it. Worse, had Popen raised instead, the
-                # os._exit(0) below it would never have run and the child would
-                # have carried on as a second copy of runmanager.
+                # start_new_session reaches the setsid a fork would be used
+                # for, and reaches it without running Python in a forked child.
+                # os.fork() here is unsafe: runmanager runs half a dozen
+                # threads, so the child gets only this one, holding whatever
+                # locks the others hold at the instant of the fork -- including
+                # the allocator's, which subprocess needs. It deadlocks before
+                # starting anything, silently, and Python 3.12 warns about it.
+                # Worse, a Popen that raises in such a child skips the
+                # os._exit(0) that has to follow it, and the child carries on
+                # as a second copy of runmanager.
                 subprocess.Popen(
                     [sys.executable, '-m', 'runviewer'],
                     stdin=subprocess.DEVNULL,
@@ -4770,9 +4770,9 @@ class RunManager(LabscriptApplication):
             # Report it where an operator will see it and answer normally.
             #
             # This covers applying the outcome as well as choosing the offer.
-            # It used to cover only the offer, which was the wrong half: by the
-            # time applying an outcome can raise, the row it retired is already
-            # gone, so the resend it provokes can never put the analysis
+            # Covering only the offer would be the wrong half: by the time
+            # applying an outcome can raise, the row it retired is already
+            # gone, so the resend it provokes could never put the analysis
             # submission back.
             self.output_box.output(
                 'Runmanager could not answer BLACS: %s\n' % str(exc), red=True

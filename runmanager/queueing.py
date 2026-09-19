@@ -70,10 +70,10 @@ SESSION_ONLY_FIELDS = ('compiling', 'state', 'message', 'reclaimed')
 
 # The states a row reaches by being given to BLACS. Not every state is one:
 # 'compile_failed' is runmanager's own, reached without the row ever leaving
-# here, and reading it as a handover put a file BLACS had never seen into the
-# row reserved for the shot BLACS was given, kept it through a replacement
-# submission, and told the operator BLACS was running it. A new state that
-# does mean a handover joins by being named here.
+# here, and reading it as a handover would put a file BLACS has never seen in
+# the row reserved for the shot BLACS was given, keep it there through a
+# replacement submission, and tell the operator BLACS is running it. A new
+# state that does mean a handover joins by being named here.
 BLACS_STATES = ('running', 'failed', 'rejected', 'cancelled')
 
 # The states the queue refuses to hand a row over in, each against whether a
@@ -868,9 +868,9 @@ class QueueController(object):
         A shot that failed to compile stays where it is and goes red with the
         reason, like a shot that failed to run: only completion or an explicit
         deletion takes a row out of the queue, and a shot that never compiled
-        did not complete. It used to be dropped, which was quiet enough to be
-        mistaken for the queue draining normally — a queue emptying with no
-        shot ever running is exactly what one broken labscript file produced.
+        did not complete. Dropping it would be quiet enough to be mistaken for
+        the queue draining normally — a queue emptying with no shot ever
+        running is what one broken labscript file would then produce.
 
         It is not compiled again, though. See claim_next_for_compile: the
         failed compile leaves data in the shot file that stops labscript ever
@@ -1009,11 +1009,11 @@ class QueueManager(QtCore.QObject):
             self.send_to_runviewer_callback(item['path'])
         # Deliberately does not mark the record compiled. For a row already in
         # the queue that is the controller's to do, under its lock, in
-        # finish_compile: marking it here made it offerable before the compile
-        # was recorded, and the offer's running state was then wiped by the
-        # compile finishing -- so the row was handed to BLACS and offered again
-        # afterwards as though it never had been. The eager caller below marks
-        # its own record, which is not in the queue yet.
+        # finish_compile: marking it here would make it offerable before the
+        # compile is recorded, and the offer's running state would then be
+        # wiped by the compile finishing -- so the row would be handed to BLACS
+        # and offered again afterwards as though it never had been. The eager
+        # caller below marks its own record, which is not in the queue yet.
         return success
 
     def compile_next_in_background(self, send_to_runviewer):
@@ -1130,8 +1130,8 @@ class QueueManager(QtCore.QObject):
         The reason is read off the row, because the two callers keep rows for
         different reasons: Delete keeps only the row BLACS is executing, while
         Clear keeps everything that went to BLACS, which includes rows that came
-        back failed or rejected long ago. One message said "BLACS is running it"
-        for all of them, which for the second kind is untrue, and it is the
+        back failed or rejected long ago. One message saying "BLACS is running
+        it" for all of them would be untrue of the second kind, and it is the
         untruth most likely to send an operator to Abort on idle hardware.
         Returns the paths that were removed."""
         for row in protected:
