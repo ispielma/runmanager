@@ -533,7 +533,6 @@ class FakeRunManager(object):
             self.compile_run_file,
             lambda path: None,
             self.output_box.output,
-            threading.Event(),
             lambda enabled: None,
         )
         self.analysis_submission = FakeAnalysisSubmission()
@@ -1145,7 +1144,6 @@ class SubmittedShotTests(unittest.TestCase):
         self.release = threading.Event()
         self.release.set()
         self.hold_from = 1
-        self.aborted = threading.Event()
         # The application's Abort button, which goes out when the last batch
         # is finished with. Waiting on it rather than on a sleep: it is set
         # after the worker has let go of the batch, so what this test asks
@@ -1156,7 +1154,6 @@ class SubmittedShotTests(unittest.TestCase):
             self.compile_run_file,
             lambda path: None,
             lambda *args, **kwargs: None,
-            self.aborted,
             self.note_abort_enabled,
         )
         self.addCleanup(self.manager.shutdown)
@@ -1242,10 +1239,19 @@ class SubmittedShotTests(unittest.TestCase):
         )
 
     def test_an_aborted_batch_is_let_go_of(self):
-        # Abort stops the batch before its first record, so no row is ever
+        # An abort is about work in hand, and covers the batches behind the
+        # one it interrupts as well, so a batch submitted into a queue that is
+        # already aborting is stopped before its first record: no row is ever
         # made for any of them and none of them will run.
-        self.aborted.set()
+        self.release.clear()
+        self.submit()
+        self.assertTrue(
+            self.wait_until(self.compiling.is_set), 'the worker has a batch'
+        )
+        self.manager.abort()
+
         shot_ids = self.submit(count=3)
+        self.release.set()
 
         self.assertTrue(self.batch_finished.wait(5))
         self.assertEqual(
@@ -3339,7 +3345,6 @@ class CallerChosenShotIdTests(unittest.TestCase):
             lambda labscript_file, path: True,
             lambda path: None,
             lambda *args, **kwargs: None,
-            threading.Event(),
             lambda enabled: None,
         )
         self.addCleanup(self.manager.shutdown)

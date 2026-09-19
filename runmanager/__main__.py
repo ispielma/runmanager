@@ -1828,8 +1828,6 @@ class RunManager(LabscriptApplication):
         self.output_box_window_verticalLayout.setContentsMargins(0, 0, 0, 0)
         self.output_box_window.setWindowTitle('runmanager output')
         self.output_box_window.resize(800, 1000)
-        # A flag telling the compilation worker to abort:
-        self.compilation_aborted = threading.Event()
         self.setup_config()
         self.setup_axes_tab()
         self.setup_groups_tab()
@@ -1856,7 +1854,6 @@ class RunManager(LabscriptApplication):
             compile_run_file=self.compile_run_file,
             send_to_runviewer=self.send_to_runviewer,
             output=self.output_box.output,
-            compilation_aborted=self.compilation_aborted,
             set_abort_enabled=lambda enabled: inmain(
                 self.ui.pushButton_abort.setEnabled, enabled
             ),

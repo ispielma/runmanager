@@ -64,7 +64,6 @@ class FakeApp(object):
             lambda labscript_file, path: True,
             lambda path: None,
             lambda *args, **kwargs: None,
-            threading.Event(),
             lambda enabled: None,
         )
 
@@ -267,7 +266,6 @@ class SubmittingApp(object):
         self.currently_open_groups = {}
         self.previous_expansions = {}
         self.n_shots = None
-        self.compilation_aborted = threading.Event()
         self.compiling = threading.Event()
         self.axes_model = AxesModel()
         self.queue_compile_mode_combo = types.SimpleNamespace(
@@ -299,7 +297,6 @@ class SubmittingApp(object):
             self.compile_run_file,
             lambda path: None,
             lambda *args, **kwargs: None,
-            self.compilation_aborted,
             lambda enabled: None,
         )
         submit_batch = self.queue_manager.compile_shots
@@ -1013,7 +1010,8 @@ class AbortDuringSubmissionTests(RemoteCommandTestCase):
 
         self.assertTrue(self.batches_finished.wait(5))
         self.assertFalse(
-            self.app.compilation_aborted.is_set(), 'the abort is over'
+            self.app.queue_manager.compilation_aborted.is_set(),
+            'the abort is over',
         )
         self.assertEqual(
             [status['pending'] for status in self.status(carries_on).values()],

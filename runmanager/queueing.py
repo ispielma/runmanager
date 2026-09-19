@@ -916,7 +916,6 @@ class QueueManager(QtCore.QObject):
         compile_run_file,
         send_to_runviewer,
         output,
-        compilation_aborted,
         set_abort_enabled,
     ):
         QtCore.QObject.__init__(self)
@@ -926,7 +925,11 @@ class QueueManager(QtCore.QObject):
         self.compile_run_file_callback = compile_run_file
         self.send_to_runviewer_callback = send_to_runviewer
         self.output = output
-        self.compilation_aborted = compilation_aborted
+        # Set by abort() and let go of by the worker when the last batch it
+        # covers is done with. Nothing outside this class touches it: an
+        # abort is a thing the queue is asked for, not a flag to be raised
+        # behind its back.
+        self.compilation_aborted = threading.Event()
         self.set_abort_enabled = set_abort_enabled
         self.batches_pending = 0
         self.batches_lock = threading.Lock()
@@ -944,7 +947,7 @@ class QueueManager(QtCore.QObject):
         self.queueChanged.emit()
 
     def abort(self):
-        """Stop the batches this queue is holding, and say whether any were.
+        """Stop the batches this queue is holding.
 
         An abort is about work that has been submitted: the batch being
         compiled and every batch waiting behind it. With none of them here
@@ -956,10 +959,8 @@ class QueueManager(QtCore.QObject):
         batch is either stopped by this abort or submitted after it, and never
         both at once."""
         with self.batches_lock:
-            if not self.batches_pending:
-                return False
-            self.compilation_aborted.set()
-            return True
+            if self.batches_pending:
+                self.compilation_aborted.set()
 
     def compile_shots(self, records, send_to_BLACS, send_to_runviewer):
         """Compile these records and, if send_to_BLACS, queue them.
