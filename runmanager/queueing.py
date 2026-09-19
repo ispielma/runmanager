@@ -74,6 +74,11 @@ SESSION_ONLY_FIELDS = ('compiling', 'state', 'message', 'reclaimed')
 BLACS_STATES = ('running', 'failed', 'rejected', 'cancelled')
 
 
+def new_shot_id():
+    """A fresh identifier for one queued shot."""
+    return uuid.uuid4().hex
+
+
 def sent_to_blacs(row):
     """Whether this row has been handed to BLACS.
 
@@ -223,7 +228,7 @@ class QueueController(object):
         # and across every retry of it. It names the row rather than a run of
         # it, so BLACS's outcome finds the row it was offered even when the
         # file it ran is a fresh copy with another name:
-        record['shot_id'] = str(record.get('shot_id') or uuid.uuid4().hex)
+        record['shot_id'] = str(record.get('shot_id') or new_shot_id())
         labscript_file = record.get('labscript_file', '')
         record['labscript_file'] = (
             os.path.abspath(str(labscript_file)) if labscript_file else ''
@@ -780,11 +785,26 @@ class QueueManager(QtCore.QObject):
         self.queueChanged.emit()
 
     def compile_shots(self, records, send_to_BLACS, send_to_runviewer):
+        """Compile these records and, if send_to_BLACS, queue them.
+
+        Returns the records, each now carrying the identifier its row will
+        have, for a caller that has to say which shots it submitted.
+
+        The id is settled here rather than in enqueue because the eager path
+        compiles a record before enqueueing it: a file written on that path
+        would have been written before its shot had an id to put in it. What
+        the id is does not change -- enqueue keeps whatever a record arrives
+        with, and a caller that chose its own keeps that."""
+        records = list(records)
+        for record in records:
+            if not record.get('shot_id'):
+                record['shot_id'] = new_shot_id()
         with self.batches_lock:
             self.batches_pending += 1
         self.command_queue.put(
-            ('compile_shots', (list(records), send_to_BLACS, send_to_runviewer))
+            ('compile_shots', (records, send_to_BLACS, send_to_runviewer))
         )
+        return records
 
     def _compile_shot(self, item, send_to_runviewer=False):
         if 'frozen_globals' in item:

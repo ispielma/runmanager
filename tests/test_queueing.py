@@ -1040,6 +1040,79 @@ class CompiledFlagOwnershipTests(unittest.TestCase):
         self.assertEqual(offered['path'], '/tmp/eager.h5')
 
 
+class ShotIdBeforeCompileTests(unittest.TestCase):
+    """A shot has its identifier before anything writes its file.
+
+    The eager path compiles a record before it is enqueued, and the identifier
+    was assigned by enqueue -- so on that path the file was written before the
+    shot had an id to put in it. Nothing about the id itself changes: enqueue
+    keeps whatever a record arrives with, so this fixes when it is decided,
+    not what it is.
+    """
+
+    def test_a_record_is_compiled_with_the_id_its_row_will_have(self):
+        app = FakeRunManager()
+        self.addCleanup(app.queue_manager.shutdown)
+        prepared = []
+        app.queue_manager.prepare_run_file_callback = lambda item: prepared.append(
+            dict(item)
+        )
+
+        app.queue_manager.compile_shots(
+            [
+                {
+                    'path': '/tmp/eager.h5',
+                    'labscript_file': '/tmp/e.py',
+                    'compile_mode': COMPILE_MODE_EAGER,
+                    'compiled': False,
+                    'frozen_globals': {},
+                }
+            ],
+            True,
+            False,
+        )
+        for _ in range(200):
+            if app.queue_manager.controller._items:
+                break
+            time.sleep(0.01)
+
+        self.assertTrue(prepared, 'the record reached the step that writes its file')
+        self.assertTrue(
+            prepared[0].get('shot_id'),
+            'and had its identifier by then, which is what a file can carry',
+        )
+        self.assertEqual(
+            prepared[0]['shot_id'],
+            app.queue_manager.controller._items[0]['shot_id'],
+            'the id written into the file is the id of the row in the queue',
+        )
+
+    def test_an_id_a_record_arrives_with_is_the_one_it_keeps(self):
+        app = FakeRunManager()
+        self.addCleanup(app.queue_manager.shutdown)
+
+        queued = app.queue_manager.compile_shots(
+            [
+                {
+                    'path': '/tmp/eager.h5',
+                    'labscript_file': '/tmp/e.py',
+                    'compile_mode': COMPILE_MODE_EAGER,
+                    'compiled': False,
+                    'shot_id': 'given',
+                }
+            ],
+            True,
+            False,
+        )
+
+        self.assertEqual(
+            [record['shot_id'] for record in queued],
+            ['given'],
+            'the caller is told the ids it submitted under, and an id it chose '
+            'itself is not replaced',
+        )
+
+
 class QueueEditingTests(unittest.TestCase):
     """Delete and Clear around the shot BLACS is running.
 
