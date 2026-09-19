@@ -102,6 +102,10 @@ REFUSED_STATES = {
 # row is not going anywhere either, and the empty state it is in would read as
 # work about to be done.
 BLOCKED_SHOT_STATE = 'blocked'
+# What a shot the queue has taken on but has no row for yet is answered with.
+# The row is made when the worker reaches that record, which under eager
+# compilation is a whole labscript compile after the shot was submitted.
+SUBMITTED_SHOT_STATE = 'submitted'
 # What a shot id with no row in the queue is answered with. Not the empty
 # state, which a row waiting its turn has.
 UNKNOWN_SHOT_STATE = 'unknown'
@@ -249,6 +253,11 @@ class QueueController(object):
         self.paused = False
         self.last_sent_from_queue = None
         self._items = []
+        # Shots taken on for the queue that have no row yet; see
+        # register_accepted(). Of this session only, like a compile in
+        # progress: a batch being compiled when runmanager stops is not
+        # resumed by the one that starts next.
+        self._accepted = set()
         self._lock = threading.RLock()
 
     def _normalise_item(self, item):
@@ -338,6 +347,40 @@ class QueueController(object):
         records = [self._normalise_item(item) for item in items]
         with self._lock:
             self._items.extend(records)
+            # Each shot has its row now, which is what answers for it from
+            # here on -- including once that row leaves, a completed shot
+            # being finished with however busy the batch it came in still is.
+            self._accepted.difference_update(
+                record['shot_id'] for record in records
+            )
+
+    def register_accepted(self, shot_ids):
+        """Take on these shot ids, before there is a row for any of them.
+
+        A shot is taken on when it is submitted; its row is made once the
+        worker has reached that record, which under eager compilation is a
+        whole labscript compile later. In between, the id is this queue's to
+        answer for. Without that the answer is that there is no such shot,
+        whose meaning is that nothing further will happen to it -- so a caller
+        polling for the results of what it has just submitted is told its work
+        was dropped, and submits it all over again.
+
+        Whatever registers ids releases them again: see forget_accepted."""
+        with self._lock:
+            self._accepted.update(str(shot_id) for shot_id in shot_ids)
+
+    def forget_accepted(self, shot_ids):
+        """Let go of ids that have no row and now never will.
+
+        The counterpart of register_accepted, for every way a record can be
+        abandoned. An id left on the books is called pending for the rest of
+        the session, for a shot that will never run, which strands a caller
+        waiting on it exactly as thoroughly as being told it was dropped.
+
+        Ids that did become rows are already gone from the set, so releasing a
+        whole batch releases precisely the records of it that never made one."""
+        with self._lock:
+            self._accepted.difference_update(str(shot_id) for shot_id in shot_ids)
 
     def delete_rows(self, shot_ids):
         """Delete the queued shots with these stable ids.
@@ -441,8 +484,9 @@ class QueueController(object):
         ``blocked``, which is the fact about them a caller waiting on their
         results needs.
 
-        ``state`` is for a human reading it. An id with no row is not pending,
-        because nothing further will happen to it.
+        ``state`` is for a human reading it. A shot that has been taken on but
+        has no row yet is pending and says ``submitted``; an id that is
+        neither is not pending, because nothing further will happen to it.
 
         Reads only. A caller may ask as often as it likes, about shots that
         finished long ago, and the queue is no different afterwards."""
@@ -462,14 +506,16 @@ class QueueController(object):
                     }
                 else:
                     statuses[item['shot_id']] = {'pending': True, 'state': state}
-        return {
-            shot_id: dict(
-                statuses.get(
-                    shot_id, {'pending': False, 'state': UNKNOWN_SHOT_STATE}
-                )
-            )
-            for shot_id in shot_ids
-        }
+            accepted = set(self._accepted)
+        answer = {}
+        for shot_id in shot_ids:
+            if shot_id in statuses:
+                answer[shot_id] = dict(statuses[shot_id])
+            elif shot_id in accepted:
+                answer[shot_id] = {'pending': True, 'state': SUBMITTED_SHOT_STATE}
+            else:
+                answer[shot_id] = {'pending': False, 'state': UNKNOWN_SHOT_STATE}
+        return answer
 
     def get_sequence_attrs(self, path):
         """Return the sequence attributes recorded for the queued shot at
@@ -874,11 +920,24 @@ class QueueManager(QtCore.QObject):
         compiles a record before enqueueing it: a file written on that path
         would have been written before its shot had an id to put in it. What
         the id is does not change -- enqueue keeps whatever a record arrives
-        with, and a caller that chose its own keeps that."""
+        with, and a caller that chose its own keeps that.
+
+        A batch bound for the queue is taken on here too, id by id, so that
+        the whole of the compile it is about to wait through is answered for.
+        A batch that is not bound for the queue is compiled and looked at and
+        queues nothing, so the queue takes on nothing and has nothing to say
+        about it."""
         records = list(records)
         for record in records:
             if not record.get('shot_id'):
                 record['shot_id'] = new_shot_id()
+        if send_to_BLACS:
+            # Before the command goes on the worker's list, never after: the
+            # worker can enqueue a record the moment it has one, and an id
+            # registered after its row was made is an id nothing clears.
+            self.controller.register_accepted(
+                record['shot_id'] for record in records
+            )
         with self.batches_lock:
             self.batches_pending += 1
         self.command_queue.put(
@@ -1150,6 +1209,17 @@ class QueueManager(QtCore.QObject):
                         else:
                             self.output('Ready.\n\n')
                     finally:
+                        # However the batch ended -- every record queued, an
+                        # abort, a shot that would not compile, or a raise on
+                        # the way out -- nothing of it is merely taken on any
+                        # more. The records that reached the queue gave up
+                        # their place as they were enqueued, so this releases
+                        # exactly those that never got there, which would
+                        # otherwise be answered for as work still to come for
+                        # the rest of the session.
+                        self.controller.forget_accepted(
+                            record['shot_id'] for record in records
+                        )
                         # The abort flag is cleared by the next Engage, not
                         # here, so that aborting also stops batches already
                         # queued behind this one. Abort stays available while

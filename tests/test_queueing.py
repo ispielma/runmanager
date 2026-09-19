@@ -39,7 +39,9 @@ from runmanager.queueing import (
     PROVIDER_NONE,
     PROVIDER_SHOT,
     ROW_BACKGROUNDS,
+    SUBMITTED_SHOT_STATE,
     TINTED_ROW_FOREGROUND,
+    UNKNOWN_SHOT_STATE,
     QueueController,
     QueueManager,
     RunmanagerQueueWidget,
@@ -1109,6 +1111,191 @@ class CompiledFlagOwnershipTests(unittest.TestCase):
             offered, 'an eagerly compiled shot is ready the moment it is queued'
         )
         self.assertEqual(offered['path'], '/tmp/eager.h5')
+
+
+class SubmittedShotTests(unittest.TestCase):
+    """A shot runmanager has taken on but has no row for yet.
+
+    Submitting hands a batch to the worker thread; the row appears when the
+    worker reaches that record, which under eager compilation is a whole
+    labscript compile away -- seconds, or minutes. A caller that submits and
+    asks straight away is asking about that gap, and being told the queue has
+    never heard of the shot means that nothing further will happen to it,
+    which is an invitation to submit the same work again.
+
+    The other half is as important: every way a record can be abandoned has to
+    let go of it again. An id runmanager keeps calling pending, for a shot
+    that will never run, strands the caller just as thoroughly.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.compiles = True
+        self.compiled = []
+        # A compile the test can stop partway, to ask what is true while the
+        # worker is in the middle of a batch. Held compiles are released
+        # before the worker is shut down, so nothing is left waiting.
+        self.compiling = threading.Event()
+        self.release = threading.Event()
+        self.release.set()
+        self.hold_from = 1
+        self.aborted = threading.Event()
+        # The application's Abort button, which goes out when the last batch
+        # is finished with. Waiting on it rather than on a sleep: it is set
+        # after the worker has let go of the batch, so what this test asks
+        # afterwards is what the worker left behind.
+        self.batch_finished = threading.Event()
+        self.manager = QueueManager(
+            lambda item: None,
+            self.compile_run_file,
+            lambda path: None,
+            lambda *args, **kwargs: None,
+            self.aborted,
+            self.note_abort_enabled,
+        )
+        self.addCleanup(self.manager.shutdown)
+        self.addCleanup(self.release.set)
+
+    def note_abort_enabled(self, enabled):
+        if not enabled:
+            self.batch_finished.set()
+
+    def compile_run_file(self, labscript_file, path):
+        self.compiled.append(path)
+        self.compiling.set()
+        if len(self.compiled) >= self.hold_from:
+            self.release.wait(5)
+        if isinstance(self.compiles, Exception):
+            raise self.compiles
+        return self.compiles
+
+    def submit(self, count=1, send_to_BLACS=True):
+        records = self.manager.compile_shots(
+            [
+                {
+                    'path': os.path.join(self.directory, 'shot_%d.h5' % n),
+                    'labscript_file': os.path.join(self.directory, 'e.py'),
+                    'compile_mode': COMPILE_MODE_EAGER,
+                    'compiled': False,
+                }
+                for n in range(count)
+            ],
+            send_to_BLACS,
+            False,
+        )
+        return [record['shot_id'] for record in records]
+
+    def status(self, shot_ids):
+        return self.manager.get_shot_statuses(shot_ids)
+
+    def wait_until(self, predicate):
+        for _ in range(500):
+            if predicate():
+                return True
+            time.sleep(0.01)
+        return False
+
+    def test_a_shot_just_submitted_is_pending_before_it_has_a_row(self):
+        self.release.clear()
+        [shot_id] = self.submit()
+        self.assertTrue(
+            self.wait_until(self.compiling.is_set), 'the worker has the batch'
+        )
+
+        self.assertEqual(self.manager.get_queue_paths(), [], 'and no row yet')
+        self.assertEqual(
+            self.status([shot_id])[shot_id],
+            {'pending': True, 'state': SUBMITTED_SHOT_STATE},
+            'the shot was taken on when it was submitted, and a caller told '
+            'its id is owed an answer about it from that moment',
+        )
+
+    def test_the_row_answers_for_the_shot_once_there_is_one(self):
+        [shot_id] = self.submit()
+        self.assertTrue(self.wait_until(lambda: self.manager.get_queue_paths()))
+
+        self.assertEqual(
+            self.status([shot_id])[shot_id], {'pending': True, 'state': ''}
+        )
+
+    def test_a_shot_that_completed_before_its_batch_did_is_finished_with(self):
+        # The shots ahead of a long batch are queued, offered and completed
+        # while the rest of it is still compiling. A shot that has produced
+        # its result is finished with, whatever the batch it arrived in is
+        # still doing.
+        self.hold_from = 2
+        self.release.clear()
+        first, _second = self.submit(count=2)
+        self.assertTrue(self.wait_until(lambda: self.manager.get_queue_paths()))
+        offered = self.manager.offer_next()
+        self.manager.shot_finished(offered['shot_id'], 'completed')
+
+        self.assertEqual(
+            self.status([first])[first],
+            {'pending': False, 'state': UNKNOWN_SHOT_STATE},
+        )
+
+    def test_an_aborted_batch_is_let_go_of(self):
+        # Abort stops the batch before its first record, so no row is ever
+        # made for any of them and none of them will run.
+        self.aborted.set()
+        shot_ids = self.submit(count=3)
+
+        self.assertTrue(self.batch_finished.wait(5))
+        self.assertEqual(
+            self.status(shot_ids),
+            {
+                shot_id: {'pending': False, 'state': UNKNOWN_SHOT_STATE}
+                for shot_id in shot_ids
+            },
+        )
+
+    def test_a_batch_stopped_by_a_shot_that_would_not_compile_is_let_go_of(self):
+        # A failed compile stops the batch where it stands, so neither that
+        # record nor the ones behind it reach the queue.
+        self.compiles = False
+        shot_ids = self.submit(count=3)
+
+        self.assertTrue(self.batch_finished.wait(5))
+        self.assertEqual(self.manager.get_queue_paths(), [], 'nothing queued')
+        self.assertEqual(
+            self.status(shot_ids),
+            {
+                shot_id: {'pending': False, 'state': UNKNOWN_SHOT_STATE}
+                for shot_id in shot_ids
+            },
+        )
+
+    def test_a_batch_that_raised_partway_through_is_let_go_of(self):
+        # A compile that cannot even start raises, which leaves the batch by a
+        # third way again. The records behind it are no more queued than the
+        # ones an abort left.
+        self.compiles = RuntimeError('the compiler could not be reached')
+        shot_ids = self.submit(count=2)
+
+        self.assertTrue(self.batch_finished.wait(5))
+        self.assertEqual(
+            self.status(shot_ids),
+            {
+                shot_id: {'pending': False, 'state': UNKNOWN_SHOT_STATE}
+                for shot_id in shot_ids
+            },
+        )
+
+    def test_a_batch_that_is_not_going_to_the_queue_is_not_taken_on(self):
+        # Compiling a batch for a look at it in runviewer queues nothing, so
+        # there is no queued shot for the queue to answer about.
+        self.release.clear()
+        [shot_id] = self.submit(send_to_BLACS=False)
+        self.assertTrue(
+            self.wait_until(self.compiling.is_set), 'the worker has the batch'
+        )
+
+        self.assertEqual(
+            self.status([shot_id])[shot_id],
+            {'pending': False, 'state': UNKNOWN_SHOT_STATE},
+        )
 
 
 class ContinuingSequenceAnchorTests(unittest.TestCase):
