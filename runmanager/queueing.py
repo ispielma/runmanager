@@ -910,6 +910,24 @@ class QueueManager(QtCore.QObject):
         self.controller.enqueue(list(items))
         self.queueChanged.emit()
 
+    def abort(self):
+        """Stop the batches this queue is holding, and say whether any were.
+
+        An abort is about work that has been submitted: the batch being
+        compiled and every batch waiting behind it. With none of them here
+        there is nothing to stop, and setting the flag anyway would leave it
+        set with nothing coming that would clear it -- which is every later
+        submission refused, by a runmanager that looks idle.
+
+        Counted under the same lock the worker gives a batch back under, so a
+        batch is either stopped by this abort or submitted after it, and never
+        both at once."""
+        with self.batches_lock:
+            if not self.batches_pending:
+                return False
+            self.compilation_aborted.set()
+            return True
+
     def compile_shots(self, records, send_to_BLACS, send_to_runviewer):
         """Compile these records and, if send_to_BLACS, queue them.
 
@@ -1220,13 +1238,20 @@ class QueueManager(QtCore.QObject):
                         self.controller.forget_accepted(
                             record['shot_id'] for record in records
                         )
-                        # The abort flag is cleared by the next Engage, not
-                        # here, so that aborting also stops batches already
-                        # queued behind this one. Abort stays available while
-                        # any of them are still pending:
+                        # An abort applies to every batch this queue is
+                        # holding, not only the one it interrupted, so the flag
+                        # outlives this batch while others are still pending --
+                        # including batches submitted while it was in force,
+                        # which are counted in under this same lock. It is let
+                        # go of with the last of them: whoever aborted has had
+                        # everything they asked for stopped, and a flag left
+                        # set would stop work nobody has asked for yet. Abort
+                        # stays available for exactly as long.
                         with self.batches_lock:
                             self.batches_pending -= 1
                             last_batch = self.batches_pending == 0
+                            if last_batch:
+                                self.compilation_aborted.clear()
                         if last_batch:
                             self.set_abort_enabled(False)
                 else:

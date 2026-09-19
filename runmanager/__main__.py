@@ -2687,14 +2687,19 @@ class RunManager(LabscriptApplication):
                     'n_runs': run_file_info['n_runs'],
                 }
             )
-        self.compilation_aborted.clear()
         self.ui.pushButton_abort.setEnabled(True)
         return self.queue_manager.compile_shots(
             queue_records, send_to_BLACS, send_to_runviewer
         )
 
     def on_abort_clicked(self):
-        self.compilation_aborted.set()
+        """Stop the batches that have been submitted and not yet compiled.
+
+        The queue decides what that means and how long it lasts, because it is
+        the queue that knows which batches are still in hand. Nothing here
+        calls an abort off again: a submission is work asked for, not a reason
+        to stop stopping."""
+        self.queue_manager.abort()
 
     def on_restart_subprocess_clicked(self):
         # Kill and restart the compilation subprocess

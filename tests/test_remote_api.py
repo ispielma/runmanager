@@ -229,6 +229,7 @@ class SubmittingApp(object):
     get_sequence_attrs_to_extend = RunManager.get_sequence_attrs_to_extend
     reindex_run_file_infos = RunManager.reindex_run_file_infos
     make_h5_files = RunManager.make_h5_files
+    on_abort_clicked = RunManager.on_abort_clicked
     parse_globals = RunManager.parse_globals
 
     def __init__(self, directory):
@@ -863,6 +864,148 @@ class ShotStatusTests(RemoteCommandTestCase):
             )
 
         self.assertEqual(sent, [('shot_status', (['one'],))])
+
+
+class AbortDuringSubmissionTests(RemoteCommandTestCase):
+    """An abort the operator has pressed is not called off by a submission.
+
+    Abort stops the batch being compiled and every batch already queued behind
+    it. A submission landing while those are draining is work the operator has
+    just said they do not want, and a remote caller is in no position to decide
+    otherwise: it cannot see the window, and the operator cannot see it.
+
+    It has to end by itself, though. Nothing holds an abort open once the
+    batches it stopped have been let go of, so the next submission compiles
+    without anybody having to press anything -- there is no Engage button a
+    remote caller could press.
+    """
+
+    def make_app(self):
+        return SubmittingApp(self.directory)
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        # next_sequence_index takes a zlock and keeps a counter on disk. Which
+        # index it hands out does not matter here.
+        patcher = mock.patch.object(
+            runmanager, 'next_sequence_index', lambda *a, **k: 7
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        super().setUp()
+        # Cleanups run in reverse, so this releases the blocked compile before
+        # the queue is asked to shut down.
+        self.addCleanup(self.app.compiling.set)
+        runmanager.new_global(self.app.globals_file, 'group', 'x')
+        runmanager.set_value(self.app.globals_file, 'group', 'x', '0')
+        self.app.queue_manager.enqueue(
+            [
+                {
+                    'path': os.path.join(self.directory, 'experiment_007.h5'),
+                    'compiled': True,
+                    'run_no': 7,
+                    'n_runs': 8,
+                    'sequence_attrs': {
+                        'script_basename': 'experiment',
+                        'sequence_date': '2026-09-18',
+                        'sequence_index': 7,
+                        'sequence_id': '20260918T101112_experiment',
+                    },
+                }
+            ]
+        )
+        # Where a batch is when Abort reaches it: the worker has it and is in
+        # the middle of compiling its first shot. Waited on rather than slept
+        # through, so that what the operator interrupts is settled.
+        self.compiling_started = threading.Event()
+        compile_run_file = self.app.queue_manager.compile_run_file_callback
+
+        def note_compile_started(labscript_file, path):
+            self.compiling_started.set()
+            return compile_run_file(labscript_file, path)
+
+        self.app.queue_manager.compile_run_file_callback = note_compile_started
+        # The queue turns the Abort button off as it lets go of the last batch
+        # it was holding, which is the moment to ask what it left behind.
+        self.batches_finished = threading.Event()
+        self.app.queue_manager.set_abort_enabled = self.note_abort_enabled
+
+    def note_abort_enabled(self, enabled):
+        if not enabled:
+            self.batches_finished.set()
+
+    def submit(self, *entries):
+        return self.request('submit_shots', [dict(entry) for entry in entries])
+
+    def status(self, descriptors):
+        shot_ids = [descriptor['shot_id'] for descriptor in descriptors]
+        return self.app.queue_manager.get_shot_statuses(shot_ids)
+
+    def test_a_submission_does_not_call_off_an_abort_that_is_in_force(self):
+        first = self.submit({'x': 1})
+        self.assertTrue(
+            self.compiling_started.wait(5), 'the worker has the first batch'
+        )
+        self.app.on_abort_clicked()
+        stopped = self.submit({'x': 2})
+        self.app.compiling.set()
+
+        self.assertTrue(self.batches_finished.wait(5), 'the batches were let go')
+        self.assertEqual(
+            [status['state'] for status in self.status(stopped).values()],
+            [UNKNOWN_SHOT_STATE],
+            'the batch submitted during the abort was stopped by it: no row '
+            'was ever made for its shot, and nothing further will happen to it',
+        )
+        self.assertEqual(
+            [status['pending'] for status in self.status(first).values()],
+            [True],
+            'and the shot that was already compiling when Abort was pressed '
+            'is not taken back out of the queue',
+        )
+
+    def test_an_abort_with_nothing_to_stop_stops_nothing(self):
+        # Abort is reachable from a remote caller at any time, including while
+        # runmanager is idle and the operator's own Abort button is greyed
+        # out. An abort kept over work that has not been submitted yet would
+        # stop the next batch to arrive, whoever sent it and however long
+        # afterwards.
+        self.app.compiling.set()
+        self.app.on_abort_clicked()
+
+        carries_on = self.submit({'x': 1})
+
+        self.assertTrue(self.batches_finished.wait(5))
+        self.assertEqual(
+            [status['pending'] for status in self.status(carries_on).values()],
+            [True],
+            'there was nothing to stop, so nothing was stopped',
+        )
+
+    def test_the_abort_ends_with_the_batches_it_stopped(self):
+        # An abort that outlived the work it stopped would refuse every later
+        # submission, with nothing in the window saying why.
+        self.submit({'x': 1})
+        self.assertTrue(self.compiling_started.wait(5))
+        self.app.on_abort_clicked()
+        self.submit({'x': 2})
+        self.app.compiling.set()
+        self.assertTrue(self.batches_finished.wait(5))
+        self.batches_finished.clear()
+
+        carries_on = self.submit({'x': 3})
+
+        self.assertTrue(self.batches_finished.wait(5))
+        self.assertFalse(
+            self.app.compilation_aborted.is_set(), 'the abort is over'
+        )
+        self.assertEqual(
+            [status['pending'] for status in self.status(carries_on).values()],
+            [True],
+            'and the next batch compiles and queues as though nothing had '
+            'happened',
+        )
 
 
 if __name__ == '__main__':
