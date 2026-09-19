@@ -794,13 +794,19 @@ def make_run_files(
     new_sequence_details(), so preferably these should be used.
 
     Shuffle will randomise the order that the run files are generated in with respect to
-    which element of shots they come from. This function returns a *generator*. The run
-    files are not actually created until you loop over this generator (which gives you
-    the filepaths). This is useful for not having to clean up as many unused files in
-    the event of failed compilation of labscripts. If you want all the run files to be
-    created at some point, simply convert the returned generator to a list. The
-    filenames the run files are given is simply the sequence_id with increasing integers
-    appended."""
+    which element of shots they come from. Shuffled or not, what is yielded comes in run
+    number order rather than in the order of shots, and each yielded item describes the
+    shot that went into it: with return_infos the info carries that shot's globals
+    beside its path and run number, and without them the file at the yielded path holds
+    them. So a caller that shuffles needs no separate note of where each element of
+    shots ended up.
+
+    This function returns a *generator*. The run files are not actually created until
+    you loop over this generator (which gives you the filepaths). This is useful for not
+    having to clean up as many unused files in the event of failed compilation of
+    labscripts. If you want all the run files to be created at some point, simply
+    convert the returned generator to a list. The filenames the run files are given is
+    simply the sequence_id with increasing integers appended."""
     indexed_shots = list(enumerate(shots))
     nruns = len(indexed_shots)
     ndigits = int(np.ceil(np.log10(nruns)))

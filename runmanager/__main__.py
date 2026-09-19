@@ -4499,7 +4499,7 @@ class RunManager(LabscriptApplication):
                 [
                     {
                         'shot_globals': shot_globals,
-                        'sequence_attrs': dict(sequence_attrs),
+                        'sequence_attrs': sequence_attrs,
                     }
                     for shot_globals in shots
                 ],
