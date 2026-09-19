@@ -246,13 +246,14 @@ class SubmittingApp(object):
 
     get_queue_append_filepath = RunManager.get_queue_append_filepath
     get_last_sent_from_queue_filepath = RunManager.get_last_sent_from_queue_filepath
-    get_continuing_sequence_anchor = RunManager.get_continuing_sequence_anchor
-    get_replaced_queue_anchor = RunManager.get_replaced_queue_anchor
     get_submission_anchor = RunManager.get_submission_anchor
     get_sequence_attrs_to_extend = RunManager.get_sequence_attrs_to_extend
+    compile_and_queue_shots = RunManager.compile_and_queue_shots
     reindex_run_file_infos = RunManager.reindex_run_file_infos
     make_h5_files = RunManager.make_h5_files
     on_abort_clicked = RunManager.on_abort_clicked
+    on_engage_clicked = RunManager.on_engage_clicked
+    expand_pending_shots = RunManager.expand_pending_shots
     parse_globals = RunManager.parse_globals
 
     def __init__(self, directory):
@@ -272,7 +273,13 @@ class SubmittingApp(object):
         self.queue_compile_mode_combo = types.SimpleNamespace(
             currentData=lambda: COMPILE_MODE_EAGER
         )
+        # What Engage puts in front of the operator instead of raising.
+        self.said = []
+        self.output_box = types.SimpleNamespace(
+            output=lambda text, red=False: self.said.append(text)
+        )
         self.ui = types.SimpleNamespace(
+            checkBox_run_shots=types.SimpleNamespace(isChecked=lambda: True),
             checkBox_view_shots=types.SimpleNamespace(isChecked=lambda: False),
             lineEdit_labscript_file=types.SimpleNamespace(
                 text=lambda: self.labscript_file
@@ -283,10 +290,8 @@ class SubmittingApp(object):
             pushButton_shuffle=types.SimpleNamespace(checkState=lambda: 0),
             pushButton_abort=types.SimpleNamespace(setEnabled=lambda enabled: None),
         )
-        # What each submission asked the window to do, where it asked for its
-        # shots to be sent, and the records of each batch that reached the
-        # queue.
-        self.modes = []
+        # Where each submission asked for its shots to be sent, and the
+        # records of each batch that reached the queue.
         self.destinations = []
         self.batches = []
         self.queue_manager = QueueManager(
@@ -309,11 +314,6 @@ class SubmittingApp(object):
     def compile_run_file(self, labscript_file, path):
         self.compiling.wait()
         return True
-
-    def compile_and_queue_shots(self, *args, **kwargs):
-        """Record what was asked for, and then really do it."""
-        self.modes.append(args[:3])
-        return RunManager.compile_and_queue_shots(self, *args, **kwargs)
 
     def get_active_groups(self, interactive=True):
         return {'group': self.globals_file}
@@ -487,13 +487,18 @@ class SubmitShotsTests(RemoteCommandTestCase):
         # can be checked for -- leaves the queue as it was found.
         self.submit({'x': 1}, {'x': 2})
 
-        self.assertEqual(
-            [mode for mode, _, _ in self.app.modes],
-            [main_module.SUBMISSION_MODE_CONTINUE_SEQUENCE],
-            'a remote submission continues the sequence already running and '
-            'never clears the queue',
-        )
         self.assertEqual(len(self.queued()), 2)
+        self.assertEqual(
+            {record['sequence_attrs']['sequence_id'] for record in self.queued()},
+            {self.SEQUENCE['sequence_id']},
+            'onto the sequence already running',
+        )
+        self.assertIn(
+            self.anchor,
+            self.app.queue_manager.get_queue_paths(),
+            'and the shot that was queued when the batch arrived is queued '
+            'still: a remote submission adds to the queue, never replaces it',
+        )
 
     def test_a_submission_that_raises_has_queued_nothing_at_all(self):
         # The window is the operator's throughout, and clearing the labscript
@@ -1021,15 +1026,17 @@ class AbortDuringSubmissionTests(RemoteCommandTestCase):
 class SubmissionAnchorTests(RemoteCommandTestCase):
     """The shot each submission mode numbers its batch after.
 
-    A mode that adds to a sequence is refused when there is no sequence to add
-    to. The queue empties on its own -- BLACS takes the last shot on a thread
-    of its own -- so the shot a mode was chosen for can be gone by the time
-    the batch is made, and a new sequence written in its place is the opposite
-    of what was asked for, with nothing saying it happened.
+    A mode that adds to a sequence looks in two places for one, in the order
+    that mode calls for, and starts a sequence of its own when neither has
+    anything. Nothing is refused: a runmanager that has queued nothing and
+    sent nothing has no last sequence at all, and starting one is the only
+    thing "add shots to the last sequence" can mean there.
 
-    A mode that carries on from whatever there is refuses nothing: with
-    nothing to carry on from it starts a sequence, which is what it does on
-    the first submission of a run.
+    The queue empties on its own -- BLACS takes the last shot on a thread of
+    its own -- so the shot a mode was chosen against can be gone by the time
+    the batch is made. The shot last sent to BLACS is then the one the
+    operator was looking at in the queue, which is why it is what "add shots
+    to last sequence" falls back to.
     """
 
     SEQUENCE = {
@@ -1069,34 +1076,42 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         return path
 
     def engage(self, submission_mode):
-        return self.app.compile_and_queue_shots(submission_mode, True, False)
-
-    def test_adding_to_the_last_sequence_refuses_when_the_queue_has_emptied(self):
-        with self.assertRaises(Exception) as raised:
-            self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
-
-        self.assertEqual(self.app.batches, [], 'nothing was made or submitted')
-        self.assertIn('queue', str(raised.exception))
-
-    def test_replacing_the_queue_refuses_when_there_is_nothing_to_add_to(self):
-        with self.assertRaises(Exception) as raised:
-            self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE)
-
-        self.assertEqual(self.app.batches, [])
-        self.assertNotIn(
-            'None',
-            str(raised.exception),
-            'the operator is told there is no sequence to add to, not handed '
-            'the name of the shot that was not found',
+        return self.app.compile_and_queue_shots(
+            submission_mode, True, False, self.app.expand_pending_shots()
         )
 
-    def test_carrying_on_from_nothing_starts_a_sequence(self):
-        records = self.engage(main_module.SUBMISSION_MODE_CONTINUE_SEQUENCE)
+    def test_adding_to_the_last_sequence_carries_on_from_the_shot_blacs_has(self):
+        # BLACS can take the last queued shot between the menu being drawn and
+        # the item being clicked. The shot it was sent is the one the operator
+        # was looking at, so that is the sequence the batch joins -- rather
+        # than a new sequence written where an extension was asked for.
+        sent = os.path.join(self.directory, 'experiment_007.h5')
+        runmanager.make_single_run_file(sent, None, {}, self.SEQUENCE, 7, 8)
+        self.app.queue_manager.set_last_sent_from_queue(sent)
+
+        records = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
+
+        self.assertEqual(
+            [record['sequence_attrs']['sequence_id'] for record in records],
+            [self.SEQUENCE['sequence_id']],
+        )
+
+    def test_adding_to_nothing_at_all_starts_a_sequence(self):
+        records = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
 
         self.assertEqual(
             [record['sequence_attrs']['sequence_index'] for record in records],
             [12],
-            'a submission with nothing to carry on from starts a sequence',
+            'a runmanager with nothing queued and nothing ever sent has no '
+            'last sequence, so this batch is the start of one',
+        )
+
+    def test_replacing_nothing_at_all_starts_a_sequence(self):
+        records = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE)
+
+        self.assertEqual(
+            [record['sequence_attrs']['sequence_index'] for record in records],
+            [12],
         )
 
     def test_the_queue_is_read_once_for_the_sequence_being_added_to(self):
@@ -1137,6 +1152,99 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         self.assertEqual(
             [record['sequence_attrs']['sequence_id'] for record in records],
             [self.SEQUENCE['sequence_id']],
+        )
+        self.assertEqual(
+            self.app.queue_manager.get_queue_paths(),
+            [],
+            'and the work that was waiting was thrown away, which is the '
+            'other half of what the mode offers',
+        )
+        self.assertEqual(
+            [record['run_no'] for record in records],
+            [0],
+            'the replacement takes back the run numbers the deleted shots '
+            'gave up, rather than carrying on past them',
+        )
+
+
+class ShuffledEngageTests(RemoteCommandTestCase):
+    """Engaging a scan with the shuffle button down.
+
+    Shuffle decorrelates the order the shots run in from the order the scan
+    was written in, so that whatever the apparatus does slowly does not line
+    up with the parameter being scanned. A batch queued in the order it was
+    expanded leaves the scan correlated with exactly the drift the button was
+    pressed to separate it from, and the window says it was shuffled.
+
+    The globals each shot is compiled from travel with it as far as the
+    queue, and a filename prefix may be written in terms of a global. So a
+    batch whose files and globals come apart is a shot named for one set of
+    parameters and run with another, which is a result recorded against
+    parameters that never ran.
+    """
+
+    def make_app(self):
+        return SubmittingApp(self.directory)
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        patcher = mock.patch.object(
+            runmanager, 'next_sequence_index', lambda *a, **k: 3
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # A shuffle this test can say the answer to. Reversing is a
+        # permutation of three shots like any other, and the only one whose
+        # result can be written down.
+        patcher = mock.patch.object(
+            runmanager.random, 'shuffle', lambda sequence: sequence.reverse()
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        super().setUp()
+        self.addCleanup(self.app.compiling.set)
+        runmanager.new_global(self.app.globals_file, 'group', 'x')
+        runmanager.set_value(self.app.globals_file, 'group', 'x', '0')
+        runmanager.set_scan(self.app.globals_file, 'group', 'x', '[1, 2, 3]')
+        runmanager.set_scan_enabled(self.app.globals_file, 'group', 'x', True)
+        runmanager.set_expansion(self.app.globals_file, 'group', 'x', 'outer')
+        self.app.exp_config.filename_prefix_format = '{globals[x]}_{script_basename}'
+        self.app.ui.pushButton_shuffle.checkState = (
+            lambda: main_module.QtCore.Qt.Checked
+        )
+
+    def engage(self):
+        """Press Engage, and hand back the records that reached the queue."""
+        self.app.wait_until_preparse_complete()
+        self.app.on_engage_clicked()
+        self.assertEqual(self.app.said, [], 'Engage put nothing in the output box')
+        self.assertEqual(len(self.app.batches), 1)
+        return self.app.batches[0]
+
+    def test_a_shuffled_batch_reaches_the_queue_in_the_shuffled_order(self):
+        records = self.engage()
+
+        self.assertEqual(
+            [record['frozen_globals']['x'] for record in records],
+            ['3', '2', '1'],
+            'the queue was built in the order the shuffle chose, not the '
+            'order the scan was written in',
+        )
+
+    def test_a_shuffled_shot_is_named_after_the_globals_it_carries(self):
+        records = self.engage()
+
+        self.assertEqual(
+            [
+                (
+                    os.path.basename(record['path']).split('_')[0],
+                    record['frozen_globals']['x'],
+                )
+                for record in records
+            ],
+            [('3', '3'), ('2', '2'), ('1', '1')],
+            'each file is named for the globals that are compiled into it',
         )
 
 

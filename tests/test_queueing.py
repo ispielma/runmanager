@@ -504,7 +504,8 @@ class FakeRunManager(object):
     offer_shot = RunManager.offer_shot
     get_queue_append_filepath = RunManager.get_queue_append_filepath
     get_last_sent_from_queue_filepath = RunManager.get_last_sent_from_queue_filepath
-    get_continuing_sequence_anchor = RunManager.get_continuing_sequence_anchor
+    get_submission_anchor = RunManager.get_submission_anchor
+    can_use_alternate_submission_mode = RunManager.can_use_alternate_submission_mode
     reindex_run_file_infos = RunManager.reindex_run_file_infos
     make_h5_files = RunManager.make_h5_files
     prepare_queue_shot = RunManager.prepare_queue_shot
@@ -540,8 +541,10 @@ class FakeRunManager(object):
         self.default_shots_taken = 0
         # Read only when a compile actually starts, and read on this thread
         # before the compile thread is started, so no event loop is needed:
+        self.run_shots = True
         self.ui = types.SimpleNamespace(
-            checkBox_view_shots=types.SimpleNamespace(isChecked=lambda: False)
+            checkBox_view_shots=types.SimpleNamespace(isChecked=lambda: False),
+            checkBox_run_shots=types.SimpleNamespace(isChecked=lambda: self.run_shots),
         )
 
     def compile_run_file(self, labscript_file, path):
@@ -1335,7 +1338,7 @@ class ContinuingSequenceAnchorTests(unittest.TestCase):
             'BLACS has the first shot',
         )
         self.assertEqual(
-            self.app.get_continuing_sequence_anchor(),
+            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
             waiting,
             'and the queue still ends where it ends',
         )
@@ -1351,13 +1354,16 @@ class ContinuingSequenceAnchorTests(unittest.TestCase):
             self.app.queue_manager.get_queue_paths(), [], 'the queue is empty'
         )
         self.assertEqual(
-            self.app.get_continuing_sequence_anchor(),
+            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
             sent,
             'the shot that just ran is what the next submission continues',
         )
 
     def test_a_runmanager_that_has_sent_nothing_has_nothing_to_continue(self):
-        self.assertIsNone(self.app.get_continuing_sequence_anchor())
+        self.assertIsNone(
+            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
+            'and a batch with nothing to be numbered after starts a sequence',
+        )
 
     def run_a_shot_and_let_blacs_ask_again(self, app, default_shot=None):
         """Submit one shot, run it to completion, and let BLACS ask for more.
@@ -1412,7 +1418,7 @@ class ContinuingSequenceAnchorTests(unittest.TestCase):
             'what BLACS is running while the caller works out what to send',
         )
         self.assertEqual(
-            app.get_continuing_sequence_anchor(),
+            app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
             submitted,
             'and the sequence still carries on from the submitted shot',
         )
@@ -1427,7 +1433,7 @@ class ContinuingSequenceAnchorTests(unittest.TestCase):
 
         self.assertEqual(filler['state'], PROVIDER_NONE, 'nothing filled the gap')
         self.assertIsNone(
-            self.app.get_continuing_sequence_anchor(),
+            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
             'and the shot that ran is no longer offered as the anchor',
         )
         self.assertTrue(os.path.exists(submitted))
@@ -1766,11 +1772,7 @@ class QueueEditingTests(unittest.TestCase):
 
         anchor = self.app.get_last_sent_from_queue_filepath()
         replacements = self.app.reindex_run_file_infos(
-            [{}, {}],
-            self.directory,
-            'sequence',
-            indexed_path_base=anchor,
-            index_start=0,
+            [{}, {}], anchor, index_start=0
         )
 
         self.assertEqual(anchor, running, 'the sequence added to is the running shot')
@@ -2832,9 +2834,7 @@ class SequenceContinuityTests(unittest.TestCase):
         _, run_files = self.app.make_h5_files(
             self.path('experiment.py'),
             self.directory,
-            {},
             [{'x': n} for n in range(count)],
-            False,
             with_metadata=True,
             indexed_path_base=anchor,
             index_start=index_start,
@@ -2951,9 +2951,7 @@ class SequenceContinuityTests(unittest.TestCase):
         self.app.make_h5_files(
             self.path('experiment.py'),
             self.directory,
-            {},
             [{'x': 0}],
-            False,
             with_metadata=True,
         )
 
@@ -3087,7 +3085,7 @@ class DeletedAnchorTests(unittest.TestCase):
 
         self.assertFalse(os.path.exists(sent), 'the row took its file with it')
         self.assertIsNone(
-            self.app.get_continuing_sequence_anchor(),
+            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
             'and a deleted shot is not a sequence for the next batch to join',
         )
 
@@ -3137,7 +3135,7 @@ class DeletedAnchorTests(unittest.TestCase):
         self.assertEqual(filler['path'], default_shot, 'the gap was filled')
         self.assertFalse(os.path.exists(sent), 'and the cancelled row went')
         self.assertIsNone(
-            app.get_continuing_sequence_anchor(),
+            app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
             'a shot the operator cancelled and whose file has gone is not '
             'what the next submission carries on from',
         )
@@ -3146,9 +3144,9 @@ class DeletedAnchorTests(unittest.TestCase):
 class EngageWindow(object):
     """The window Engage reads, over what its own warnings need.
 
-    ``get_queue_append_filepath`` stands for an empty queue, which is the
-    state the modes below are asked about, and ``compile_and_queue_shots``
-    records what reached it rather than compiling anything.
+    ``expand_pending_shots`` stands for the globals the window would expand,
+    and ``compile_and_queue_shots`` records what reached it rather than
+    compiling anything.
     """
 
     on_engage_clicked = RunManager.on_engage_clicked
@@ -3161,11 +3159,59 @@ class EngageWindow(object):
             checkBox_view_shots=types.SimpleNamespace(isChecked=lambda: view_shots),
         )
 
-    def get_queue_append_filepath(self):
-        return None
+    def expand_pending_shots(self):
+        return [({'x': 0}, {'x': '0'})]
 
     def compile_and_queue_shots(self, submission_mode, *args):
         self.submitted.append(submission_mode)
+
+
+class AlternateSubmissionMenuTests(unittest.TestCase):
+    """When the Engage menu offers to add shots to the last sequence.
+
+    The items name a last sequence, so they are offered while there is one to
+    name: a shot still in the queue, or -- once BLACS has taken the last of
+    them -- the shot it was sent. A runmanager that has queued nothing and
+    sent nothing has no last sequence, and an item promising one there would
+    be promising something that does not exist.
+
+    They are all about the queue, so none of them is offered while nothing is
+    going to BLACS at all.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.app = FakeRunManager()
+        self.addCleanup(self.app.queue_manager.shutdown)
+
+    def path(self, name):
+        return os.path.join(self.directory, name)
+
+    def test_a_queued_shot_is_a_sequence_to_add_to(self):
+        self.app.queue_manager.enqueue([queued_shot(self.path('experiment_00.h5'))])
+
+        self.assertTrue(self.app.can_use_alternate_submission_mode())
+
+    def test_the_shot_blacs_was_sent_is_a_sequence_to_add_to(self):
+        # BLACS takes the last queued shot on a thread of its own, so an
+        # operator reaching for the menu can find the queue empty underneath
+        # them. The shot it was sent is the one they were looking at.
+        self.app.queue_manager.enqueue([queued_shot(self.path('experiment_00.h5'))])
+        offered = self.app.offer_shot()
+        self.app.queue_manager.shot_finished(offered['shot_id'], 'completed')
+
+        self.assertEqual(self.app.queue_manager.get_queue_paths(), [])
+        self.assertTrue(self.app.can_use_alternate_submission_mode())
+
+    def test_nothing_queued_and_nothing_sent_offers_nothing(self):
+        self.assertFalse(self.app.can_use_alternate_submission_mode())
+
+    def test_nothing_is_offered_while_no_shots_are_going_to_blacs(self):
+        self.app.queue_manager.enqueue([queued_shot(self.path('experiment_00.h5'))])
+        self.app.run_shots = False
+
+        self.assertFalse(self.app.can_use_alternate_submission_mode())
 
 
 class EngageGuardTests(unittest.TestCase):
@@ -3177,22 +3223,20 @@ class EngageGuardTests(unittest.TestCase):
     queue moves on its own between the two.
     """
 
-    def test_continuing_a_sequence_is_not_refused_for_an_empty_queue(self):
-        # The mode exists to work with an empty queue: between one remote
-        # submission and the next, empty is the normal state. A warning
-        # written for the modes that add to queued shots must not take it in
-        # with them.
+    def test_a_mode_that_has_somewhere_to_send_its_shots_is_engaged(self):
+        # The other side of the warning below: the modes about the queue are
+        # refused for want of BLACS and for nothing else, and what Engage
+        # hands on is the mode the operator picked.
         window = EngageWindow()
 
         window.on_engage_clicked(
-            submission_mode=main_module.SUBMISSION_MODE_CONTINUE_SEQUENCE
+            submission_mode=main_module.SUBMISSION_MODE_ADD_SHOTS
         )
 
         self.assertEqual(
-            window.submitted,
-            [main_module.SUBMISSION_MODE_CONTINUE_SEQUENCE],
-            'carrying on from the shot last sent is what this mode is for',
+            window.submitted, [main_module.SUBMISSION_MODE_ADD_SHOTS]
         )
+        self.assertEqual(window.output_box.lines, [], 'and nothing was warned about')
 
     def test_an_alternate_mode_still_needs_shots_to_be_sent_to_blacs(self):
         window = EngageWindow(run_shots=False, view_shots=True)
@@ -3203,6 +3247,19 @@ class EngageGuardTests(unittest.TestCase):
 
         self.assertEqual(window.submitted, [], 'nothing was submitted')
         self.assertTrue(window.output_box.said('BLACS'))
+
+    def test_a_new_sequence_needs_only_somewhere_to_send_its_shots(self):
+        # The warning above is for the modes about the queue, and only those.
+        # A new sequence asks nothing of the queue, so looking at the shots in
+        # runviewer without running them is a whole use of Engage.
+        window = EngageWindow(run_shots=False, view_shots=True)
+
+        window.on_engage_clicked()
+
+        self.assertEqual(
+            window.submitted, [main_module.SUBMISSION_MODE_NEW_FOLDER]
+        )
+        self.assertEqual(window.output_box.lines, [])
 
     def test_engaging_with_nowhere_to_send_the_shots_is_refused(self):
         window = EngageWindow(run_shots=False, view_shots=False)
