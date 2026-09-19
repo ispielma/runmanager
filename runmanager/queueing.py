@@ -31,7 +31,7 @@ from labscript_utils import shared_drive
 from labscript_utils.qtwidgets.shotqueue import ShotQueueWidget
 from zprocess import raise_exception_in_thread
 
-from runmanager import plain_value
+from runmanager import _plain_value
 
 EMPTY_QUEUE_NOTHING = 'nothing'
 EMPTY_QUEUE_DEFAULT_LABSCRIPT = 'default_labscript'
@@ -300,7 +300,7 @@ class QueueController(object):
         # at all. Where the caller read them is not the queue's business; that
         # a queued shot can be saved is.
         record['sequence_attrs'] = {
-            str(name): plain_value(value)
+            str(name): _plain_value(value)
             for name, value in record.get('sequence_attrs', {}).items()
         }
         record['active_groups'] = {
