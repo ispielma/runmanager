@@ -134,6 +134,16 @@ SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE = 'add_shots_clear_queue'
 # is the normal state, and starting a new sequence each time would leave a run
 # of a hundred shots as a hundred sequences of one.
 SUBMISSION_MODE_CONTINUE_SEQUENCE = 'continue_sequence'
+# The submission modes that are only meaningful onto a sequence that already
+# exists. Each is refused when there is nothing to add to, rather than starting
+# a sequence of its own: an operator who chose "add shots to last sequence"
+# asked for one sequence, and a second one written quietly in its place is the
+# opposite of that. A mode is named here to opt in, so that a mode added later
+# decides for itself -- SUBMISSION_MODE_CONTINUE_SEQUENCE is deliberately not
+# one, since starting a sequence is what it does with nothing to carry on from.
+SUBMISSION_MODES_NEEDING_A_SEQUENCE_TO_EXTEND = frozenset(
+    {SUBMISSION_MODE_ADD_SHOTS, SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE}
+)
 
 
 def log_if_global(g, g_list, message):
@@ -2494,7 +2504,67 @@ class RunManager(LabscriptApplication):
             return None
         return os.path.abspath(shared_drive.path_to_local(last_sent_from_queue))
 
+    def get_replaced_queue_anchor(self):
+        """The shot a batch replacing the queue carries on from, or None.
+
+        "Empty queue, then add shots to last sequence" throws away the work
+        still waiting, so the sequence it joins is the one BLACS is running:
+        the shot last sent, and the queue's own last shot only when nothing
+        has been sent at all. The precedence is the opposite of
+        get_continuing_sequence_anchor's, for the reason the two modes differ.
+        The queued shots it would otherwise read are the ones the Clear is
+        about to delete, and they need not even be in the same sequence as the
+        shot BLACS is running: a batch engaged as a new sequence while BLACS
+        works through the last one leaves the queue holding one sequence and
+        BLACS running another. Numbering the replacement after the shots being
+        thrown away would join the sequence the operator has just emptied."""
+        return (
+            self.get_last_sent_from_queue_filepath()
+            or self.get_queue_append_filepath()
+        )
+
+    def get_submission_anchor(self, submission_mode):
+        """The shot this mode numbers its batch after, or None for a new one.
+
+        One read of the queue per submission, made where the answer is used.
+        The queue moves on its own -- BLACS takes the last shot on the server
+        thread -- so a mode offered against a queue with work in it can be
+        carried out against one that has none, and a second read taken later
+        answers about a different queue than the one that was checked.
+
+        A mode that must have a sequence to add to is named in
+        SUBMISSION_MODES_NEEDING_A_SEQUENCE_TO_EXTEND and is refused here when
+        there is none, so that no mode can quietly start a sequence where the
+        operator asked to extend one."""
+        if submission_mode == SUBMISSION_MODE_ADD_SHOTS:
+            anchor = self.get_queue_append_filepath()
+        elif submission_mode == SUBMISSION_MODE_CONTINUE_SEQUENCE:
+            anchor = self.get_continuing_sequence_anchor()
+        elif submission_mode == SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE:
+            anchor = self.get_replaced_queue_anchor()
+        else:
+            # A new sequence, numbered from nothing and named by the sequence
+            # index it claims for itself.
+            anchor = None
+        if (
+            anchor is None
+            and submission_mode in SUBMISSION_MODES_NEEDING_A_SEQUENCE_TO_EXTEND
+        ):
+            raise Exception(
+                'Error: there is no sequence to add these shots to. The queue '
+                'is empty and no shot has been sent to BLACS. Submit them as a '
+                'new sequence instead.'
+            )
+        return anchor
+
     def can_use_alternate_submission_mode(self):
+        """Whether the menu offers the alternate submission modes right now.
+
+        A menu question and only that: it is asked as the menu is about to be
+        drawn, and the queue it describes can empty before an action is
+        chosen. Nothing is decided on it. What a submission does about an
+        empty queue is settled in get_submission_anchor, against the queue the
+        batch is written into."""
         return (
             self.ui.checkBox_run_shots.isChecked()
             and self.get_queue_append_filepath() is not None
@@ -2559,19 +2629,21 @@ class RunManager(LabscriptApplication):
                     red=True,
                 )
                 return
-            if submission_mode != SUBMISSION_MODE_NEW_FOLDER:
-                if not send_to_BLACS:
-                    self.output_box.output(
-                        "Warning: alternate queue submission modes require 'BLACS' to be selected.\n\n",
-                        red=True,
-                    )
-                    return
-                if self.get_queue_append_filepath() is None:
-                    self.output_box.output(
-                        'Warning: alternate queue submission modes require shots in the queue.\n\n',
-                        red=True,
-                    )
-                    return
+            if submission_mode != SUBMISSION_MODE_NEW_FOLDER and not send_to_BLACS:
+                # Every mode but the plain one is about the queue -- adding to
+                # what is in it, replacing it, or carrying on from what has
+                # left it -- so with nothing going to BLACS there is nothing
+                # for any of them to do.
+                self.output_box.output(
+                    "Warning: alternate queue submission modes require 'BLACS' to be selected.\n\n",
+                    red=True,
+                )
+                return
+            # Whether there is a sequence to add to is decided where the queue
+            # is read and the answer used, in compile_and_queue_shots: a
+            # warning given here would be about the queue as it was a moment
+            # earlier. What it refuses is raised, and reaches the operator
+            # through the output below.
             self.compile_and_queue_shots(
                 submission_mode, send_to_BLACS, send_to_runviewer
             )
@@ -2600,7 +2672,7 @@ class RunManager(LabscriptApplication):
 
         Returns the queue records, each carrying the identifier its row has,
         in the order the shots were given."""
-        queue_append_filepath = self.get_queue_append_filepath()
+        indexed_path_base = self.get_submission_anchor(submission_mode)
         labscript_file = self.ui.lineEdit_labscript_file.text()
         # even though we shuffle on a per global basis, if ALL of the globals are set to shuffle, then we may as well shuffle again. This helps shuffle shots more randomly than just shuffling within each level (because without this, you would still do all shots with the outer most variable the same, etc)
         shuffle = self.ui.pushButton_shuffle.checkState() == QtCore.Qt.Checked
@@ -2639,19 +2711,12 @@ class RunManager(LabscriptApplication):
         else:
             shots = [shot_globals for shot_globals, _ in batch]
             frozen_globals = [frozen for _, frozen in batch]
-        indexed_path_base = None
         index_start = None
         sequence_attrs = None
-        if submission_mode == SUBMISSION_MODE_ADD_SHOTS:
-            indexed_path_base = queue_append_filepath
-        elif submission_mode == SUBMISSION_MODE_CONTINUE_SEQUENCE:
-            indexed_path_base = self.get_continuing_sequence_anchor()
-        elif submission_mode == SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE:
-            self.queue_manager.clear()
-        elif submission_mode == SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE:
-            indexed_path_base = (
-                self.get_last_sent_from_queue_filepath() or queue_append_filepath
-            )
+        if submission_mode == SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE:
+            # Numbering starts from 0 again, taking back the names the shots
+            # being deleted gave up; the ones whose files are still there are
+            # skipped over.
             index_start = 0
             # Read before the Clear rather than after it. With nothing yet
             # sent to BLACS the shot being added to is a queued one, and
@@ -2659,6 +2724,10 @@ class RunManager(LabscriptApplication):
             # afterwards, nothing would be left to say which sequence the
             # replacement batch is joining.
             sequence_attrs = self.get_sequence_attrs_to_extend(indexed_path_base)
+        if submission_mode in (
+            SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE,
+            SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE,
+        ):
             self.queue_manager.clear()
         labscript_file, run_files = self.make_h5_files(
             labscript_file,

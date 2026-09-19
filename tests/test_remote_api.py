@@ -226,6 +226,8 @@ class SubmittingApp(object):
     get_queue_append_filepath = RunManager.get_queue_append_filepath
     get_last_sent_from_queue_filepath = RunManager.get_last_sent_from_queue_filepath
     get_continuing_sequence_anchor = RunManager.get_continuing_sequence_anchor
+    get_replaced_queue_anchor = RunManager.get_replaced_queue_anchor
+    get_submission_anchor = RunManager.get_submission_anchor
     get_sequence_attrs_to_extend = RunManager.get_sequence_attrs_to_extend
     reindex_run_file_infos = RunManager.reindex_run_file_infos
     make_h5_files = RunManager.make_h5_files
@@ -1005,6 +1007,128 @@ class AbortDuringSubmissionTests(RemoteCommandTestCase):
             [True],
             'and the next batch compiles and queues as though nothing had '
             'happened',
+        )
+
+
+class SubmissionAnchorTests(RemoteCommandTestCase):
+    """The shot each submission mode numbers its batch after.
+
+    A mode that adds to a sequence is refused when there is no sequence to add
+    to. The queue empties on its own -- BLACS takes the last shot on a thread
+    of its own -- so the shot a mode was chosen for can be gone by the time
+    the batch is made, and a new sequence written in its place is the opposite
+    of what was asked for, with nothing saying it happened.
+
+    A mode that carries on from whatever there is refuses nothing: with
+    nothing to carry on from it starts a sequence, which is what it does on
+    the first submission of a run.
+    """
+
+    SEQUENCE = {
+        'script_basename': 'experiment',
+        'sequence_date': '2026-09-18',
+        'sequence_index': 7,
+        'sequence_id': '20260918T101112_experiment',
+    }
+
+    def make_app(self):
+        return SubmittingApp(self.directory)
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        patcher = mock.patch.object(
+            runmanager, 'next_sequence_index', lambda *a, **k: 12
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        super().setUp()
+        self.addCleanup(self.app.compiling.set)
+        runmanager.new_global(self.app.globals_file, 'group', 'x')
+        runmanager.set_value(self.app.globals_file, 'group', 'x', '0')
+
+    def enqueue(self, name, **overrides):
+        path = os.path.join(self.directory, name)
+        record = {
+            'path': path,
+            'compiled': True,
+            'run_no': 7,
+            'n_runs': 8,
+            'sequence_attrs': dict(self.SEQUENCE),
+        }
+        record.update(overrides)
+        self.app.queue_manager.enqueue([record])
+        return path
+
+    def engage(self, submission_mode):
+        return self.app.compile_and_queue_shots(submission_mode, True, False)
+
+    def test_adding_to_the_last_sequence_refuses_when_the_queue_has_emptied(self):
+        with self.assertRaises(Exception) as raised:
+            self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
+
+        self.assertEqual(self.app.batches, [], 'nothing was made or submitted')
+        self.assertIn('queue', str(raised.exception))
+
+    def test_replacing_the_queue_refuses_when_there_is_nothing_to_add_to(self):
+        with self.assertRaises(Exception) as raised:
+            self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE)
+
+        self.assertEqual(self.app.batches, [])
+        self.assertNotIn(
+            'None',
+            str(raised.exception),
+            'the operator is told there is no sequence to add to, not handed '
+            'the name of the shot that was not found',
+        )
+
+    def test_carrying_on_from_nothing_starts_a_sequence(self):
+        records = self.engage(main_module.SUBMISSION_MODE_CONTINUE_SEQUENCE)
+
+        self.assertEqual(
+            [record['sequence_attrs']['sequence_index'] for record in records],
+            [12],
+            'a submission with nothing to carry on from starts a sequence',
+        )
+
+    def test_the_queue_is_read_once_for_the_sequence_being_added_to(self):
+        # The queue empties on its own between two reads of it: BLACS asks for
+        # the last shot on the server thread while the batch is being made.
+        # Whichever answer a submission acts on has to be the one it was
+        # checked against -- a second read saying the queue is empty turned
+        # "add shots to last sequence" into a new sequence in the default
+        # folder, with nothing said about it.
+        queued = self.enqueue('experiment_007.h5')
+        answers = [queued]
+        self.app.get_queue_append_filepath = (
+            lambda: answers.pop(0) if answers else None
+        )
+
+        records = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
+
+        self.assertEqual(
+            [record['sequence_attrs']['sequence_id'] for record in records],
+            [self.SEQUENCE['sequence_id']],
+            'the batch joined the sequence the queue named when the mode was '
+            'chosen',
+        )
+
+    def test_a_replacement_batch_joins_the_sequence_blacs_is_running(self):
+        # "Empty queue, then add shots to last sequence" replaces the work
+        # that is waiting, so the sequence it joins is the one BLACS is
+        # running -- not the one the shots about to be deleted belong to.
+        sent = self.enqueue('experiment_007.h5')
+        self.app.queue_manager.set_last_sent_from_queue(sent)
+        self.enqueue(
+            'later_000.h5',
+            sequence_attrs=dict(self.SEQUENCE, sequence_id='20260918T140000_experiment'),
+        )
+
+        records = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE)
+
+        self.assertEqual(
+            [record['sequence_attrs']['sequence_id'] for record in records],
+            [self.SEQUENCE['sequence_id']],
         )
 
 

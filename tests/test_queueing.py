@@ -30,7 +30,7 @@ from labscript_utils.labconfig import load_appconfig, save_appconfig
 # fixtures stubs the splash and does the guarded import of the
 # application, once, for every test module. Importing
 # runmanager.__main__ here instead would show the startup banner.
-from fixtures import RunManager
+from fixtures import RunManager, main_module
 from runmanager.queueing import (
     COMPILE_MODE_EAGER,
     COMPILE_MODE_LAZY,
@@ -3111,6 +3111,78 @@ class DeletedAnchorTests(unittest.TestCase):
             'a shot the operator cancelled and whose file has gone is not '
             'what the next submission carries on from',
         )
+
+
+class EngageGuardTests(unittest.TestCase):
+    """What Engage refuses before it compiles anything.
+
+    Its warnings are about the window: which destinations are ticked, and
+    whether the mode the operator picked from the menu can be used with them.
+    Anything about the queue is settled where the queue is read, because the
+    queue moves on its own between the two.
+    """
+
+    class Window(object):
+        """The window Engage reads, over what its warnings need.
+
+        ``get_queue_append_filepath`` stands for an empty queue, which is the
+        state the modes below are asked about.
+        """
+
+        on_engage_clicked = RunManager.on_engage_clicked
+
+        def __init__(self, run_shots=True, view_shots=False):
+            self.output_box = FakeOutputBox()
+            self.submitted = []
+            self.ui = types.SimpleNamespace(
+                checkBox_run_shots=types.SimpleNamespace(
+                    isChecked=lambda: run_shots
+                ),
+                checkBox_view_shots=types.SimpleNamespace(
+                    isChecked=lambda: view_shots
+                ),
+            )
+
+        def get_queue_append_filepath(self):
+            return None
+
+        def compile_and_queue_shots(self, submission_mode, *args):
+            self.submitted.append(submission_mode)
+
+    def test_continuing_a_sequence_is_not_refused_for_an_empty_queue(self):
+        # The mode exists to work with an empty queue: between one remote
+        # submission and the next, empty is the normal state. A warning
+        # written for the modes that add to queued shots must not take it in
+        # with them.
+        window = self.Window()
+
+        window.on_engage_clicked(
+            submission_mode=main_module.SUBMISSION_MODE_CONTINUE_SEQUENCE
+        )
+
+        self.assertEqual(
+            window.submitted,
+            [main_module.SUBMISSION_MODE_CONTINUE_SEQUENCE],
+            'carrying on from the shot last sent is what this mode is for',
+        )
+
+    def test_an_alternate_mode_still_needs_shots_to_be_sent_to_blacs(self):
+        window = self.Window(run_shots=False, view_shots=True)
+
+        window.on_engage_clicked(
+            submission_mode=main_module.SUBMISSION_MODE_ADD_SHOTS
+        )
+
+        self.assertEqual(window.submitted, [], 'nothing was submitted')
+        self.assertTrue(window.output_box.said('BLACS'))
+
+    def test_engaging_with_nowhere_to_send_the_shots_is_refused(self):
+        window = self.Window(run_shots=False, view_shots=False)
+
+        window.on_engage_clicked()
+
+        self.assertEqual(window.submitted, [])
+        self.assertTrue(window.output_box.said('neither'))
 
 
 if __name__ == '__main__':
