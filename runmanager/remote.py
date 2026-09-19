@@ -178,8 +178,15 @@ class Client(ZMQClient):
         Returns one descriptor per entry, in the order submitted:
         ``{'shot_id', 'sequence_id', 'run_number', 'path'}``. The shots are
         added to the sequence runmanager is already working on, continuing its
-        run numbers, so a whole run of submissions is one sequence. The queue
-        is never cleared.
+        run numbers. The queue is never cleared.
+
+        Whether a whole run of submissions stays one sequence depends on the
+        empty-queue policy, which get_empty_queue_policy() answers. Under
+        ``'default_labscript'`` it does: the gaps between submissions are
+        filled by shots runmanager makes itself, which belong to no sequence
+        and leave the anchor alone. Under ``'nothing'`` runmanager lets go of
+        the anchor as soon as BLACS asks and finds the queue empty, so each
+        submission starts a sequence of its own.
 
         Raises, having submitted nothing at all, if the labscript file or
         output folder is not set, if the globals cannot be evaluated, or if an

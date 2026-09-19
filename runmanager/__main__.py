@@ -2470,9 +2470,18 @@ class RunManager(LabscriptApplication):
         the next finds the queue empty every time. Carrying on from the last
         shot sent is what keeps a run of such submissions one sequence with
         continuing run numbers, rather than a sequence of one shot per
-        submission. Only a runmanager that has sent nothing at all answers
-        None, and then there is nothing to continue and a sequence is started.
-        """
+        submission.
+
+        Whether it survives that gap depends on the empty-queue policy, and
+        this is the practical difference between the two. Under the
+        default-shot policy the gap is filled by a shot runmanager makes
+        itself, which belongs to no sequence and is deliberately not recorded
+        as the shot last sent, so the anchor is still the caller's own shot
+        when it submits again. Under the other policy runmanager has nothing
+        to offer, and offer_shot() lets go of the anchor as soon as BLACS asks
+        and finds the queue empty -- so the next submission has no sequence to
+        join and starts one. That, as much as the apparatus standing idle, is
+        why a caller that submits and waits wants the default-shot policy."""
         return (
             self.get_queue_append_filepath()
             or self.get_last_sent_from_queue_filepath()

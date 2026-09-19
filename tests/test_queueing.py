@@ -14,6 +14,10 @@ import unittest
 
 from unittest import mock
 
+# h5_lock must be imported before h5py is, by anything in the process, and
+# it is what runmanager imports h5py through. Naming it here rather than
+# relying on runmanager below, so that this file can be run on its own.
+import labscript_utils.h5_lock  # noqa: F401
 import h5py
 import runmanager
 from labscript_utils.qtwidgets.shotqueue import RULE_BELOW_ROLE
@@ -1101,6 +1105,79 @@ class ContinuingSequenceAnchorTests(unittest.TestCase):
 
     def test_a_runmanager_that_has_sent_nothing_has_nothing_to_continue(self):
         self.assertIsNone(self.app.get_continuing_sequence_anchor())
+
+    def run_a_shot_and_let_blacs_ask_again(self, app, default_shot=None):
+        """Submit one shot, run it to completion, and let BLACS ask for more.
+
+        Which is the state a caller that waits for each result finds: its shot
+        has left the queue, and BLACS has already asked for the next one.
+
+        ``default_shot`` is the file the next default shot is made from.
+        Runmanager discards the one it was holding as soon as the queue takes
+        over, and prepares another off-thread once the queue empties again, so
+        it is put back here to stand for the one that would then be ready.
+        Without it the request finds nothing to offer and no default shot is
+        made, which is the other policy's behaviour and not this one's.
+        """
+        path = os.path.join(self.directory, 'experiment_00.h5')
+        open(path, 'w').close()
+        app.queue_manager.enqueue([queued_shot(path)])
+        offered = app.offer_shot()
+        app.queue_exchange(
+            outcome={
+                'shot_id': offered['shot_id'],
+                'status': 'completed',
+                'path': offered['path'],
+            },
+            request_shot=False,
+        )
+        app.default_shot_file = default_shot
+        return app.offer_shot()
+
+    def test_a_default_shot_in_the_gap_does_not_become_what_is_continued(self):
+        # With the default-shot policy on -- which is the arrangement a remote
+        # caller needs, since under the other one nothing runs between
+        # submissions -- the gaps are filled by shots runmanager made itself.
+        # Those belong to no sequence and live in the daily default folder, so
+        # continuing from one would take the next submission with it.
+        labscript_file = os.path.join(self.directory, 'default.py')
+        open(labscript_file, 'w').close()
+        default_shot = os.path.join(self.directory, 'default_shot_0.h5')
+        open(default_shot, 'w').close()
+        app = FakeRunManager(default_shot_file=default_shot)
+        self.addCleanup(app.queue_manager.shutdown)
+        app.queue_manager.set_empty_queue_policy(EMPTY_QUEUE_DEFAULT_LABSCRIPT)
+        app.queue_manager.set_default_labscript_file(labscript_file)
+
+        submitted = os.path.join(self.directory, 'experiment_00.h5')
+        filler = self.run_a_shot_and_let_blacs_ask_again(app, default_shot=default_shot)
+
+        self.assertEqual(
+            filler['path'],
+            default_shot,
+            'the gap was filled by a shot runmanager made itself, which is '
+            'what BLACS is running while the caller works out what to send',
+        )
+        self.assertEqual(
+            app.get_continuing_sequence_anchor(),
+            submitted,
+            'and the sequence still carries on from the submitted shot',
+        )
+
+    def test_nothing_is_continued_once_blacs_has_found_the_queue_empty(self):
+        # The other policy, and the reason a remote caller is told to refuse
+        # it: with nothing to offer, runmanager lets go of the shot it last
+        # sent, so the next submission has no sequence to join and starts one.
+        # A run of submissions under this policy is a sequence per submission.
+        submitted = os.path.join(self.directory, 'experiment_00.h5')
+        filler = self.run_a_shot_and_let_blacs_ask_again(self.app)
+
+        self.assertEqual(filler['state'], PROVIDER_NONE, 'nothing filled the gap')
+        self.assertIsNone(
+            self.app.get_continuing_sequence_anchor(),
+            'and the shot that ran is no longer offered as the anchor',
+        )
+        self.assertTrue(os.path.exists(submitted))
 
 
 class ShotIdBeforeCompileTests(unittest.TestCase):
