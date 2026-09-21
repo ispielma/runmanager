@@ -3088,9 +3088,16 @@ class RunManager(LabscriptApplication):
         self.open_globals_file(globals_file)
 
     def on_new_globals_file_clicked(self):
+        # The panel is offered a filename rather than just the folder. A save
+        # panel with no extension to preserve supplies one of its own, taken
+        # from the host's type database rather than from the name filter below,
+        # which is not necessarily the extension asked for. Given a name it
+        # keeps that extension and typing replaces only the stem, so 'untitled'
+        # is what the operator types over and '.toml' is what survives.
+        suggested_file = os.path.join(self.last_opened_globals_folder, 'untitled.toml')
         globals_file = QtWidgets.QFileDialog.getSaveFileName(self.ui,
                                                          'Create new globals file',
-                                                         self.last_opened_globals_folder,
+                                                         suggested_file,
                                                          "TOML files (*.toml)")
         if type(globals_file) is tuple:
             globals_file, _ = globals_file
