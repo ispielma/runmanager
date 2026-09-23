@@ -1121,6 +1121,19 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
             submission_mode, True, False, self.app.expand_pending_shots()
         )
 
+    def test_adding_twice_before_the_first_compiles_does_not_reuse_its_numbers(self):
+        # The first batch's shot is still compiling, with no row and no file,
+        # so the queue's last row is still the shot it was added to. The second
+        # batch is numbered after the first all the same.
+        self.enqueue('experiment_007.h5')
+
+        first = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
+        second = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
+
+        self.assertEqual([record['run_no'] for record in first], [8])
+        self.assertEqual([record['run_no'] for record in second], [9])
+        self.assertNotEqual(first[0]['path'], second[0]['path'])
+
     def test_adding_to_the_last_sequence_carries_on_from_the_shot_blacs_has(self):
         # BLACS can take the last queued shot between the menu being drawn and
         # the item being clicked. The shot it was sent is the one the operator

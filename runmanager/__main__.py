@@ -2719,6 +2719,12 @@ class RunManager(LabscriptApplication):
                 # there are skipped over.
                 index_start = 0
             self.queue_manager.clear()
+        elif sequence is None and indexed_path_base is not None:
+            # "Add shots to last sequence" numbers from the record, as a remote
+            # join does, when there is one, and as before when there is not.
+            sequence_attrs = self.get_sequence_attrs_to_extend(indexed_path_base)
+            if sequence_attrs['sequence_id'] in self.sequences:
+                sequence = sequence_attrs['sequence_id']
         if sequence is not None:
             if sequence not in self.sequences:
                 raise Exception(
