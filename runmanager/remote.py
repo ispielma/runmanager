@@ -167,7 +167,7 @@ class Client(ZMQClient):
         arrives to wait for."""
         return self.request('get_empty_queue_policy')
 
-    def submit_shots(self, entries):
+    def submit_shots(self, entries, sequence=None):
         """Submit one shot per entry, each with the globals that entry names.
 
         ``entries`` is a list of ``{global_name: value}`` dicts; one entry is
@@ -180,9 +180,15 @@ class Client(ZMQClient):
         untouched.
 
         Returns one descriptor per entry, in the order submitted:
-        ``{'shot_id', 'sequence_id', 'run_number', 'path'}``. The shots are
-        added to the sequence runmanager is already working on, continuing its
-        run numbers. The queue is never cleared.
+        ``{'shot_id', 'sequence_id', 'run_number', 'path'}``. The queue is
+        never cleared.
+
+        A remote session is one sequence. With no ``sequence`` the shots start
+        a sequence of their own. Pass a ``sequence_id`` from an earlier
+        submission as ``sequence`` to add to that sequence instead, numbered
+        after every shot of it runmanager has made, whatever ran in between.
+        Runmanager remembers its sequences only until it restarts, so a
+        sequence it has no record of is refused.
 
         Each submitted shot is written with its ``shot_id`` as a root
         attribute of its h5 file, which is where the id handed back here
@@ -190,14 +196,6 @@ class Client(ZMQClient):
         the entry that asked for it. A shot file carrying no such attribute is
         one nobody submitted -- runmanager writes the shots it makes itself,
         to keep the apparatus busy between submissions, without one.
-
-        A whole run of submissions stays one sequence, whatever the
-        empty-queue policy: a queue that empties between submissions does not
-        end the sequence the last shot belonged to, and the shots runmanager
-        makes itself to fill the gaps belong to no sequence and leave it
-        alone. A submission starts a sequence of its own only when there is no
-        last shot to carry on from -- a runmanager that has never sent one, or
-        one whose file has since been deleted.
 
         Raises, having submitted nothing at all, whatever it is that goes
         wrong. The whole batch is made and handed over in one go, so until
@@ -208,10 +206,11 @@ class Client(ZMQClient):
         refused this way, which is what happens when a global still has a scan
         enabled: a scan means the value asked for is not the value that runs,
         so it is refused rather than submitted. So are a labscript file or
-        output folder that is not set, globals that cannot be evaluated, and a
-        name no active group has. The globals set before a refusal are left
-        set; nothing is queued and nothing runs."""
-        return self.request('submit_shots', list(entries))
+        output folder that is not set, globals that cannot be evaluated, a
+        name no active group has, and a ``sequence`` runmanager has no record
+        of. The globals set before a refusal are left set; nothing is queued
+        and nothing runs."""
+        return self.request('submit_shots', list(entries), sequence=sequence)
 
     def shot_status(self, shot_ids):
         """Whether each of these shots can still produce a result.

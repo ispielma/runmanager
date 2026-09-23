@@ -293,6 +293,7 @@ class SubmittingApp(object):
         # records of each batch that reached the queue.
         self.destinations = []
         self.batches = []
+        self.sequences = {}
         self.queue_manager = QueueManager(
             lambda item: None,
             self.compile_run_file,
@@ -416,8 +417,10 @@ class SubmitShotsTests(RemoteCommandTestCase):
         self.app.wait_until_preparse_complete = lambda: None
         self.app.previous_expansions = expansions
 
-    def submit(self, *entries):
-        return self.request('submit_shots', [dict(entry) for entry in entries])
+    def submit(self, *entries, **kwargs):
+        return self.request(
+            'submit_shots', [dict(entry) for entry in entries], **kwargs
+        )
 
     def expressions(self):
         """The expressions the window is left holding."""
@@ -442,22 +445,16 @@ class SubmitShotsTests(RemoteCommandTestCase):
         descriptors = self.submit({'x': 1}, {'x': 2}, {'x': 3})
 
         self.assertEqual(
-            [descriptor['run_number'] for descriptor in descriptors],
-            [8, 9, 10],
-            'the batch carries on the run numbers of the sequence it joins',
+            [descriptor['run_number'] for descriptor in descriptors], [0, 1, 2]
         )
-        self.assertEqual(
-            [os.path.basename(descriptor['path']) for descriptor in descriptors],
-            ['experiment_008.h5', 'experiment_009.h5', 'experiment_010.h5'],
-        )
+        self.assertEqual(len({descriptor['path'] for descriptor in descriptors}), 3)
         self.assertEqual(
             len({descriptor['shot_id'] for descriptor in descriptors}), 3
         )
         self.assertEqual(
-            {descriptor['sequence_id'] for descriptor in descriptors},
-            {self.SEQUENCE['sequence_id']},
-            'and they are added to the sequence already running, not to one '
-            'of their own',
+            len({descriptor['sequence_id'] for descriptor in descriptors}),
+            1,
+            'and they are one sequence',
         )
 
     def test_a_submission_sends_its_shots_where_the_window_says(self):
@@ -486,10 +483,14 @@ class SubmitShotsTests(RemoteCommandTestCase):
         self.submit({'x': 1}, {'x': 2})
 
         self.assertEqual(len(self.queued()), 2)
-        self.assertEqual(
-            {record['sequence_attrs']['sequence_id'] for record in self.queued()},
-            {self.SEQUENCE['sequence_id']},
-            'onto the sequence already running',
+        sequence_ids = {
+            record['sequence_attrs']['sequence_id'] for record in self.queued()
+        }
+        self.assertEqual(len(sequence_ids), 1, 'as one sequence')
+        self.assertNotIn(
+            self.SEQUENCE['sequence_id'],
+            sequence_ids,
+            'of its own: a first submission does not join the queue\'s sequence',
         )
         self.assertIn(
             self.anchor,
@@ -497,6 +498,44 @@ class SubmitShotsTests(RemoteCommandTestCase):
             'and the shot that was queued when the batch arrived is queued '
             'still: a remote submission adds to the queue, never replaces it',
         )
+
+    def test_a_later_submission_joins_the_sequence_it_names(self):
+        # The first batch is still being compiled, so its shots have neither
+        # rows nor files: the join is numbered after them all the same, in the
+        # sequence's own folder.
+        first = self.submit({'x': 1}, {'x': 2})
+
+        second = self.submit({'x': 3}, sequence=first[0]['sequence_id'])
+
+        self.assertEqual(second[0]['sequence_id'], first[0]['sequence_id'])
+        self.assertEqual(second[0]['run_number'], 2)
+        self.assertEqual(
+            os.path.dirname(second[0]['path']), os.path.dirname(first[0]['path'])
+        )
+        self.assertNotIn(second[0]['path'], {d['path'] for d in first})
+
+    def test_an_operator_s_engage_in_between_does_not_take_the_session_s_shots(self):
+        # The queue's last shot is the operator's, as an Engage between two
+        # submissions leaves it; the session names its own sequence instead.
+        first = self.submit({'x': 1})
+        self.assertEqual(self.app.get_queue_append_filepath(), self.anchor)
+
+        second = self.submit({'x': 2}, sequence=first[0]['sequence_id'])
+
+        self.assertNotEqual(first[0]['sequence_id'], self.SEQUENCE['sequence_id'])
+        self.assertEqual(second[0]['sequence_id'], first[0]['sequence_id'])
+
+    def test_a_sequence_runmanager_has_no_record_of_is_refused(self):
+        # Refused rather than started afresh, which would split the session
+        # quietly in two; the caller stops on this message.
+        with self.assertRaises(Exception) as raised:
+            self.submit({'x': 1}, sequence='20260923T101112_experiment')
+
+        self.assertIn(
+            'Cannot add shots to sequence 20260923T101112_experiment: ',
+            str(raised.exception),
+        )
+        self.assertEqual(self.app.batches, [], 'nothing reached the queue')
 
     def test_a_submission_that_raises_has_queued_nothing_at_all(self):
         # The window is the operator's throughout, and clearing the labscript

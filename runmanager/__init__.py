@@ -726,19 +726,27 @@ def new_sequence_details(
     about to be used to compile a sequence. Otherwise, set increment_sequence_index to
     False, but in that case the results are indicative only and one should call this
     function again with increment_sequence_index=True before compiling the sequence, as
-    otherwise the sequence_index may be used by other code in the meantime."""
+    otherwise the sequence_index may be used by other code in the meantime.
+
+    With default=True these are the details of the day's default sequence, which every
+    default shot made that day shares: dated from the start of the day, it has
+    sequence_index -1 and claims no index."""
     if config is None:
         config = LabConfig()
     script_basename = os.path.splitext(os.path.basename(script_path))[0]
     shot_storage = config.get('default', 'experiment_shot_storage')
     shot_basedir = os.path.join(shot_storage, script_basename)
     now = datetime.datetime.now()
+    if default:
+        now = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        sequence_index = -1
+    else:
+        sequence_index = next_sequence_index(shot_basedir, now, increment_sequence_index)
     sequence_timestamp = now.strftime('%Y%m%dT%H%M%S')
 
     # Toplevel attributes to be saved to the shot files:
     sequence_date = now.strftime('%Y-%m-%d')
     sequence_id = sequence_timestamp + '_' + script_basename
-    sequence_index = next_sequence_index(shot_basedir, now, increment_sequence_index)
 
     sequence_attrs = {
         'script_basename': script_basename,

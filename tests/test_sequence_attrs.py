@@ -6,9 +6,12 @@ sequence. The two ends have to agree on which attributes those are: a name
 written but not read is dropped from the added shots, and a name read but not
 written raises the first time a sequence is extended.
 """
+import datetime
 import os
 import shutil
 import tempfile
+import threading
+import types
 import unittest
 from unittest import mock
 
@@ -17,7 +20,9 @@ from labscript_utils.labconfig import LabConfig
 # is what runmanager imports h5py through. Naming it here rather than relying
 # on runmanager below, so that this file can be run on its own.
 import labscript_utils.h5_lock  # noqa: F401
+import h5py
 import runmanager
+from fixtures import RunManager
 
 
 class FakeConfig(object):
@@ -100,3 +105,73 @@ class SequenceAttrsTests(unittest.TestCase):
             'sequence and kept in their queue records, so it has to be the '
             'plain values that were written and not stand-ins for them',
         )
+
+
+class DefaultSequenceTests(unittest.TestCase):
+    """All of a day's default shots are one sequence, claiming no index."""
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.labscript_file = os.path.join(self.directory, 'experiment.py')
+        self.claims = []
+        patcher = mock.patch.object(
+            runmanager,
+            'next_sequence_index',
+            lambda *args, **kwargs: self.claims.append(args) or 7,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def at(self, hour):
+        """Runmanager's clock, reading this hour of 23 September 2026."""
+        clock = types.SimpleNamespace(
+            now=lambda: datetime.datetime(2026, 9, 23, hour, 1, 2)
+        )
+        return mock.patch.object(
+            runmanager, 'datetime', types.SimpleNamespace(datetime=clock)
+        )
+
+    def test_every_default_shot_of_a_day_is_in_one_sequence(self):
+        with self.at(8):
+            morning, _, _ = runmanager.new_sequence_details(
+                self.labscript_file, config=FakeConfig(self.directory), default=True
+            )
+        with self.at(21):
+            evening, _, _ = runmanager.new_sequence_details(
+                self.labscript_file, config=FakeConfig(self.directory), default=True
+            )
+
+        self.assertEqual(morning['sequence_id'], evening['sequence_id'])
+        self.assertEqual(morning['sequence_index'], -1)
+        self.assertEqual(self.claims, [], 'and no sequence index was claimed')
+
+    def test_each_default_shot_takes_the_next_run_number_of_that_sequence(self):
+        # Every one of them run 0 would be one run number for many shots of
+        # one sequence.
+        globals_file = os.path.join(self.directory, 'globals.toml')
+        runmanager.new_globals_file(globals_file)
+        runmanager.new_group(globals_file, 'group')
+        said = []
+        app = types.SimpleNamespace(
+            exp_config=FakeConfig(self.directory),
+            _next_default_shot_index={},
+            _default_shot_lock=threading.Lock(),
+            get_active_groups=lambda interactive=True: {'group': globals_file},
+            compile_run_file=lambda labscript_file, run_file: True,
+            send_to_runviewer=lambda run_file: None,
+            output_box=types.SimpleNamespace(
+                output=lambda text, red=False: said.append(text)
+            ),
+        )
+        runs = []
+        for hour in (8, 21):
+            app._default_shot_ready = None
+            app._default_shot_preparing = True
+            with self.at(hour):
+                RunManager.prepare_default_shot(app, self.labscript_file, False)
+            self.assertIsNotNone(app._default_shot_ready, said)
+            with h5py.File(app._default_shot_ready, 'r') as shot:
+                runs.append((shot.attrs['run number'], shot.attrs['n_runs']))
+
+        self.assertEqual(runs, [(0, 1), (1, 2)])

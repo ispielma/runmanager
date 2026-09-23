@@ -1838,6 +1838,10 @@ class RunManager(LabscriptApplication):
         # queue manager starts its worker thread, as that thread compiles
         # shots via self.compile_run_file():
         self.compiler_lock = threading.Lock()
+        # Each sequence made or added to here, by sequence_id: its newest shot's
+        # path, its attributes, and its next run number. In memory only, so a
+        # remote session cannot join its sequence across a restart.
+        self.sequences = {}
         self._next_default_shot_index = {}
         # A default shot is produced off the request thread; these track the one
         # being made and the one waiting to be handed over:
@@ -2670,7 +2674,7 @@ class RunManager(LabscriptApplication):
         return pending
 
     def compile_and_queue_shots(
-        self, submission_mode, send_to_BLACS, send_to_runviewer, batch
+        self, submission_mode, send_to_BLACS, send_to_runviewer, batch, sequence=None
     ):
         """Make the shots of one batch and put them in the queue.
 
@@ -2685,6 +2689,9 @@ class RunManager(LabscriptApplication):
         Raises rather than writing to the output box, because a caller that is
         not a person standing at the window has no output box to read: Engage
         catches these and puts them there itself.
+
+        ``sequence``, if given, is the sequence_id of a sequence made or added
+        to here, which the batch joins in place of the one the mode would find.
 
         Returns the queue records, each carrying the identifier its row has,
         in the order the shots were given."""
@@ -2712,6 +2719,13 @@ class RunManager(LabscriptApplication):
                 # there are skipped over.
                 index_start = 0
             self.queue_manager.clear()
+        if sequence is not None:
+            if sequence not in self.sequences:
+                raise Exception(
+                    'Cannot add shots to sequence %s: runmanager has no record of it'
+                    % sequence
+                )
+            indexed_path_base, sequence_attrs, index_start = self.sequences[sequence]
         logger.info('Making h5 files')
         labscript_file, run_files = self.make_h5_files(
             labscript_file,
@@ -2738,6 +2752,12 @@ class RunManager(LabscriptApplication):
                     'n_runs': run_file_info['n_runs'],
                 }
             )
+        # For a later batch to join. Its next run number is kept here rather
+        # than read from files, which shots still being compiled do not have.
+        last = queue_records[-1]
+        self.sequences[last['sequence_attrs']['sequence_id']] = (
+            last['path'], last['sequence_attrs'], last['run_no'] + 1
+        )
         self.ui.pushButton_abort.setEnabled(True)
         return self.queue_manager.compile_shots(
             queue_records, send_to_BLACS, send_to_runviewer
@@ -4677,7 +4697,6 @@ class RunManager(LabscriptApplication):
                 runmanager.new_sequence_details(
                     labscript_file,
                     config=self.exp_config,
-                    increment_sequence_index=True,
                     default=True,
                     format_globals=runglobals,
                 )
@@ -4698,13 +4717,15 @@ class RunManager(LabscriptApplication):
             # before it is a queue row and before it has an id. A file with no
             # shot_id is visibly not a shot anybody submitted, which is the
             # right answer for a caller matching results to what it asked for.
+            # Numbered by its place in the day's default sequence, which all of
+            # that day's default shots share.
             runmanager.make_single_run_file(
                 run_file,
                 sequence_globals,
                 runglobals,
                 sequence_attrs,
-                0,
-                1,
+                default_index,
+                default_index + 1,
             )
             if not self.compile_run_file(labscript_file, run_file):
                 raise RuntimeError(
@@ -5205,7 +5226,7 @@ class RemoteServer(ZMQServer):
         controller, which is safe to ask from any thread."""
         return app.queue_manager.get_empty_queue_policy()
 
-    def handle_submit_shots(self, entries):
+    def handle_submit_shots(self, entries, sequence=None):
         """Submit one shot per entry, each with the globals that entry names.
 
         An entry is a dict of global name to value. The globals it names are
@@ -5215,6 +5236,10 @@ class RemoteServer(ZMQServer):
 
         Returns one descriptor per entry -- shot_id, sequence_id, run_number
         and path -- in the order submitted.
+
+        A remote session is one sequence. With no ``sequence`` the batch
+        starts a sequence of its own; ``sequence`` is the sequence_id of an
+        earlier submission, and the batch joins it whatever ran in between.
 
         The window holds one entry's globals at a time, which is what the
         operator sees and what that entry's shot is evaluated against. A
@@ -5272,18 +5297,16 @@ class RemoteServer(ZMQServer):
                     'evaluated.' % entry
                 )
             batch.append(self._shot_for_entry(entry))
-        # Added to the last sequence, which between one submission and the
-        # next is the shot last sent to BLACS: a caller that waits for each
-        # result before sending the next finds the queue empty every time, and
-        # a new sequence each time would leave a run of a hundred shots as a
-        # hundred sequences of one. On a runmanager that has run nothing there
-        # is no last sequence, and the batch starts one.
+        # Joined by id, not by the queue's last shot, which is whoever
+        # submitted last: an operator's Engage in between would otherwise take
+        # the session's later shots into the operator's sequence.
         records = inmain(
             app.compile_and_queue_shots,
-            SUBMISSION_MODE_ADD_SHOTS,
+            SUBMISSION_MODE_NEW_FOLDER if sequence is None else SUBMISSION_MODE_ADD_SHOTS,
             True,
             send_to_runviewer,
             batch,
+            sequence=sequence,
         )
         return [
             {

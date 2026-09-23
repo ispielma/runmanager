@@ -491,11 +491,10 @@ numbered sequence directory each:
     accumulate rather than overwrite one another, and the numbering continues
     from the existing files if runmanager is restarted.
 
-A sequence index is still claimed for each default shot even though it does not
-appear in the path. Sequence numbers for ordinary runs consequently advance
-faster than the number of sequences actually run, and the numbered sequence
-directories are not contiguous. This is expected, and is not a sign that
-sequences have been lost.
+All of a day's default shots belong to one sequence, dated from the start of
+the day, whose ``sequence_index`` is ``-1``; each shot's run number is its place
+in it. No sequence index is claimed for a default shot, so the numbering of
+ordinary sequences is left alone.
 
 .. rubric:: Footnotes
 
