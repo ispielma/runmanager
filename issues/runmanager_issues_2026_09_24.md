@@ -79,10 +79,11 @@ it is met.
 - [ ] Slice 12: Emptying the queue also stops the batches it discards (HITL)
       — decided: queue each batch's rows at submission; Abort becomes
       Empty queue
-- [ ] Slice 13: A refused entry says which global failed and why
-- [ ] Slice 14: `submit_shots` checks its global names in one parse
+- [x] Slice 13: A refused entry says which global failed and why
+- [x] Slice 14: `submit_shots` checks its global names in one parse
 - [ ] Slice 15: A batch no longer holds BLACS's server thread (HITL)
-      — decided: evaluate each entry from one read; keep one server
+      — decided: evaluate each entry from one read; keep one server. Built:
+      50 entries take 129 ms in the test harness; apparatus measurement to do
 - [ ] Slice 16: A join reads no shot file and takes no lock on the GUI thread
 - [ ] ~~Slice 17: Abort stays enabled while a batch is pending~~ — goes with
       Slice 12's Empty queue
@@ -617,9 +618,9 @@ global a second time per entry.
 
 ### Acceptance criteria
 
-- [ ] A batch refused for a broken global names the global and the error.
-- [ ] Nothing is queued, and the refusal comes before the batch is made, as now.
-- [ ] A test pinning the named global fails without the fix.
+- [x] A batch refused for a broken global names the global and the error.
+- [x] Nothing is queued, and the refusal comes before the batch is made, as now.
+- [x] A test pinning the named global fails without the fix.
 
 ### Blocked by
 
@@ -648,9 +649,9 @@ the same names from one parse per file.
 
 ### Acceptance criteria
 
-- [ ] An unknown global is still refused before anything is set, with the same
+- [x] An unknown global is still refused before anything is set, with the same
       message.
-- [ ] The check reads each globals file once per submission.
+- [x] The check reads each globals file once per submission.
 
 ### Blocked by
 
@@ -689,9 +690,9 @@ compiles, default shots and lyse submissions run on threads of their own.
 
 ### Acceptance criteria
 
-- [ ] A batch of N entries reads the globals once and waits for at most one
+- [x] A batch of N entries reads the globals once and waits for at most one
       preparse.
-- [ ] Each entry is still evaluated with its own values and none carries over.
+- [x] Each entry is still evaluated with its own values and none carries over.
 - [ ] During a large batch, BLACS's `say_hello` is answered within its
       liveness timeout, by measurement.
 

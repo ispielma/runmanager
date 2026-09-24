@@ -128,24 +128,6 @@ class ClientCommandNameTests(unittest.TestCase):
                 self.assertEqual(sent, [command])
 
 
-class ExpansionsBeingRewritten(dict):
-    """The preparse thread's expansions, read while that thread is writing.
-
-    ``previous_expansions`` belongs to the preparse thread, which assigns a
-    guess into it per global as it works. Iterating it from the server thread
-    is the read that breaks when a key arrives partway through, so this one
-    grows by a key after its first item is handed over -- which is what makes
-    the next step of a live iteration raise.
-    """
-
-    def items(self):
-        iterator = iter(super().items())
-        first = next(iterator)
-        self['guessed_while_reading'] = 'outer'
-        yield first
-        yield from iterator
-
-
 class LabConfigWithShotStorage(object):
     """A labconfig carrying the settings a shot's filename is built from.
 
@@ -249,7 +231,6 @@ class SubmittingApp(object):
         self.exp_config = LabConfigWithShotStorage(directory)
         self.previous_default_output_folder = ''
         self.currently_open_groups = {}
-        self.previous_expansions = {}
         self.n_shots = None
         self.compiling = threading.Event()
         self.axes_model = AxesModel()
@@ -316,7 +297,6 @@ class SubmittingApp(object):
             self.get_active_groups(), raise_exceptions=False
         )
         self.n_shots = len(shots)
-        self.previous_expansions = expansions
         self.axes_model.rebuild(expansions)
 
 
@@ -328,11 +308,9 @@ class SubmitShotsTests(RemoteCommandTestCase):
     filename are claimed by the batch being made, so entries submitted one at
     a time each find the same number free and write over each other.
 
-    Each entry's shot is evaluated while the window holds that entry's
-    globals and nothing else's. A global some other entry names is put back to
-    the operator's own expression first, because a shot compiled with a value
-    an earlier entry asked for is a result attributed to parameters it never
-    ran with.
+    Each entry's shot is evaluated from one read of the globals, as the
+    window would hold them with that entry's values set, and the window is
+    set once, to the last entry.
 
     Nothing reaches the queue until every entry has been evaluated, so a call
     that refuses leaves the queue exactly as it found it and the error can
@@ -390,16 +368,6 @@ class SubmitShotsTests(RemoteCommandTestCase):
         runmanager.set_scan(self.app.globals_file, 'group', name, expression)
         runmanager.set_scan_enabled(self.app.globals_file, 'group', name, True)
         runmanager.set_expansion(self.app.globals_file, 'group', name, 'outer')
-
-    def without_preparse(self, expansions):
-        """Leave the window as a preparse that never completed leaves it.
-
-        preparse_globals returns without touching either of these when it
-        cannot read the active groups, so this is the state a submission can
-        genuinely find the window in.
-        """
-        self.app.wait_until_preparse_complete = lambda: None
-        self.app.previous_expansions = expansions
 
     def submit(self, *entries, **kwargs):
         return self.request(
@@ -520,6 +488,8 @@ class SubmitShotsTests(RemoteCommandTestCase):
             runmanager, 'next_sequence_index', lambda *a, **k: next(indexes)
         ):
             first = self.submit({'x': 1})
+            # Engage waits on the preparse the submission's window change starts.
+            self.app.wait_until_preparse_complete()
             self.app.compile_and_queue_shots(
                 main_module.SUBMISSION_MODE_NEW_FOLDER,
                 True,
@@ -597,9 +567,23 @@ class SubmitShotsTests(RemoteCommandTestCase):
             self.expressions(), {'x': '2 # metres', 'y': '9', 'depth': '4'}
         )
 
+    def test_a_batch_is_evaluated_without_touching_the_window_per_entry(self):
+        # BLACS's shot exchange is answered on the thread this command runs
+        # on, and each change to the window starts a preparse. A batch changes
+        # the window once and waits on at most one preparse, whatever its size.
+        with mock.patch.object(
+            self.app, 'globals_changed', wraps=self.app.globals_changed
+        ) as changed, mock.patch.object(
+            self.app,
+            'wait_until_preparse_complete',
+            wraps=self.app.wait_until_preparse_complete,
+        ) as waited:
+            self.submit({'x': 1}, {'x': 2}, {'x': 3})
+
+        self.assertEqual(changed.call_count, 1)
+        self.assertLessEqual(waited.call_count, 1)
+
     def test_entries_that_name_different_globals_are_refused(self):
-        # A global one entry sets and the next does not name would stay set,
-        # and the next shot would run at a value it never asked for.
         with self.assertRaises(Exception) as raised:
             self.submit({'x': 1}, {'y': 9})
 
@@ -612,10 +596,10 @@ class SubmitShotsTests(RemoteCommandTestCase):
         )
 
     def test_nothing_is_submitted_when_a_later_entry_would_expand(self):
-        # A global with a scan enabled ignores the value the entry gave it, so
-        # the shot would not use the parameters it was asked for. The entries
-        # before it were fine and are still not submitted, because a call that
-        # refuses leaves nothing behind for the caller to hear about later.
+        # A scan left on a global the entries do not name can make an entry
+        # more than one shot. The entries before it were fine and are still
+        # not submitted, because a call that refuses leaves nothing behind for
+        # the caller to hear about later.
         self.scan('y', '[1] * x')
 
         with self.assertRaises(Exception) as raised:
@@ -635,49 +619,16 @@ class SubmitShotsTests(RemoteCommandTestCase):
             'a global that expands into nothing did not cause this',
         )
 
-    def test_the_refusal_counts_the_shots_itself(self):
-        # n_shots is None until a preparse sets it, and preparse_globals
-        # returns without setting it when it cannot read the active groups. A
-        # caller handed a formatting error instead of the refusal has nothing
-        # to go and turn off.
-        self.scan('y', '[1] * x')
-        self.without_preparse({'x': '', 'y': 'outer', 'depth': ''})
-        self.assertIsNone(self.app.n_shots)
-
-        with self.assertRaises(Exception) as raised:
-            self.submit({'x': 3})
-
-        self.assertIn('produce 3', str(raised.exception))
-        self.assertIn('y', str(raised.exception))
-
-    def test_the_refusal_survives_the_expansions_being_written_to(self):
-        # The refusal names the globals that expanded the entry, and the
-        # preparse thread is free to be guessing another one meanwhile. A
-        # caller told its scan is still on can turn it off; a caller told the
-        # dictionary changed size cannot do anything with that at all.
-        self.scan('y', '[1] * x')
-        self.without_preparse(
-            ExpansionsBeingRewritten({'width': 'outer', 'depth': '', 'y': 'outer'})
-        )
-
-        with self.assertRaises(Exception) as raised:
-            self.submit({'x': 3})
-
-        self.assertIn('Cannot submit', str(raised.exception))
-        self.assertIn('width', str(raised.exception))
-
     def test_an_error_in_the_globals_is_refused_before_anything_is_submitted(self):
         self.define(broken='1/0')
 
-        with self.assertRaises(Exception):
+        with self.assertRaises(Exception) as raised:
             self.submit({'x': 1})
 
+        self.assertIn('broken', str(raised.exception), 'the refusal names the global')
         self.assertEqual(self.app.batches, [])
 
     def test_a_global_no_active_group_has_is_refused_before_anything_is_set(self):
-        # The globals of a refused batch are left set, so a name that was
-        # never going to work is worth finding before the first one is
-        # written rather than after.
         with self.assertRaises(Exception) as raised:
             self.submit({'x': 1, 'not_a_global': 2}, {'x': 3, 'not_a_global': 4})
 
@@ -691,16 +642,6 @@ class SubmitShotsTests(RemoteCommandTestCase):
         self.assertEqual(
             self.expressions(), {'x': '0 # metres', 'y': '2*3', 'depth': '4'}
         )
-
-    def test_the_axes_are_read_after_the_preparse_has_rebuilt_them(self):
-        # Setting a global queues a reparse on another thread, and only that
-        # reparse rebuilds the axes the globals are expanded along. An axis
-        # left over from before names something the globals no longer produce,
-        # and expanding along it is an error raised partway through a batch.
-        descriptors = self.submit({'x': 1}, {'x': 2})
-
-        self.assertEqual(len(descriptors), 2)
-        self.assertNotIn(AxesModel.STALE_AXIS, self.app.axes_model.names)
 
     def test_a_shot_is_named_after_the_globals_written_into_it(self):
         # A filename prefix can be written in terms of a global, and the

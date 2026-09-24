@@ -5037,6 +5037,16 @@ class RemoteServer(ZMQServer):
             return bool(value)
         raise TypeError('%s must be a bool, not %s' % (name, value.__class__.__name__))
 
+    @staticmethod
+    def _with_trailing_comment(expression, previous):
+        """``expression`` followed by the comment ``previous`` ends with, if any."""
+        comments = runmanager.find_comments(previous)
+        if comments:
+            comment_start, comment_end = comments[-1]
+            if comment_end == len(previous):
+                expression += previous[comment_start:comment_end]
+        return expression
+
     @inmain_decorator()
     def _set_expression_field_values(self, getter, setter, changer_name, globals, raw=False):
         _, _, locations = self._get_active_global_locations()
@@ -5054,11 +5064,7 @@ class RemoteServer(ZMQServer):
                         "Global %s not found in any active group" % global_name
                     )
                 previous_value = getter(globals_file, group_name, global_name)
-                comments = runmanager.find_comments(previous_value)
-                if comments:
-                    comment_start, comment_end = comments[-1]
-                    if comment_end == len(previous_value):
-                        new_value += previous_value[comment_start:comment_end]
+                new_value = self._with_trailing_comment(new_value, previous_value)
                 try:
                     group_tab = app.currently_open_groups[globals_file, group_name]
                 except KeyError:
@@ -5251,10 +5257,12 @@ class RemoteServer(ZMQServer):
     def handle_submit_shots(self, entries, sequence=None, sequence_index=None):
         """Submit one shot per entry, each with the globals that entry names.
 
-        An entry is a dict of global name to value. The globals it names are
-        set in the window and left there, so that an operator watching can see
-        what is being run; globals no entry names are untouched, and keep
-        whatever the operator last gave them.
+        An entry is a dict of global name to value, and every entry names the
+        same globals. Each entry's shot is evaluated from one read of the
+        globals, as the window would hold them with that entry's values set.
+        The window is then set to the last entry and left so, so that an
+        operator watching can see what is being run; globals no entry names
+        are untouched, and keep whatever the operator last gave them.
 
         Returns one descriptor per entry -- shot_id, sequence_id,
         sequence_index, run_number and path -- in the order submitted.
@@ -5263,14 +5271,6 @@ class RemoteServer(ZMQServer):
         starts a sequence of its own; ``sequence`` is the sequence_id of an
         earlier submission, and the batch joins it whatever ran in between.
         ``sequence_index`` tells it from a sequence started in the same second.
-
-        The window holds one entry's globals at a time, which is what the
-        operator sees and what that entry's shot is evaluated against. Every
-        entry names the same globals, so that nothing an earlier entry asked
-        for reaches a later entry's shot -- a result recorded against
-        parameters that never ran is worse than no result -- and a batch whose
-        entries do not is refused before any global is set. The window is left
-        holding the last entry submitted.
 
         Every entry is evaluated before any shot is made, and the whole batch
         is then made and submitted in one go. That is what makes it safe to
@@ -5281,13 +5281,9 @@ class RemoteServer(ZMQServer):
         run number are claimed by the batch being made, so entries submitted
         one at a time would each find the same number free.
 
-        The globals of a refused batch are left set, at whichever entry the
-        refusal reached. Nothing is queued and nothing runs.
-
-        Within the batch the window is free between entries, so an operator
-        editing a global that no entry names can still change the experiment
-        partway through; that is no different from two consecutive Engages,
-        and holding the window for the length of a batch would be worse.
+        A batch refused while its entries are evaluated sets no global; one
+        refused as it is queued is left set to its last entry. Nothing is
+        queued and nothing runs.
         """
         entries = [dict(entry) for entry in entries]
         if not entries:
@@ -5297,29 +5293,40 @@ class RemoteServer(ZMQServer):
             return []
         names = set(entries[0])
         if any(set(entry) != names for entry in entries):
-            # A global one entry sets and a later one does not name would run
-            # the later shot at the earlier entry's value.
             raise ValueError('Cannot submit entries that name different globals')
-        # Before any is set, as the globals of a refused batch are left set.
-        missing = sorted(names - set(self.handle_get_default_globals(raw=True)))
+        # The preparse writes each global's expansion type, so the globals are
+        # read once it has finished, as an Engage reads them.
+        app.wait_until_preparse_complete()
+        active_groups = inmain(app.get_active_groups, interactive=False)
+        globals_details = runmanager.get_globals_details(active_groups)
+        group_of = {
+            name: group for group, records in globals_details.items() for name in records
+        }
+        missing = sorted(names - set(group_of))
         if missing:
             raise ValueError('Global %s not found in any active group' % missing[0])
         send_to_runviewer = self.handle_get_view_shots()
         batch = []
         for entry in entries:
-            self.handle_set_globals(entry)
-            # Setting a global asks the preparse thread to run again, and the
-            # preparse is what writes each global's expansion type and rebuilds
-            # the axes the shots are expanded along. Reading either while it is
-            # being rewritten is reading it half done -- see handle_engage,
-            # which waits for the same reason.
-            app.wait_until_preparse_complete()
-            if self.handle_error_in_globals():
+            # The globals as the window would hold them with this entry set.
+            details = {group: dict(records) for group, records in globals_details.items()}
+            for name, value in entry.items():
+                group_records = details[group_of[name]]
+                previous = group_records[name]['default']
+                default = self._with_trailing_comment(repr(value), previous)
+                group_records[name] = dict(group_records[name], default=default)
+            sequence_globals = runmanager._details_to_sequence_globals(details)
+            evaled_globals, _, expansions = runmanager.evaluate_globals(sequence_globals)
+            shots = runmanager.expand_globals(sequence_globals, evaled_globals)
+            if len(shots) != 1:
+                expanding = sorted(name for name in expansions if expansions[name])
                 raise ValueError(
-                    'Cannot submit %r: the globals it produces cannot be '
-                    'evaluated.' % entry
+                    'Cannot submit %r as one shot: the globals as they stand '
+                    'produce %d. Expanded by: %s.'
+                    % (entry, len(shots), ', '.join(expanding) or 'none')
                 )
-            batch.append(self._shot_for_entry(entry))
+            batch.append((shots[0], runmanager.get_frozen_globals(details, shots[0])))
+        self.handle_set_globals(entries[-1])
         # Joined by id, not by the queue's last shot, which is whoever
         # submitted last: an operator's Engage in between would otherwise take
         # the session's later shots into the operator's sequence.
@@ -5341,49 +5348,6 @@ class RemoteServer(ZMQServer):
             }
             for record in records
         ]
-
-    @inmain_decorator()
-    def _shot_for_entry(self, entry):
-        """The one shot the window now stands for, and what to freeze with it.
-
-        Both read here, while the window is holding this entry's globals and
-        nothing else's: the expressions a queue record freezes are the ones
-        standing in the window when its shot was evaluated, and a batch that
-        read them once at the end would carry the last entry's for every shot
-        in it.
-
-        Anything but one shot is refused. A global with a scan enabled ignores
-        the value just set for it, so this is not only the wrong number of
-        shots: it is a shot that did not use the parameters it was asked for,
-        and a cost attributed to parameters that never ran is worse than no
-        cost at all. Refused rather than mended, because the scan is the
-        operator's and turning it off under them is not this command's to do.
-        Refused here, too, where one shot per entry is first relied on, rather
-        than counted afterwards when the shots are already queued.
-        """
-        active_groups = app.get_active_groups(interactive=False)
-        _, shots, _, _, _ = app.parse_globals(active_groups)
-        if len(shots) != 1:
-            raise ValueError(
-                'Cannot submit %r as one shot: the globals as they stand '
-                'produce %d. Expanded by: %s.'
-                % (entry, len(shots), ', '.join(self._expanding_globals()) or 'none')
-            )
-        globals_details = runmanager.get_globals_details(active_groups)
-        return shots[0], runmanager.get_frozen_globals(globals_details, shots[0])
-
-    def _expanding_globals(self):
-        """The globals that turn one set of values into more than one shot.
-
-        Copied before it is read. The dictionary belongs to the preparse
-        thread, which assigns a guess into it per global, so a read that steps
-        through it raises as soon as a guess arrives partway -- and replaces
-        the refusal a caller can act on with an error about a dictionary."""
-        return sorted(
-            name
-            for name, expansion in dict(app.previous_expansions).items()
-            if expansion
-        )
 
     def handle_shot_status(self, shot_ids):
         """Whether each of these shots can still produce a result.

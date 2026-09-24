@@ -158,11 +158,9 @@ class Client(ZMQClient):
         """Submit one shot per entry, each with the globals that entry names.
 
         ``entries`` is a list of ``{global_name: value}`` dicts; one entry is
-        one shot. The globals an entry names are set in runmanager's window and
-        left set, so that whoever is watching sees what is running, and the
-        window is left holding the last entry submitted. Every entry names the
-        same globals, so that a value one entry asks for cannot carry into
-        another's shot; globals no entry names are untouched.
+        one shot, and every entry names the same globals. runmanager's window
+        is set to the last entry and left so, so that whoever is watching sees
+        what is running; globals no entry names are untouched.
 
         Returns one descriptor per entry, in the order submitted:
         ``{'shot_id', 'sequence_id', 'sequence_index', 'run_number', 'path'}``.
