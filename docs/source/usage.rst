@@ -429,9 +429,10 @@ configuration, in a directory named after the labscript file. Within that, the
 directory and filename are built from the ``output_folder_format`` and
 ``filename_prefix_format`` settings in the ``runmanager`` section of the lab
 configuration, which default to ``%Y/%m/%d/{sequence_index:05d}`` and
-``{sequence_timestamp}_{script_basename}`` respectively. Each press of engage
-claims a new sequence index, so an ordinary sequence gets a numbered directory
-of its own and its shots are named with an index suffix within it.
+``{sequence_timestamp}_{script_basename}`` respectively. An engage that starts a
+sequence claims a new sequence index, so an ordinary sequence gets a numbered
+directory of its own and its shots are named with an index suffix within it. An
+engage that adds shots to a sequence claims none.
 
 Runmanager owns the shot queue. Shots produced by engage are placed in that
 queue, and BLACS asks runmanager for the next shot when it is ready to run one,

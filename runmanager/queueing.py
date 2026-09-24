@@ -278,10 +278,9 @@ class QueueController(object):
         record['compile_mode'] = compile_mode
         record['compiled'] = bool(record.get('compiled', compile_mode == COMPILE_MODE_EAGER))
         # A shot runmanager produced itself because the queue was empty, rather
-        # than one a user engaged. It is queue work like any other, but it is
-        # not part of a sequence and its file lives in the daily default
-        # directory, so it must never become the anchor that the next Engage
-        # batch is written alongside; see offer_shot().
+        # than one a user engaged. It is queue work like any other, but its
+        # sequence is the day's default one, which no batch joins, so it must
+        # never become the anchor the next Engage batch is written alongside.
         record['default_shot'] = bool(record.get('default_shot', False))
         # A compile in progress belongs to this session only, so a restored
         # shot never starts out claimed:
@@ -422,7 +421,7 @@ class QueueController(object):
         """Return the paths of the queued shots.
 
         Clear ``include_default_shots`` to leave out the shots runmanager
-        produced itself, which are not part of any sequence."""
+        produced itself, whose sequence no batch joins."""
         with self._lock:
             return [
                 item['path']

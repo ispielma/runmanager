@@ -693,9 +693,9 @@ class DefaultShotTests(unittest.TestCase):
         )
 
     def test_a_default_shot_is_not_the_sequence_anchor(self):
-        # A default shot is not part of a sequence and lives in the daily
-        # default directory, so neither anchor an Engage batch can be written
-        # alongside may be a default shot's file.
+        # A default shot belongs to the day's default sequence, which no batch
+        # joins, so neither anchor an Engage batch can be written alongside may
+        # be a default shot's file.
         app = self.make_runmanager(default_shot_file=self.default_shot)
         app.offer_shot()
 
@@ -1218,12 +1218,12 @@ class SubmittedShotTests(unittest.TestCase):
 
 
 class ContinuingSequenceAnchorTests(unittest.TestCase):
-    """What a remote submission carries on from.
+    """What "add shots to last sequence" carries on from.
 
-    A caller that submits a shot, waits for its result and submits the next
-    finds the queue empty every time it asks. If an empty queue meant a new
-    sequence, a run of a hundred such submissions would be a hundred sequences
-    of one shot, which is the opposite of what a sequence is for.
+    An operator who engages a shot, waits for it to run and adds the next
+    finds the queue empty every time. If an empty queue meant a new sequence,
+    a hundred such additions would be a hundred sequences of one shot, which
+    is the opposite of what a sequence is for.
     """
 
     def setUp(self):
@@ -3000,11 +3000,11 @@ class DeletedAnchorTests(unittest.TestCase):
     deletes its file.
 
     Naming a file that is gone is not a sequence to add to, and it cannot
-    become one again. Every later submission asked for the sequence of a file
-    nothing can read and was refused -- permanently, and identically each
-    time. Letting go of the anchor with the file leaves the next submission in
-    the state it is in before anything has run, which is one it knows how to
-    be in: it starts a sequence.
+    become one again. Kept, it would have every later submission ask for the
+    sequence of a file nothing can read and be refused -- permanently, and
+    identically each time. Letting go of the anchor with the file leaves the
+    next submission in the state it is in before anything has run, which is
+    one it knows how to be in: it starts a sequence.
     """
 
     def setUp(self):

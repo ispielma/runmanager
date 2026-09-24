@@ -2158,7 +2158,7 @@ class RunManager(LabscriptApplication):
         )
         self.ui.lineEdit_shot_output_folder.textChanged.connect(self.on_shot_output_folder_text_changed)
 
-        # Control buttons; engage, abort, restart subprocess:
+        # Control buttons; engage, empty queue, restart subprocess:
         self.setup_engage_submission_menu()
         self.ui.pushButton_engage.clicked.connect(self.on_engage_clicked)
         self.ui.pushButton_abort.clicked.connect(self.on_abort_clicked)
@@ -2741,7 +2741,7 @@ class RunManager(LabscriptApplication):
                 index_start = 0
         elif sequence is None and indexed_path_base is not None:
             # "Add shots to last sequence" numbers from the record, as a remote
-            # join does, when there is one, and as before when there is not.
+            # join does, when there is one, and after the anchor's file if not.
             sequence_attrs = self.get_sequence_attrs_to_extend(indexed_path_base)
             key = (sequence_attrs['sequence_id'], sequence_attrs['sequence_index'])
             if key in self.sequences:
@@ -4964,8 +4964,8 @@ class RunManager(LabscriptApplication):
                 # finishing -- and it says nothing about which sequence the
                 # shot last sent belongs to. "Add shots to last sequence"
                 # means that sequence whether or not anything is queued now;
-                # the anchor is let go of only where that shot's file is
-                # deleted, and otherwise stands until another shot is sent.
+                # the anchor is let go of where that shot's file is deleted or
+                # a configuration is loaded, and stands until another is sent.
                 return no_shot
             if not os.path.isfile(labscript_file):
                 raise RuntimeError(
@@ -4997,10 +4997,9 @@ class RunManager(LabscriptApplication):
             self.discard_default_shot()
         agnostic_path = shared_drive.path_to_agnostic(item['path'])
         if not item['default_shot']:
-            # Only shots a user engaged are recorded here. A default shot is
-            # not part of a sequence, and lives in the daily default
-            # directory, so it must not become the anchor that "add shots to
-            # last sequence" writes the next batch alongside:
+            # Only shots a user engaged are recorded here. A default shot
+            # belongs to the day's default sequence, which no batch joins, so
+            # it must not become the anchor "add shots to last sequence" uses:
             self.queue_manager.set_last_sent_from_queue(
                 agnostic_path, item['sequence_attrs']
             )
@@ -5383,9 +5382,9 @@ class RemoteServer(ZMQServer):
     def handle_shot_status(self, shot_ids):
         """Whether each of these shots can still produce a result.
 
-        Read-only and batched: a caller waiting on many shots asks once. Like
-        the policy above, the queue controller is safe to ask from any thread,
-        so this is not a GUI read."""
+        Read-only and batched: a caller waiting on many shots asks once. The
+        queue controller is safe to ask from any thread, so this is not a GUI
+        read."""
         return app.queue_manager.get_shot_statuses(list(shot_ids))
 
     def handle_queue_exchange(self, outcome=None, request_shot=True):

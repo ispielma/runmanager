@@ -88,7 +88,7 @@ it is met.
 - [ ] ~~Slice 17: Abort stays enabled while a batch is pending~~ — goes with
       Slice 12's Empty queue
 - [x] Slice 18: The tests exercise what they claim, inside temporary directories
-- [ ] Slice 19: Comments and docstrings say what the code does now
+- [x] Slice 19: Comments and docstrings say what the code does now
 
 ---
 
@@ -846,8 +846,8 @@ code, and comments of one to three lines that say why, not what changed.
 
 ### Acceptance criteria
 
-- [ ] Each place above states current behaviour.
-- [ ] No comment or docstring touched narrates history.
+- [x] Each place above states current behaviour.
+- [x] No comment or docstring touched narrates history.
 
 ### Blocked by
 

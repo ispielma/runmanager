@@ -193,13 +193,18 @@ class Client(ZMQClient):
         so a timeout means runmanager is not answering at all.
 
         An entry that would produce anything other than exactly one shot is
-        refused this way, which is what happens when a global still has a scan
-        enabled: a scan means the value asked for is not the value that runs,
-        so it is refused rather than submitted. So are a labscript file or
-        output folder that is not set, globals that cannot be evaluated,
-        entries that do not all name the same globals, a name no active group
-        has, and a ``sequence`` runmanager has no record of. The globals set before a refusal are left set; nothing is queued
-        and nothing runs."""
+        refused this way, as a scan left on a global can make it do. So are a
+        labscript file or output folder that is not set, globals that cannot
+        be evaluated, entries that do not all name the same globals, a name no
+        active group has, and a ``sequence`` runmanager has no record of, of
+        another labscript file, or sharing its id with another when no
+        ``sequence_index`` is given. A batch refused while its entries are
+        evaluated sets no global, and one refused as it is queued is left at
+        its last entry; either way nothing is queued and nothing runs.
+
+        The Scan? and JIT? boxes of the globals an entry names are the
+        caller's to manage, through get_scan_enabled, set_scan_enabled,
+        get_jit_enabled and set_jit_enabled."""
         return self.request(
             'submit_shots',
             list(entries),

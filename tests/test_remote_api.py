@@ -1112,9 +1112,8 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         # The queue empties on its own between two reads of it: BLACS asks for
         # the last shot on the server thread while the batch is being made.
         # Whichever answer a submission acts on has to be the one it was
-        # checked against -- a second read saying the queue is empty turned
-        # "add shots to last sequence" into a new sequence in the default
-        # folder, with nothing said about it.
+        # checked against: a second read saying the queue is empty would turn
+        # "add shots to last sequence" into a new sequence, with nothing said.
         queued = self.enqueue('experiment_007.h5')
         answers = [queued]
         self.app.get_queue_append_filepath = (
