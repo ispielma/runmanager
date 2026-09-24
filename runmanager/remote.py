@@ -154,30 +154,15 @@ class Client(ZMQClient):
         """Reset the shot output folder to the default path"""
         return self.request('reset_shot_output_folder')
 
-    def get_empty_queue_policy(self):
-        """What runmanager does when its queue runs out.
-
-        ``'nothing'``: an empty queue produces nothing, and the apparatus
-        stands idle until something is submitted. ``'default_labscript'``:
-        runmanager compiles and offers a shot of its own to keep the apparatus
-        busy.
-
-        Worth asking before submitting work whose results are waited on: under
-        ``'nothing'`` a queue that empties produces no further shot, so nothing
-        arrives to wait for."""
-        return self.request('get_empty_queue_policy')
-
     def submit_shots(self, entries, sequence=None):
         """Submit one shot per entry, each with the globals that entry names.
 
         ``entries`` is a list of ``{global_name: value}`` dicts; one entry is
         one shot. The globals an entry names are set in runmanager's window and
         left set, so that whoever is watching sees what is running, and the
-        window is left holding the last entry submitted. A global that another
-        entry names but this one does not goes back to the operator's own
-        expression before this entry's shot is made, so a value asked for once
-        does not carry into the shots after it; globals no entry names are
-        untouched.
+        window is left holding the last entry submitted. Every entry names the
+        same globals, so that a value one entry asks for cannot carry into
+        another's shot; globals no entry names are untouched.
 
         Returns one descriptor per entry, in the order submitted:
         ``{'shot_id', 'sequence_id', 'run_number', 'path'}``. The queue is
@@ -206,9 +191,9 @@ class Client(ZMQClient):
         refused this way, which is what happens when a global still has a scan
         enabled: a scan means the value asked for is not the value that runs,
         so it is refused rather than submitted. So are a labscript file or
-        output folder that is not set, globals that cannot be evaluated, a
-        name no active group has, and a ``sequence`` runmanager has no record
-        of. The globals set before a refusal are left set; nothing is queued
+        output folder that is not set, globals that cannot be evaluated,
+        entries that do not all name the same globals, a name no active group
+        has, and a ``sequence`` runmanager has no record of. The globals set before a refusal are left set; nothing is queued
         and nothing runs."""
         return self.request('submit_shots', list(entries), sequence=sequence)
 
@@ -286,7 +271,6 @@ set_shot_output_folder = _default_client.set_shot_output_folder
 error_in_globals = _default_client.error_in_globals
 is_output_folder_default = _default_client.is_output_folder_default
 reset_shot_output_folder = _default_client.reset_shot_output_folder
-get_empty_queue_policy = _default_client.get_empty_queue_policy
 shot_status = _default_client.shot_status
 submit_shots = _default_client.submit_shots
 queue_exchange = _default_client.queue_exchange

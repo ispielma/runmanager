@@ -5225,13 +5225,6 @@ class RemoteServer(ZMQServer):
     def handle_reset_shot_output_folder(self):
         app.on_reset_shot_output_folder_clicked(None)
 
-    def handle_get_empty_queue_policy(self):
-        """What runmanager does when the queue runs out.
-
-        Read-only, and not a GUI read: the policy lives in the queue
-        controller, which is safe to ask from any thread."""
-        return app.queue_manager.get_empty_queue_policy()
-
     def handle_submit_shots(self, entries, sequence=None):
         """Submit one shot per entry, each with the globals that entry names.
 
@@ -5248,11 +5241,11 @@ class RemoteServer(ZMQServer):
         earlier submission, and the batch joins it whatever ran in between.
 
         The window holds one entry's globals at a time, which is what the
-        operator sees and what that entry's shot is evaluated against. A
-        global another entry names but this one does not is put back to the
-        operator's own expression first, so that nothing an earlier entry
-        asked for reaches a later entry's shot -- a result recorded against
-        parameters that never ran is worse than no result. The window is left
+        operator sees and what that entry's shot is evaluated against. Every
+        entry names the same globals, so that nothing an earlier entry asked
+        for reaches a later entry's shot -- a result recorded against
+        parameters that never ran is worse than no result -- and a batch whose
+        entries do not is refused before any global is set. The window is left
         holding the last entry submitted.
 
         Every entry is evaluated before any shot is made, and the whole batch
@@ -5278,18 +5271,18 @@ class RemoteServer(ZMQServer):
             # nothing, rather than asked wrongly. Nothing is made, so nothing
             # claims a filename or a run number.
             return []
-        named = set()
-        for entry in entries:
-            named.update(entry)
-        baseline = self._operator_expressions(named)
+        names = set(entries[0])
+        if any(set(entry) != names for entry in entries):
+            # A global one entry sets and a later one does not name would run
+            # the later shot at the earlier entry's value.
+            raise ValueError('Cannot submit entries that name different globals')
+        # Before any is set, as the globals of a refused batch are left set.
+        missing = sorted(names - set(self.handle_get_default_globals(raw=True)))
+        if missing:
+            raise ValueError('Global %s not found in any active group' % missing[0])
         send_to_runviewer = self.handle_get_view_shots()
         batch = []
         for entry in entries:
-            restore = {
-                name: baseline[name] for name in sorted(named - set(entry))
-            }
-            if restore:
-                self.handle_set_globals(restore, raw=True)
             self.handle_set_globals(entry)
             # Setting a global asks the preparse thread to run again, and the
             # preparse is what writes each global's expansion type and rebuilds
@@ -5323,41 +5316,6 @@ class RemoteServer(ZMQServer):
             }
             for record in records
         ]
-
-    def _operator_expressions(self, names):
-        """What the operator has these globals set to, before any entry is.
-
-        Read once, at the start, and put back around every entry that does not
-        name them. Without that the window ends up holding the union of every
-        entry's globals, and each shot is compiled with the values of the
-        entries before it as well as its own.
-
-        Expressions and not values: what the operator wrote may be in terms of
-        other globals, and a number frozen out of it stops following them.
-
-        A name no active group has is refused here rather than at the entry
-        that carries it, because the globals of a refused batch are left set
-        and this one can be refused before any of them are.
-        """
-        expressions = self.handle_get_default_globals(raw=True)
-        missing = sorted(set(names) - set(expressions))
-        if missing:
-            raise ValueError('Global %s not found in any active group' % missing[0])
-        return {
-            name: self._without_trailing_comment(expressions[name]) for name in names
-        }
-
-    @staticmethod
-    def _without_trailing_comment(expression):
-        """An expression without the comment the window keeps on the end of it.
-
-        Setting a global puts back whatever comment the expression it replaces
-        ended with, so an expression handed back with its own comment still
-        attached would return carrying two of them."""
-        comments = runmanager.find_comments(expression)
-        if comments and comments[-1][1] == len(expression):
-            return expression[: comments[-1][0]]
-        return expression
 
     @inmain_decorator()
     def _shot_for_entry(self, entry):

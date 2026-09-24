@@ -29,8 +29,6 @@ from runmanager.queueing import (
     BLACS_STATES,
     BLOCKED_SHOT_STATE,
     COMPILE_MODE_EAGER,
-    EMPTY_QUEUE_DEFAULT_LABSCRIPT,
-    EMPTY_QUEUE_NOTHING,
     QueueManager,
     SUBMITTED_SHOT_STATE,
     UNKNOWN_SHOT_STATE,
@@ -94,21 +92,6 @@ class RemoteCommandTestCase(unittest.TestCase):
         return answer
 
 
-class EmptyQueuePolicyTests(RemoteCommandTestCase):
-    """What runmanager does when the queue runs out, asked from outside.
-
-    A caller that submits shots and waits for their results needs this before
-    it starts: under 'nothing' an empty queue produces nothing at all, so a
-    caller waiting on a result that only a shot could produce waits forever.
-    """
-
-    def test_the_policy_in_force_is_what_is_answered(self):
-        for policy in (EMPTY_QUEUE_NOTHING, EMPTY_QUEUE_DEFAULT_LABSCRIPT):
-            with self.subTest(policy=policy):
-                self.app.queue_manager.set_empty_queue_policy(policy)
-                self.assertEqual(self.request('get_empty_queue_policy'), policy)
-
-
 class ClientCommandNameTests(unittest.TestCase):
     """Each client method asks under the name the server answers to.
 
@@ -122,7 +105,6 @@ class ClientCommandNameTests(unittest.TestCase):
     #: One call per command, carrying arguments only where the method takes
     #: them. A command added to the client belongs here.
     CALLS = {
-        'get_empty_queue_policy': (),
         'shot_status': (['one'],),
         'submit_shots': ([{'x': 1}],),
     }
@@ -558,53 +540,28 @@ class SubmitShotsTests(RemoteCommandTestCase):
         else:
             self.assertEqual(len(descriptors), 3)
 
-    def test_a_global_an_entry_does_not_name_keeps_the_operators_value(self):
-        # The globals are set in the window and left set, so setting one entry
-        # on top of the last leaves the window holding the union of them all.
-        # A shot compiled that way used a value some earlier entry asked for,
-        # and a result recorded against parameters that never ran is worse
-        # than no result.
-        self.submit({'x': 1}, {'y': 9})
-
-        self.assertEqual(
-            [record['frozen_globals']['x'] for record in self.queued()],
-            ['1 # metres', '0 # metres'],
-            'the second entry names only y, so x runs at the value the '
-            'operator gave it',
-        )
-        self.assertEqual(
-            [record['frozen_globals']['y'] for record in self.queued()],
-            ['2*3', '9'],
-        )
-
     def test_the_window_is_left_holding_the_last_shot_submitted(self):
         # Whoever is watching has to be able to see what is running, so the
         # globals really are set and really are left set. What is left is one
         # shot's worth of them and not every entry's at once.
-        self.submit({'x': 1}, {'y': 9})
+        self.submit({'x': 1, 'y': 8}, {'x': 2, 'y': 9})
 
         self.assertEqual(
-            self.expressions(), {'x': '0 # metres', 'y': '9', 'depth': '4'}
+            self.expressions(), {'x': '2 # metres', 'y': '9', 'depth': '4'}
         )
 
-    def test_a_restored_global_keeps_its_expression_and_its_comment(self):
-        # An expression is what the operator gave a global, and a number
-        # frozen out of it stops following whatever it was written in terms
-        # of. The comment beside it is theirs as well, and the window puts it
-        # back on every expression written, so handing one back with its own
-        # comment still attached returns it carrying two.
-        self.define(width='depth * 2  # doubled')
-        self.submit({'width': 1}, {'x': 5})
+    def test_entries_that_name_different_globals_are_refused(self):
+        # A global one entry sets and the next does not name would stay set,
+        # and the next shot would run at a value it never asked for.
+        with self.assertRaises(Exception) as raised:
+            self.submit({'x': 1}, {'y': 9})
 
+        self.assertIn('name different globals', str(raised.exception))
+        self.assertEqual(self.app.batches, [], 'nothing reached the queue')
         self.assertEqual(
-            self.expressions()['width'],
-            'depth * 2  # doubled',
-            'the entry that does not name it hands back what the operator '
-            'wrote, not a number and not a second copy of the comment',
-        )
-        self.assertEqual(
-            [record['frozen_globals']['width'] for record in self.queued()],
-            ['1  # doubled', 'depth * 2  # doubled'],
+            self.expressions(),
+            {'x': '0 # metres', 'y': '2*3', 'depth': '4'},
+            'and no global was set',
         )
 
     def test_nothing_is_submitted_when_a_later_entry_would_expand(self):
@@ -675,7 +632,7 @@ class SubmitShotsTests(RemoteCommandTestCase):
         # never going to work is worth finding before the first one is
         # written rather than after.
         with self.assertRaises(Exception) as raised:
-            self.submit({'x': 1}, {'not_a_global': 2})
+            self.submit({'x': 1, 'not_a_global': 2}, {'x': 3, 'not_a_global': 4})
 
         self.assertIn(
             'Global not_a_global not found in any active group',
