@@ -81,9 +81,9 @@ it is met.
       Empty queue
 - [x] Slice 13: A refused entry says which global failed and why
 - [x] Slice 14: `submit_shots` checks its global names in one parse
-- [ ] Slice 15: A batch no longer holds BLACS's server thread (HITL)
-      — decided: evaluate each entry from one read; keep one server. Built:
-      50 entries take 129 ms in the test harness; apparatus measurement to do
+- [x] Slice 15: A batch no longer holds BLACS's server thread (HITL)
+      — decided: evaluate each entry from one read; keep one server; no
+      further issue
 - [x] Slice 16: A join reads no shot file and takes no lock on the GUI thread
 - [ ] ~~Slice 17: Abort stays enabled while a batch is pending~~ — goes with
       Slice 12's Empty queue
@@ -107,10 +107,9 @@ calls are skipped. `unfinished_tasks` then never returns to zero, and every
 later `wait_until_preparse_complete()` blocks forever.
 
 `handle_submit_shots` calls that wait once per entry, on zprocess's
-single-threaded request server that BLACS's `queue_exchange` and `say_hello`
-also use. So one failed preparse leaves `submit_shots` hung and BLACS
-unanswered until runmanager restarts. `handle_engage` and `handle_n_shots`
-wait the same way.
+single-threaded request server that BLACS's `queue_exchange` also uses. So one
+failed preparse leaves `submit_shots` hung and BLACS unanswered until
+runmanager restarts. `handle_engage` and `handle_n_shots` wait the same way.
 
 Mark each request done whether or not the preparse raised, for instance in a
 `finally`, while still reporting the exception as the loop does now.
@@ -640,7 +639,7 @@ None. Build it with Slice 15, which replaces the loop it changes.
 The unknown-global check calls `handle_get_default_globals(raw=True)`, which
 re-parses the globals TOML once per active global, so its cost is quadratic:
 1.47 s at 300 globals and 5.87 s at 600. It runs before any entry, on the thread
-BLACS's 5 s `say_hello` probe waits on. `_get_active_global_locations()` gives
+BLACS's `queue_exchange` waits on. `_get_active_global_locations()` gives
 the same names from one parse per file.
 
 ### Acceptance criteria
@@ -668,12 +667,10 @@ None. Build it with Slice 15, which replaces the loop it changes.
 ### What to build
 
 `handle_submit_shots` runs its whole per-entry loop on zprocess's
-single-threaded request server, which BLACS's `say_hello` liveness probe (5 s)
-and `queue_exchange` share. For each entry it rewrites the globals file once per
-named global, waits for a full preparse and evaluates twice. That measured
-0.7-1.8 s for 8 entries in the harness, before GUI round trips. It is plausible,
-though not shown end to end, that a larger batch or globals set crosses BLACS's
-timeout, so that BLACS runs its local override instead of queued work.
+single-threaded request server, which BLACS's `queue_exchange` shares. For each
+entry it rewrites the globals file once per named global, waits for a full
+preparse and evaluates twice. That measured 0.7-1.8 s for 8 entries in the
+harness, before GUI round trips, and delays BLACS's next exchange by as much.
 
 ### Decision
 
@@ -684,13 +681,16 @@ compile globals, and set the window once, to the last entry. With
 milliseconds. `queue_exchange` already keeps its slow work off the thread:
 compiles, default shots and lyse submissions run on threads of their own.
 
+No further issue, by Ian's decision. BLACS sends its exchange about once a
+second, so a submission that is slow for any reason costs BLACS about a
+second at worst, and rarely. 50 entries over 303 globals take 129 ms in the
+test harness; no apparatus measurement is needed.
+
 ### Acceptance criteria
 
 - [x] A batch of N entries reads the globals once and waits for at most one
       preparse.
 - [x] Each entry is still evaluated with its own values and none carries over.
-- [ ] During a large batch, BLACS's `say_hello` is answered within its
-      liveness timeout, by measurement.
 
 ### Blocked by
 
@@ -699,7 +699,7 @@ together.
 
 ### Review findings covered
 
-- A batch holds the request thread past BLACS's liveness timeout (plausible).
+- A batch holds the request thread BLACS's exchange waits on (plausible).
 - Per-entry globals rewrites and preparse waits (efficiency).
 
 ---
