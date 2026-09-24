@@ -3591,11 +3591,14 @@ class RunManager(LabscriptApplication):
                         except queue.Empty:
                             break
                 # Do some work:
-                self.preparse_globals()
-                # Tell any callers calling preparse_globals_required.join() that we are
-                # done with their request:
-                for _ in range(n_requests):
-                    self.preparse_globals_required.task_done()
+                try:
+                    self.preparse_globals()
+                finally:
+                    # Tell any callers calling preparse_globals_required.join() that we
+                    # are done with their request, even if it failed, or they wait
+                    # forever:
+                    for _ in range(n_requests):
+                        self.preparse_globals_required.task_done()
             except Exception:
                 # Raise the error, but keep going so we don't take down the
                 # whole thread if there is a bug.

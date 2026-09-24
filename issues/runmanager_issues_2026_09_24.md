@@ -60,7 +60,7 @@ Every decision is made. Each slice is built under the labscript-narrow-patch
 and labscript-style skills. A box is ticked only where every criterion below
 it is met.
 
-- [ ] Slice 1: A failed preparse no longer wedges the remote server
+- [x] Slice 1: A failed preparse no longer wedges the remote server
 - [ ] Slice 2: A replacement batch never takes an in-flight shot's number
 - [ ] Slice 3: Two sequences started in the same second stay two sequences (HITL)
       — decided: key the record by `(sequence_id, sequence_index)`
@@ -116,12 +116,12 @@ Mark each request done whether or not the preparse raised, for instance in a
 
 ### Acceptance criteria
 
-- [ ] After a preparse that raises, `wait_until_preparse_complete()` returns
+- [x] After a preparse that raises, `wait_until_preparse_complete()` returns
       once the loop has taken the request.
-- [ ] A `submit_shots` made after a failed preparse either completes or is
+- [x] A `submit_shots` made after a failed preparse either completes or is
       refused. It never hangs.
-- [ ] The preparse error still reaches the log and the output, as it does now.
-- [ ] A test that makes one preparse raise and then waits fails without the
+- [x] The preparse error still reaches the log and the output, as it does now.
+- [x] A test that makes one preparse raise and then waits fails without the
       fix.
 
 ### Blocked by

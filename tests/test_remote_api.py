@@ -11,6 +11,7 @@ is not reachable at all -- and the dispatch is runmanager's own.
 """
 import copy
 import os
+import queue
 import shutil
 import tempfile
 import threading
@@ -1257,6 +1258,45 @@ class ShuffledEngageTests(RemoteCommandTestCase):
             [('3', '3'), ('2', '2'), ('1', '1')],
             'each file is named for the globals that are compiled into it',
         )
+
+
+class PreparsingApp(FakeApp):
+    """The application's preparse thread, with a preparse that fails."""
+
+    preparse_globals_loop = RunManager.preparse_globals_loop
+    wait_until_preparse_complete = RunManager.wait_until_preparse_complete
+
+    def __init__(self):
+        super().__init__()
+        self.preparse_globals_required = queue.Queue()
+        self.n_shots = 3
+
+    def preparse_globals(self):
+        raise RuntimeError('a globals file could not be read')
+
+
+class PreparseFailureTests(RemoteCommandTestCase):
+    def make_app(self):
+        return PreparsingApp()
+
+    def test_a_command_waiting_on_a_preparse_is_answered_after_one_fails(self):
+        # BLACS is answered on the thread such a command waits on, so a wait
+        # that never ends leaves BLACS unanswered too.
+        answers = []
+        reported = threading.Event()
+        with mock.patch.object(main_module, 'qtlock', threading.Lock()), mock.patch.object(
+            main_module, 'raise_exception_in_thread', lambda exc_info: reported.set()
+        ):
+            threading.Thread(target=self.app.preparse_globals_loop, daemon=True).start()
+            self.app.preparse_globals_required.put(None)
+            asker = threading.Thread(
+                target=lambda: answers.append(self.request('n_shots')), daemon=True
+            )
+            asker.start()
+            asker.join(5)
+            self.assertTrue(reported.wait(5), 'the failed preparse is still reported')
+
+        self.assertEqual(answers, [3])
 
 
 if __name__ == '__main__':
