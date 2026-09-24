@@ -67,7 +67,7 @@ from labscript_utils.labconfig import (
     load_appconfig,
 )
 from labscript_utils.file_utils import next_available_indexed_filepath
-from labscript_utils.lookup_format import unescape_braces
+from labscript_utils.lookup_format import format_lookup_string, unescape_braces
 from labscript_utils.setup_logging import setup_logging
 import labscript_utils.shared_drive as shared_drive
 from labscript_utils import dedent
@@ -1840,7 +1840,7 @@ class RunManager(LabscriptApplication):
         self.compiler_lock = threading.Lock()
         # Each sequence made or added to here, by (sequence_id, sequence_index), as
         # two started in the same second share an id: its newest shot's path,
-        # attributes and next run number. In memory only, lost on a restart.
+        # attributes, next run number and name format. In memory, lost on restart.
         self.sequences = {}
         # A default shot is produced off the request thread; these track the one
         # being made and the one waiting to be handed over:
@@ -2551,13 +2551,15 @@ class RunManager(LabscriptApplication):
         self.engage_replace_queue_action.setEnabled(enabled)
         self.engage_add_clear_action.setEnabled(enabled)
 
-    def reindex_run_file_infos(self, run_file_infos, indexed_path_base, index_start=None):
+    def reindex_run_file_infos(
+        self, run_file_infos, indexed_path_base, index_start=None, name_format=None
+    ):
         """Name and number a batch after the shot it is being added to.
 
-        Both the directory and the filename stem come from
-        ``indexed_path_base``, which is the shot whose sequence this batch is
-        joining, so nothing about where a new sequence would have gone reaches
-        these files."""
+        ``indexed_path_base`` is the shot whose sequence this batch is joining.
+        With ``name_format``, that sequence's ``(folder, prefix)`` with any
+        globals unresolved, each shot is named from it and its own globals, as
+        make_run_files names them; otherwise after ``indexed_path_base``."""
         if not run_file_infos:
             return run_file_infos
         candidate_stem = os.path.splitext(os.path.basename(indexed_path_base))[0]
@@ -2569,17 +2571,28 @@ class RunManager(LabscriptApplication):
         compiling = self.queue_manager.get_compiling_paths()
         next_index = index_start
         for run_file_info in run_file_infos:
-            run_file, next_index = next_available_indexed_filepath(
-                indexed_path_base,
-                suffix_format,
-                start=next_index,
-            )
-            while os.path.abspath(run_file) in compiling:
+            run_file_info['name_format'] = name_format
+            if name_format is None:
                 run_file, next_index = next_available_indexed_filepath(
                     indexed_path_base,
                     suffix_format,
-                    start=next_index + 1,
+                    start=next_index,
                 )
+                while os.path.abspath(run_file) in compiling:
+                    run_file, next_index = next_available_indexed_filepath(
+                        indexed_path_base,
+                        suffix_format,
+                        start=next_index + 1,
+                    )
+            else:
+                shot_globals = {'globals': run_file_info['shot_globals']}
+                basename = os.path.join(
+                    *(format_lookup_string(part, shot_globals) for part in name_format)
+                )
+                run_file = '%s_%0*d.h5' % (basename, width, next_index)
+                while os.path.exists(run_file) or os.path.abspath(run_file) in compiling:
+                    next_index += 1
+                    run_file = '%s_%0*d.h5' % (basename, width, next_index)
             run_file_info['path'] = run_file
             # A shot file is named after the run number written into it, and
             # a run number is unique within its sequence, so renumbering the
@@ -2713,6 +2726,7 @@ class RunManager(LabscriptApplication):
         active_groups = self.get_active_groups()
         index_start = None
         sequence_attrs = None
+        name_format = None
         if mode.clears_queue:
             if indexed_path_base is not None:
                 # Read before the Clear rather than after it. With nothing yet
@@ -2744,7 +2758,9 @@ class RunManager(LabscriptApplication):
                     'Cannot add shots to sequence %s: runmanager has no record of '
                     'it, or has two and was not told which' % sequence_id
                 )
-            indexed_path_base, sequence_attrs, index_start = self.sequences[keys[0]]
+            indexed_path_base, sequence_attrs, index_start, name_format = (
+                self.sequences[keys[0]]
+            )
         # A sequence is one labscript file's shots, and is refused before a
         # replacement's Clear, so that a refusal leaves the queue as it was.
         if sequence_attrs is not None:
@@ -2765,10 +2781,12 @@ class RunManager(LabscriptApplication):
             indexed_path_base=indexed_path_base,
             index_start=index_start,
             sequence_attrs=sequence_attrs,
+            name_format=name_format,
         )
         compile_mode = self.queue_compile_mode_combo.currentData()
         queue_records = []
         for run_file_info, (_, frozen) in zip(run_files, batch):
+            name_format = run_file_info['name_format']
             queue_records.append(
                 {
                     'path': run_file_info['path'],
@@ -2789,7 +2807,7 @@ class RunManager(LabscriptApplication):
         attrs = last['sequence_attrs']
         key = (attrs['sequence_id'], attrs['sequence_index'])
         next_run = max(last['run_no'] + 1, self.sequences.get(key, (None, None, 0))[2])
-        self.sequences[key] = (last['path'], last['sequence_attrs'], next_run)
+        self.sequences[key] = (last['path'], last['sequence_attrs'], next_run, name_format)
         return self.queue_manager.compile_shots(
             queue_records, send_to_BLACS, send_to_runviewer
         )
@@ -4523,6 +4541,7 @@ class RunManager(LabscriptApplication):
         indexed_path_base=None,
         index_start=None,
         sequence_attrs=None,
+        name_format=None,
     ):
         """Make one shot file per entry of ``shots``, in the order given.
 
@@ -4556,6 +4575,7 @@ class RunManager(LabscriptApplication):
                 ],
                 indexed_path_base,
                 index_start=index_start,
+                name_format=name_format,
             )
             if not with_metadata:
                 for run_file_info in run_files:
@@ -4593,6 +4613,10 @@ class RunManager(LabscriptApplication):
                 return_infos=with_metadata,
                 create_files=not with_metadata,
             )
+            if with_metadata:
+                # How a later batch joining this sequence names its shots.
+                name_format = (output_folder, filename_prefix)
+                run_files = [dict(info, name_format=name_format) for info in run_files]
         logger.debug(run_files)
         return labscript_file, run_files
 
@@ -4740,7 +4764,7 @@ class RunManager(LabscriptApplication):
                 '_{index}',
                 start=start,
             )
-            self.sequences[key] = (run_file, sequence_attrs, default_index + 1)
+            self.sequences[key] = (run_file, sequence_attrs, default_index + 1, None)
             # No shot_id, deliberately. A default shot is runmanager's own,
             # produced to keep the apparatus busy, and it is written here --
             # before it is a queue row and before it has an id. A file with no

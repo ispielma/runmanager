@@ -507,6 +507,25 @@ class SubmitShotsTests(RemoteCommandTestCase):
         self.assertEqual(second[0]['sequence_index'], first[0]['sequence_index'])
         self.assertEqual(second[0]['run_number'], 1)
 
+    def test_a_joined_shot_is_named_from_its_own_globals(self):
+        # The filename prefix and folder can be written in terms of a global.
+        # A joined shot is named from the sequence's formats and its own
+        # globals, not after the shot before it.
+        self.app.exp_config.filename_prefix_format = '{globals[x]}_{script_basename}'
+        folder = os.path.join(self.directory, '{globals[x]}')
+        self.app.ui.lineEdit_shot_output_folder.text = lambda: folder
+        first = self.submit({'x': 1})
+
+        second = self.submit(
+            {'x': 5},
+            sequence=first[0]['sequence_id'],
+            sequence_index=first[0]['sequence_index'],
+        )
+
+        self.assertEqual(
+            second[0]['path'], os.path.join(self.directory, '5', '5_experiment_1.h5')
+        )
+
     def test_a_join_is_refused_once_the_labscript_file_has_changed(self):
         # A sequence is one labscript file's shots; another file's would land
         # in its folder under its name.

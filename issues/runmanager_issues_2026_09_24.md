@@ -72,7 +72,7 @@ it is met.
 - [x] Slice 7: A timed-out submission is not left running unaccounted (HITL)
       — decided: `submit_shots` is made practically instant; no recovery path
 - [x] Slice 8: A cancelled shot that can still complete stays pending
-- [ ] Slice 9: Joined shots are named from the template and their own globals
+- [x] Slice 9: Joined shots are named from the template and their own globals
 - [x] Slice 10: Default shots are numbered per sequence
 - [ ] ~~Slice 11: The day's default sequence sorts as current in lyse (HITL,
       lyse)~~ — dropped
@@ -450,11 +450,11 @@ number. `reindex_run_file_infos` then serves only sequences with no record.
 
 ### Acceptance criteria
 
-- [ ] With `{globals[x]}` in the prefix, each joined shot is named with its own
+- [x] With `{globals[x]}` in the prefix, each joined shot is named with its own
       x and ends in its run number.
-- [ ] With `{globals[x]}` in the folder format, each joined shot goes in its
+- [x] With `{globals[x]}` in the folder format, each joined shot goes in its
       own x's folder.
-- [ ] Existing numbering tests pass unchanged.
+- [x] Existing numbering tests pass unchanged.
 
 ### Blocked by
 
