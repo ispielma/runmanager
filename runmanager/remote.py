@@ -185,7 +185,10 @@ class Client(ZMQClient):
         Raises, having submitted nothing at all, whatever it is that goes
         wrong. The whole batch is made and handed over in one go, so until
         that succeeds there is nothing queued to take back and no shot running
-        under an identifier the caller was never given.
+        under an identifier the caller was never given. A reply that times
+        out is the exception: runmanager may still queue the batch, under ids
+        the caller never received. A submission is answered in milliseconds,
+        so a timeout means runmanager is not answering at all.
 
         An entry that would produce anything other than exactly one shot is
         refused this way, which is what happens when a global still has a scan

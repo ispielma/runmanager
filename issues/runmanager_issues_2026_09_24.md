@@ -69,7 +69,7 @@ it is met.
       — decided: done by Slice 12
 - [ ] ~~Slice 6: Each entry runs the values it names (HITL)~~ — moved to
       labscript-optimization; runmanager already exposes both boxes
-- [ ] Slice 7: A timed-out submission is not left running unaccounted (HITL)
+- [x] Slice 7: A timed-out submission is not left running unaccounted (HITL)
       — decided: `submit_shots` is made practically instant; no recovery path
 - [x] Slice 8: A cancelled shot that can still complete stays pending
 - [ ] Slice 9: Joined shots are named from the template and their own globals
@@ -373,9 +373,10 @@ is then a fault, not a case to design for.
 
 ### Acceptance criteria
 
-- [ ] The client docstring states what a timeout means.
-- [ ] `submit_shots` for a batch of the optimizer's size returns in
-      milliseconds, by measurement.
+- [x] The client docstring states what a timeout means.
+- [x] `submit_shots` for a batch of the optimizer's size returns in
+      milliseconds, by measurement: 8 entries over 303 globals take 63 ms in
+      the test harness.
 
 ### Blocked by
 
