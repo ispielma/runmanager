@@ -535,6 +535,25 @@ class SubmitShotsTests(RemoteCommandTestCase):
         self.assertEqual(second[0]['sequence_index'], first[0]['sequence_index'])
         self.assertEqual(second[0]['run_number'], 1)
 
+    def test_a_join_is_refused_once_the_labscript_file_has_changed(self):
+        # A sequence is one labscript file's shots; another file's would land
+        # in its folder under its name.
+        first = self.submit({'x': 1})
+        self.app.labscript_file = os.path.join(self.directory, 'other.py')
+
+        with self.assertRaises(Exception) as raised:
+            self.submit(
+                {'x': 2},
+                sequence=first[0]['sequence_id'],
+                sequence_index=first[0]['sequence_index'],
+            )
+
+        self.assertIn(
+            'Cannot add shots to sequence %s: ' % first[0]['sequence_id'],
+            str(raised.exception),
+        )
+        self.assertEqual(len(self.app.batches), 1, 'the refused batch was not queued')
+
     def test_a_sequence_runmanager_has_no_record_of_is_refused(self):
         # Refused rather than started afresh, which would split the session
         # quietly in two; the caller stops on this message.

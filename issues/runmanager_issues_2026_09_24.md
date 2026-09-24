@@ -64,7 +64,7 @@ it is met.
 - [ ] Slice 2: A replacement batch never takes an in-flight shot's number
 - [x] Slice 3: Two sequences started in the same second stay two sequences (HITL)
       — decided: key the record by `(sequence_id, sequence_index)`
-- [ ] Slice 4: A join refuses a sequence of another labscript file
+- [x] Slice 4: A join refuses a sequence of another labscript file
 - [ ] Slice 5: "Add shots to last sequence" sees a sequence still compiling (HITL)
       — decided: done by Slice 12
 - [ ] ~~Slice 6: Each entry runs the values it names (HITL)~~ — moved to
@@ -248,11 +248,11 @@ stop reason. For Engage, the output box says why.
 
 ### Acceptance criteria
 
-- [ ] After switching the labscript file, a remote join is refused with the
+- [x] After switching the labscript file, a remote join is refused with the
       prefix and nothing is queued.
-- [ ] After switching the labscript file, Engage "add shots" is refused, with
+- [x] After switching the labscript file, Engage "add shots" is refused, with
       the reason in the output box.
-- [ ] Joins compiled from the sequence's own file are unchanged.
+- [x] Joins compiled from the sequence's own file are unchanged.
 
 ### Blocked by
 

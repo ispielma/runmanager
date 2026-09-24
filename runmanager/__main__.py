@@ -2720,7 +2720,6 @@ class RunManager(LabscriptApplication):
                 # shots being deleted gave up; the ones whose files are still
                 # there are skipped over.
                 index_start = 0
-            self.queue_manager.clear()
         elif sequence is None and indexed_path_base is not None:
             # "Add shots to last sequence" numbers from the record, as a remote
             # join does, when there is one, and as before when there is not.
@@ -2741,6 +2740,17 @@ class RunManager(LabscriptApplication):
                     'it, or has two and was not told which' % sequence_id
                 )
             indexed_path_base, sequence_attrs, index_start = self.sequences[keys[0]]
+        # A sequence is one labscript file's shots, and is refused before a
+        # replacement's Clear, so that a refusal leaves the queue as it was.
+        if sequence_attrs is not None:
+            joined = sequence_attrs['script_basename']
+            if joined != os.path.splitext(os.path.basename(labscript_file))[0]:
+                raise Exception(
+                    'Cannot add shots to sequence %s: it is a sequence of %s, not '
+                    'of %s' % (sequence_attrs['sequence_id'], joined, labscript_file)
+                )
+        if mode.clears_queue:
+            self.queue_manager.clear()
         logger.info('Making h5 files')
         labscript_file, run_files = self.make_h5_files(
             labscript_file,
