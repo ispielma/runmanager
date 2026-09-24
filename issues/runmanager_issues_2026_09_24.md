@@ -62,7 +62,7 @@ it is met.
 
 - [x] Slice 1: A failed preparse no longer wedges the remote server
 - [ ] Slice 2: A replacement batch never takes an in-flight shot's number
-- [ ] Slice 3: Two sequences started in the same second stay two sequences (HITL)
+- [x] Slice 3: Two sequences started in the same second stay two sequences (HITL)
       — decided: key the record by `(sequence_id, sequence_index)`
 - [ ] Slice 4: A join refuses a sequence of another labscript file
 - [ ] Slice 5: "Add shots to last sequence" sees a sequence still compiling (HITL)
@@ -208,12 +208,12 @@ full attributes. The change is small and additive for the client.
 
 ### Acceptance criteria
 
-- [ ] With the clock fixed within one second, a remote session and an Engage
+- [x] With the clock fixed within one second, a remote session and an Engage
       are two sequences, and the session's later joins land in its own folder
       with its own `sequence_index`.
-- [ ] An Engage "add shots" joins the sequence its anchor belongs to, not
+- [x] An Engage "add shots" joins the sequence its anchor belongs to, not
       another that shares the id.
-- [ ] labscript-optimization is told of any change to the descriptors or to
+- [x] labscript-optimization is told of any change to the descriptors or to
       `submit_shots`' arguments.
 
 ### Blocked by

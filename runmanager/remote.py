@@ -154,7 +154,7 @@ class Client(ZMQClient):
         """Reset the shot output folder to the default path"""
         return self.request('reset_shot_output_folder')
 
-    def submit_shots(self, entries, sequence=None):
+    def submit_shots(self, entries, sequence=None, sequence_index=None):
         """Submit one shot per entry, each with the globals that entry names.
 
         ``entries`` is a list of ``{global_name: value}`` dicts; one entry is
@@ -165,13 +165,15 @@ class Client(ZMQClient):
         another's shot; globals no entry names are untouched.
 
         Returns one descriptor per entry, in the order submitted:
-        ``{'shot_id', 'sequence_id', 'run_number', 'path'}``. The queue is
-        never cleared.
+        ``{'shot_id', 'sequence_id', 'sequence_index', 'run_number', 'path'}``.
+        The queue is never cleared.
 
         A remote session is one sequence. With no ``sequence`` the shots start
         a sequence of their own. Pass a ``sequence_id`` from an earlier
         submission as ``sequence`` to add to that sequence instead, numbered
         after every shot of it runmanager has made, whatever ran in between.
+        Pass its ``sequence_index`` too: two sequences started in the same
+        second share an id, and runmanager refuses to guess between them.
         Runmanager remembers its sequences only until it restarts, so a
         sequence it has no record of is refused.
 
@@ -195,7 +197,12 @@ class Client(ZMQClient):
         entries that do not all name the same globals, a name no active group
         has, and a ``sequence`` runmanager has no record of. The globals set before a refusal are left set; nothing is queued
         and nothing runs."""
-        return self.request('submit_shots', list(entries), sequence=sequence)
+        return self.request(
+            'submit_shots',
+            list(entries),
+            sequence=sequence,
+            sequence_index=sequence_index,
+        )
 
     def shot_status(self, shot_ids):
         """Whether each of these shots can still produce a result.

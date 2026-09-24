@@ -1838,9 +1838,9 @@ class RunManager(LabscriptApplication):
         # queue manager starts its worker thread, as that thread compiles
         # shots via self.compile_run_file():
         self.compiler_lock = threading.Lock()
-        # Each sequence made or added to here, by sequence_id: its newest shot's
-        # path, its attributes, and its next run number. In memory only, so a
-        # remote session cannot join its sequence across a restart.
+        # Each sequence made or added to here, by (sequence_id, sequence_index), as
+        # two started in the same second share an id: its newest shot's path,
+        # attributes and next run number. In memory only, lost on a restart.
         self.sequences = {}
         self._next_default_shot_index = {}
         # A default shot is produced off the request thread; these track the one
@@ -2690,8 +2690,10 @@ class RunManager(LabscriptApplication):
         not a person standing at the window has no output box to read: Engage
         catches these and puts them there itself.
 
-        ``sequence``, if given, is the sequence_id of a sequence made or added
-        to here, which the batch joins in place of the one the mode would find.
+        ``sequence``, if given, is the ``(sequence_id, sequence_index)`` of a
+        sequence made or added to here, which the batch joins in place of the
+        one the mode would find. An index of None names the one sequence
+        recorded with that id.
 
         Returns the queue records, each carrying the identifier its row has,
         in the order the shots were given."""
@@ -2723,15 +2725,22 @@ class RunManager(LabscriptApplication):
             # "Add shots to last sequence" numbers from the record, as a remote
             # join does, when there is one, and as before when there is not.
             sequence_attrs = self.get_sequence_attrs_to_extend(indexed_path_base)
-            if sequence_attrs['sequence_id'] in self.sequences:
-                sequence = sequence_attrs['sequence_id']
+            key = (sequence_attrs['sequence_id'], sequence_attrs['sequence_index'])
+            if key in self.sequences:
+                sequence = key
         if sequence is not None:
-            if sequence not in self.sequences:
+            sequence_id, sequence_index = sequence
+            # An id alone names the one sequence recorded with it.
+            keys = [
+                key for key in self.sequences
+                if key[0] == sequence_id and sequence_index in (None, key[1])
+            ]
+            if len(keys) != 1:
                 raise Exception(
-                    'Cannot add shots to sequence %s: runmanager has no record of it'
-                    % sequence
+                    'Cannot add shots to sequence %s: runmanager has no record of '
+                    'it, or has two and was not told which' % sequence_id
                 )
-            indexed_path_base, sequence_attrs, index_start = self.sequences[sequence]
+            indexed_path_base, sequence_attrs, index_start = self.sequences[keys[0]]
         logger.info('Making h5 files')
         labscript_file, run_files = self.make_h5_files(
             labscript_file,
@@ -2761,7 +2770,8 @@ class RunManager(LabscriptApplication):
         # For a later batch to join. Its next run number is kept here rather
         # than read from files, which shots still being compiled do not have.
         last = queue_records[-1]
-        self.sequences[last['sequence_attrs']['sequence_id']] = (
+        attrs = last['sequence_attrs']
+        self.sequences[attrs['sequence_id'], attrs['sequence_index']] = (
             last['path'], last['sequence_attrs'], last['run_no'] + 1
         )
         self.ui.pushButton_abort.setEnabled(True)
@@ -5228,7 +5238,7 @@ class RemoteServer(ZMQServer):
     def handle_reset_shot_output_folder(self):
         app.on_reset_shot_output_folder_clicked(None)
 
-    def handle_submit_shots(self, entries, sequence=None):
+    def handle_submit_shots(self, entries, sequence=None, sequence_index=None):
         """Submit one shot per entry, each with the globals that entry names.
 
         An entry is a dict of global name to value. The globals it names are
@@ -5236,12 +5246,13 @@ class RemoteServer(ZMQServer):
         what is being run; globals no entry names are untouched, and keep
         whatever the operator last gave them.
 
-        Returns one descriptor per entry -- shot_id, sequence_id, run_number
-        and path -- in the order submitted.
+        Returns one descriptor per entry -- shot_id, sequence_id,
+        sequence_index, run_number and path -- in the order submitted.
 
         A remote session is one sequence. With no ``sequence`` the batch
         starts a sequence of its own; ``sequence`` is the sequence_id of an
         earlier submission, and the batch joins it whatever ran in between.
+        ``sequence_index`` tells it from a sequence started in the same second.
 
         The window holds one entry's globals at a time, which is what the
         operator sees and what that entry's shot is evaluated against. Every
@@ -5308,12 +5319,13 @@ class RemoteServer(ZMQServer):
             True,
             send_to_runviewer,
             batch,
-            sequence=sequence,
+            sequence=None if sequence is None else (sequence, sequence_index),
         )
         return [
             {
                 'shot_id': record['shot_id'],
                 'sequence_id': record['sequence_attrs']['sequence_id'],
+                'sequence_index': record['sequence_attrs']['sequence_index'],
                 'run_number': record['run_no'],
                 'path': record['path'],
             }

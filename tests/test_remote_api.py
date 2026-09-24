@@ -10,6 +10,7 @@ what crosses the wire -- a handler reachable only under a name no client sends
 is not reachable at all -- and the dispatch is runmanager's own.
 """
 import copy
+import datetime
 import os
 import queue
 import shutil
@@ -507,6 +508,32 @@ class SubmitShotsTests(RemoteCommandTestCase):
 
         self.assertNotEqual(first[0]['sequence_id'], self.SEQUENCE['sequence_id'])
         self.assertEqual(second[0]['sequence_id'], first[0]['sequence_id'])
+
+    def test_a_session_joins_its_own_sequence_when_another_shares_its_id(self):
+        # A sequence_id is a timestamp to the second, so an operator's Engage
+        # in the same second as a session's first batch has the same one.
+        clock = types.SimpleNamespace(
+            datetime=types.SimpleNamespace(now=lambda: datetime.datetime(2026, 9, 24, 12))
+        )
+        indexes = iter([7, 8])
+        with mock.patch.object(runmanager, 'datetime', clock), mock.patch.object(
+            runmanager, 'next_sequence_index', lambda *a, **k: next(indexes)
+        ):
+            first = self.submit({'x': 1})
+            self.app.compile_and_queue_shots(
+                main_module.SUBMISSION_MODE_NEW_FOLDER,
+                True,
+                False,
+                self.app.expand_pending_shots(),
+            )
+            second = self.submit(
+                {'x': 2},
+                sequence=first[0]['sequence_id'],
+                sequence_index=first[0]['sequence_index'],
+            )
+
+        self.assertEqual(second[0]['sequence_index'], first[0]['sequence_index'])
+        self.assertEqual(second[0]['run_number'], 1)
 
     def test_a_sequence_runmanager_has_no_record_of_is_refused(self):
         # Refused rather than started afresh, which would split the session
