@@ -123,18 +123,15 @@ QToolButton:hover:checked {
          </property>
          <item row="0" column="1">
           <widget class="QPushButton" name="pushButton_abort">
-           <property name="enabled">
-            <bool>false</bool>
-           </property>
            <property name="focusPolicy">
             <enum>Qt::NoFocus</enum>
            </property>
            <property name="toolTip">
-            <string>Stop compiling shots after the current shot is compiled.
- To interrupt a compilation mid-shot, use the 'Restart subprocess' button</string>
+            <string>Remove every shot waiting in the queue, including one still compiling.
+ A shot BLACS has is kept.</string>
            </property>
            <property name="text">
-            <string>Abort</string>
+            <string>Empty queue</string>
            </property>
            <property name="icon">
             <iconset>

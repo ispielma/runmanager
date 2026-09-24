@@ -88,7 +88,9 @@ class Client(ZMQClient):
         return self.request('engage')
 
     def abort(self):
-        """Trigger abort compilation/submission"""
+        """Empty runmanager's queue, as its Empty queue button does.
+
+        A shot BLACS has is kept."""
         return self.request('abort')
 
     def get_run_shots(self):
@@ -154,35 +156,26 @@ class Client(ZMQClient):
         """Reset the shot output folder to the default path"""
         return self.request('reset_shot_output_folder')
 
-    def get_empty_queue_policy(self):
-        """What runmanager does when its queue runs out.
-
-        ``'nothing'``: an empty queue produces nothing, and the apparatus
-        stands idle until something is submitted. ``'default_labscript'``:
-        runmanager compiles and offers a shot of its own to keep the apparatus
-        busy.
-
-        Worth asking before submitting work whose results are waited on: under
-        ``'nothing'`` a queue that empties produces no further shot, so nothing
-        arrives to wait for."""
-        return self.request('get_empty_queue_policy')
-
-    def submit_shots(self, entries):
+    def submit_shots(self, entries, sequence=None, sequence_index=None):
         """Submit one shot per entry, each with the globals that entry names.
 
         ``entries`` is a list of ``{global_name: value}`` dicts; one entry is
-        one shot. The globals an entry names are set in runmanager's window and
-        left set, so that whoever is watching sees what is running, and the
-        window is left holding the last entry submitted. A global that another
-        entry names but this one does not goes back to the operator's own
-        expression before this entry's shot is made, so a value asked for once
-        does not carry into the shots after it; globals no entry names are
-        untouched.
+        one shot, and every entry names the same globals. runmanager's window
+        is set to the last entry and left so, so that whoever is watching sees
+        what is running; globals no entry names are untouched.
 
         Returns one descriptor per entry, in the order submitted:
-        ``{'shot_id', 'sequence_id', 'run_number', 'path'}``. The shots are
-        added to the sequence runmanager is already working on, continuing its
-        run numbers. The queue is never cleared.
+        ``{'shot_id', 'sequence_id', 'sequence_index', 'run_number', 'path'}``.
+        The queue is never cleared.
+
+        A remote session is one sequence. With no ``sequence`` the shots start
+        a sequence of their own. Pass a ``sequence_id`` from an earlier
+        submission as ``sequence`` to add to that sequence instead, numbered
+        after every shot of it runmanager has made, whatever ran in between.
+        Pass its ``sequence_index`` too: two sequences started in the same
+        second share an id, and runmanager refuses to guess between them.
+        Runmanager remembers its sequences only until it restarts, so a
+        sequence it has no record of is refused.
 
         Each submitted shot is written with its ``shot_id`` as a root
         attribute of its h5 file, which is where the id handed back here
@@ -191,43 +184,48 @@ class Client(ZMQClient):
         one nobody submitted -- runmanager writes the shots it makes itself,
         to keep the apparatus busy between submissions, without one.
 
-        A whole run of submissions stays one sequence, whatever the
-        empty-queue policy: a queue that empties between submissions does not
-        end the sequence the last shot belonged to, and the shots runmanager
-        makes itself to fill the gaps belong to no sequence and leave it
-        alone. A submission starts a sequence of its own only when there is no
-        last shot to carry on from -- a runmanager that has never sent one, or
-        one whose file has since been deleted.
-
         Raises, having submitted nothing at all, whatever it is that goes
         wrong. The whole batch is made and handed over in one go, so until
         that succeeds there is nothing queued to take back and no shot running
-        under an identifier the caller was never given.
+        under an identifier the caller was never given. A reply that times
+        out is the exception: runmanager may still queue the batch, under ids
+        the caller never received. A submission is answered in milliseconds,
+        so a timeout means runmanager is not answering at all.
 
         An entry that would produce anything other than exactly one shot is
-        refused this way, which is what happens when a global still has a scan
-        enabled: a scan means the value asked for is not the value that runs,
-        so it is refused rather than submitted. So are a labscript file or
-        output folder that is not set, globals that cannot be evaluated, and a
-        name no active group has. The globals set before a refusal are left
-        set; nothing is queued and nothing runs."""
-        return self.request('submit_shots', list(entries))
+        refused this way, as a scan left on a global can make it do. So are a
+        labscript file or output folder that is not set, globals that cannot
+        be evaluated, entries that do not all name the same globals, a name no
+        active group has, and a ``sequence`` runmanager has no record of, of
+        another labscript file, or sharing its id with another when no
+        ``sequence_index`` is given. A batch refused while its entries are
+        evaluated sets no global, and one refused as it is queued is left at
+        its last entry; either way nothing is queued and nothing runs.
+
+        The Scan? and JIT? boxes of the globals an entry names are the
+        caller's to manage, through get_scan_enabled, set_scan_enabled,
+        get_jit_enabled and set_jit_enabled."""
+        return self.request(
+            'submit_shots',
+            list(entries),
+            sequence=sequence,
+            sequence_index=sequence_index,
+        )
 
     def shot_status(self, shot_ids):
         """Whether each of these shots can still produce a result.
 
         Answers ``{shot_id: {'pending': bool, 'state': str}}``, one entry per
         id asked about. ``pending`` is false once nothing further will happen
-        to that shot -- it completed and left the queue, it was cancelled, or
-        it is held waiting on an operator.
+        to that shot -- it completed and left the queue, or it is held waiting
+        on an operator. A shot cancelled while BLACS has it is pending until
+        BLACS is done with it, as it can still complete.
 
         ``state`` is the queue row's own state, for a human reading a log,
-        plus two answers no row is ever in. ``'submitted'`` is a shot
-        runmanager has taken on but has no row for yet, which is still
-        pending; ``'blocked'`` is a row runmanager would hand over sitting
-        behind one it will not, which is not pending until an operator moves
-        what is in front of it. An id runmanager knows nothing of at all is
-        reported as ``'unknown'``.
+        plus one answer no row is ever in: ``'blocked'`` is a row runmanager
+        would hand over sitting behind one it will not, which is not pending
+        until an operator moves what is in front of it. An id runmanager
+        knows nothing of at all is reported as ``'unknown'``.
 
         Reads only: nothing is consumed by asking, so the same ids can be asked
         about as often as wanted."""
@@ -287,7 +285,6 @@ set_shot_output_folder = _default_client.set_shot_output_folder
 error_in_globals = _default_client.error_in_globals
 is_output_folder_default = _default_client.is_output_folder_default
 reset_shot_output_folder = _default_client.reset_shot_output_folder
-get_empty_queue_policy = _default_client.get_empty_queue_policy
 shot_status = _default_client.shot_status
 submit_shots = _default_client.submit_shots
 queue_exchange = _default_client.queue_exchange

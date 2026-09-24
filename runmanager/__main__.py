@@ -67,7 +67,7 @@ from labscript_utils.labconfig import (
     load_appconfig,
 )
 from labscript_utils.file_utils import next_available_indexed_filepath
-from labscript_utils.lookup_format import unescape_braces
+from labscript_utils.lookup_format import format_lookup_string, unescape_braces
 from labscript_utils.setup_logging import setup_logging
 import labscript_utils.shared_drive as shared_drive
 from labscript_utils import dedent
@@ -1838,7 +1838,10 @@ class RunManager(LabscriptApplication):
         # queue manager starts its worker thread, as that thread compiles
         # shots via self.compile_run_file():
         self.compiler_lock = threading.Lock()
-        self._next_default_shot_index = {}
+        # Each sequence made or added to here, by (sequence_id, sequence_index), as
+        # two started in the same second share an id: its newest shot's path,
+        # attributes, next run number and name format. In memory, lost on restart.
+        self.sequences = {}
         # A default shot is produced off the request thread; these track the one
         # being made and the one waiting to be handed over:
         self._default_shot_lock = threading.Lock()
@@ -1857,9 +1860,6 @@ class RunManager(LabscriptApplication):
             compile_run_file=self.compile_run_file,
             send_to_runviewer=self.send_to_runviewer,
             output=self.output_box.output,
-            set_abort_enabled=lambda enabled: inmain(
-                self.ui.pushButton_abort.setEnabled, enabled
-            ),
         )
         self.setup_queue_tab()
         run_view_layout = self.ui.findChild(QtWidgets.QLayout, 'verticalLayout_2')
@@ -2158,7 +2158,7 @@ class RunManager(LabscriptApplication):
         )
         self.ui.lineEdit_shot_output_folder.textChanged.connect(self.on_shot_output_folder_text_changed)
 
-        # Control buttons; engage, abort, restart subprocess:
+        # Control buttons; engage, empty queue, restart subprocess:
         self.setup_engage_submission_menu()
         self.ui.pushButton_engage.clicked.connect(self.on_engage_clicked)
         self.ui.pushButton_abort.clicked.connect(self.on_abort_clicked)
@@ -2551,26 +2551,48 @@ class RunManager(LabscriptApplication):
         self.engage_replace_queue_action.setEnabled(enabled)
         self.engage_add_clear_action.setEnabled(enabled)
 
-    def reindex_run_file_infos(self, run_file_infos, indexed_path_base, index_start=None):
+    def reindex_run_file_infos(
+        self, run_file_infos, indexed_path_base, index_start=None, name_format=None
+    ):
         """Name and number a batch after the shot it is being added to.
 
-        Both the directory and the filename stem come from
-        ``indexed_path_base``, which is the shot whose sequence this batch is
-        joining, so nothing about where a new sequence would have gone reaches
-        these files."""
+        ``indexed_path_base`` is the shot whose sequence this batch is joining.
+        With ``name_format``, that sequence's ``(folder, prefix)`` with any
+        globals unresolved, each shot is named from it and its own globals, as
+        make_run_files names them; otherwise after ``indexed_path_base``."""
         if not run_file_infos:
             return run_file_infos
         candidate_stem = os.path.splitext(os.path.basename(indexed_path_base))[0]
         _, _, index_str = candidate_stem.rpartition('_')
         width = len(index_str) if index_str.isdigit() else 1
         suffix_format = '_{index:0%dd}' % width
+        # A shot still compiling writes its file after this batch is named, and
+        # deletes it again if its row has gone, so its name is not given out.
+        compiling = self.queue_manager.get_compiling_paths()
         next_index = index_start
         for run_file_info in run_file_infos:
-            run_file, next_index = next_available_indexed_filepath(
-                indexed_path_base,
-                suffix_format,
-                start=next_index,
-            )
+            run_file_info['name_format'] = name_format
+            if name_format is None:
+                run_file, next_index = next_available_indexed_filepath(
+                    indexed_path_base,
+                    suffix_format,
+                    start=next_index,
+                )
+                while os.path.abspath(run_file) in compiling:
+                    run_file, next_index = next_available_indexed_filepath(
+                        indexed_path_base,
+                        suffix_format,
+                        start=next_index + 1,
+                    )
+            else:
+                shot_globals = {'globals': run_file_info['shot_globals']}
+                basename = os.path.join(
+                    *(format_lookup_string(part, shot_globals) for part in name_format)
+                )
+                run_file = '%s_%0*d.h5' % (basename, width, next_index)
+                while os.path.exists(run_file) or os.path.abspath(run_file) in compiling:
+                    next_index += 1
+                    run_file = '%s_%0*d.h5' % (basename, width, next_index)
             run_file_info['path'] = run_file
             # A shot file is named after the run number written into it, and
             # a run number is unique within its sequence, so renumbering the
@@ -2670,7 +2692,7 @@ class RunManager(LabscriptApplication):
         return pending
 
     def compile_and_queue_shots(
-        self, submission_mode, send_to_BLACS, send_to_runviewer, batch
+        self, submission_mode, send_to_BLACS, send_to_runviewer, batch, sequence=None
     ):
         """Make the shots of one batch and put them in the queue.
 
@@ -2686,6 +2708,11 @@ class RunManager(LabscriptApplication):
         not a person standing at the window has no output box to read: Engage
         catches these and puts them there itself.
 
+        ``sequence``, if given, is the ``(sequence_id, sequence_index)`` of a
+        sequence made or added to here, which the batch joins in place of the
+        one the mode would find. An index of None names the one sequence
+        recorded with that id.
+
         Returns the queue records, each carrying the identifier its row has,
         in the order the shots were given."""
         mode = SUBMISSION_MODES[submission_mode]
@@ -2699,6 +2726,7 @@ class RunManager(LabscriptApplication):
         active_groups = self.get_active_groups()
         index_start = None
         sequence_attrs = None
+        name_format = None
         if mode.clears_queue:
             if indexed_path_base is not None:
                 # Read before the Clear rather than after it. With nothing yet
@@ -2711,6 +2739,38 @@ class RunManager(LabscriptApplication):
                 # shots being deleted gave up; the ones whose files are still
                 # there are skipped over.
                 index_start = 0
+        elif sequence is None and indexed_path_base is not None:
+            # "Add shots to last sequence" numbers from the record, as a remote
+            # join does, when there is one, and after the anchor's file if not.
+            sequence_attrs = self.get_sequence_attrs_to_extend(indexed_path_base)
+            key = (sequence_attrs['sequence_id'], sequence_attrs['sequence_index'])
+            if key in self.sequences:
+                sequence = key
+        if sequence is not None:
+            sequence_id, sequence_index = sequence
+            # An id alone names the one sequence recorded with it.
+            keys = [
+                key for key in list(self.sequences)
+                if key[0] == sequence_id and sequence_index in (None, key[1])
+            ]
+            if len(keys) != 1:
+                raise Exception(
+                    'Cannot add shots to sequence %s: runmanager has no record of '
+                    'it, or has two and was not told which' % sequence_id
+                )
+            indexed_path_base, sequence_attrs, index_start, name_format = (
+                self.sequences[keys[0]]
+            )
+        # A sequence is one labscript file's shots, and is refused before a
+        # replacement's Clear, so that a refusal leaves the queue as it was.
+        if sequence_attrs is not None:
+            joined = sequence_attrs['script_basename']
+            if joined != os.path.splitext(os.path.basename(labscript_file))[0]:
+                raise Exception(
+                    'Cannot add shots to sequence %s: it is a sequence of %s, not '
+                    'of %s' % (sequence_attrs['sequence_id'], joined, labscript_file)
+                )
+        if mode.clears_queue:
             self.queue_manager.clear()
         logger.info('Making h5 files')
         labscript_file, run_files = self.make_h5_files(
@@ -2721,10 +2781,12 @@ class RunManager(LabscriptApplication):
             indexed_path_base=indexed_path_base,
             index_start=index_start,
             sequence_attrs=sequence_attrs,
+            name_format=name_format,
         )
         compile_mode = self.queue_compile_mode_combo.currentData()
         queue_records = []
         for run_file_info, (_, frozen) in zip(run_files, batch):
+            name_format = run_file_info['name_format']
             queue_records.append(
                 {
                     'path': run_file_info['path'],
@@ -2738,19 +2800,24 @@ class RunManager(LabscriptApplication):
                     'n_runs': run_file_info['n_runs'],
                 }
             )
-        self.ui.pushButton_abort.setEnabled(True)
+        # For a later batch to join. Its next run number is kept here rather
+        # than read from files, which shots still being compiled do not have,
+        # and never goes down, though a replacement numbers from 0 again.
+        last = queue_records[-1]
+        attrs = last['sequence_attrs']
+        key = (attrs['sequence_id'], attrs['sequence_index'])
+        next_run = max(last['run_no'] + 1, self.sequences.get(key, (None, None, 0))[2])
+        self.sequences[key] = (last['path'], last['sequence_attrs'], next_run, name_format)
         return self.queue_manager.compile_shots(
             queue_records, send_to_BLACS, send_to_runviewer
         )
 
     def on_abort_clicked(self):
-        """Stop the batches that have been submitted and not yet compiled.
+        """Empty the queue, as the replacement modes' Clear does.
 
-        The queue decides what that means and how long it lasts, because it is
-        the queue that knows which batches are still in hand. Nothing here
-        calls an abort off again: a submission is work asked for, not a reason
-        to stop stopping."""
-        self.queue_manager.abort()
+        Every waiting row goes, and a row still compiling has its file deleted
+        once its compile finishes. A shot BLACS has is kept."""
+        self.queue_manager.clear()
 
     def on_restart_subprocess_clicked(self):
         # Kill and restart the compilation subprocess
@@ -3565,11 +3632,14 @@ class RunManager(LabscriptApplication):
                         except queue.Empty:
                             break
                 # Do some work:
-                self.preparse_globals()
-                # Tell any callers calling preparse_globals_required.join() that we are
-                # done with their request:
-                for _ in range(n_requests):
-                    self.preparse_globals_required.task_done()
+                try:
+                    self.preparse_globals()
+                finally:
+                    # Tell any callers calling preparse_globals_required.join() that we
+                    # are done with their request, even if it failed, or they wait
+                    # forever:
+                    for _ in range(n_requests):
+                        self.preparse_globals_required.task_done()
             except Exception:
                 # Raise the error, but keep going so we don't take down the
                 # whole thread if there is a bug.
@@ -4430,22 +4500,11 @@ class RunManager(LabscriptApplication):
     def get_sequence_attrs_to_extend(self, path):
         """The sequence a batch added to the shot at ``path`` belongs to.
 
-        The queue row is asked first, and the shot file only when no row holds
-        that path or the row records no sequence. It has to be that way round
-        rather than simply reading the file: a queued shot is not written
-        until it is compiled, which under lazy compilation is not until BLACS
-        asks for it, so the shot a batch is added to often has no file yet. A
-        shot whose row has gone -- the one last sent to BLACS, after "empty
-        queue, then add shots to last sequence" has emptied the queue -- has
-        been written by then, and its file still says which sequence it is in.
-
-        Reading the file takes the cross-process lock on it, because
-        runmanager opens shot files through labscript_utils' h5_lock, and it
-        takes it on whichever thread asks. A submission asks on the GUI
-        thread, so a shot file something else is holding stops the window
-        until the lock comes free or times out. Asking the row first is
-        therefore also the difference between a dictionary this process
-        already has and a locked read of a file across the network."""
+        The queue is asked first. It keeps the sequence of each queued row and
+        of the shot last sent, so a join reads no file: a queued shot may not
+        be written yet, and reading one takes h5_lock's cross-process lock on
+        the asking thread, which for a submission is the GUI thread. The file
+        is read only for a shot the queue holds no sequence for."""
         sequence_attrs = self.queue_manager.get_queued_sequence_attrs(path)
         if sequence_attrs is not None:
             return sequence_attrs
@@ -4482,6 +4541,7 @@ class RunManager(LabscriptApplication):
         indexed_path_base=None,
         index_start=None,
         sequence_attrs=None,
+        name_format=None,
     ):
         """Make one shot file per entry of ``shots``, in the order given.
 
@@ -4505,7 +4565,6 @@ class RunManager(LabscriptApplication):
             # passes it in; see compile_and_queue_shots.
             if sequence_attrs is None:
                 sequence_attrs = self.get_sequence_attrs_to_extend(indexed_path_base)
-            self.check_output_folder_update()
             run_files = self.reindex_run_file_infos(
                 [
                     {
@@ -4516,6 +4575,7 @@ class RunManager(LabscriptApplication):
                 ],
                 indexed_path_base,
                 index_start=index_start,
+                name_format=name_format,
             )
             if not with_metadata:
                 for run_file_info in run_files:
@@ -4553,6 +4613,10 @@ class RunManager(LabscriptApplication):
                 return_infos=with_metadata,
                 create_files=not with_metadata,
             )
+            if with_metadata:
+                # How a later batch joining this sequence names its shots.
+                name_format = (output_folder, filename_prefix)
+                run_files = [dict(info, name_format=name_format) for info in run_files]
         logger.debug(run_files)
         return labscript_file, run_files
 
@@ -4635,24 +4699,25 @@ class RunManager(LabscriptApplication):
         BLACS later as though they were current. This happens when the queue
         has taken over, or the empty-queue policy no longer calls for one."""
         with self._default_shot_lock:
-            run_file = self._default_shot_ready
+            row = self._default_shot_ready
             self._default_shot_ready = None
-        if run_file is not None:
+        if row is not None:
             try:
-                os.remove(run_file)
+                os.remove(row['path'])
             except OSError:
                 pass
 
     def take_default_shot(self, labscript_file):
-        """Return a compiled default shot, or None while one is being produced.
+        """Return a compiled default shot's queue row, or None while one is
+        being produced.
 
         At most one is produced at a time, however often BLACS asks. The shot
         is collected by a later request once it is ready."""
         with self._default_shot_lock:
-            run_file = self._default_shot_ready
-            if run_file is not None:
+            row = self._default_shot_ready
+            if row is not None:
                 self._default_shot_ready = None
-                return run_file
+                return row
             if self._default_shot_preparing:
                 return None
             self._default_shot_preparing = True
@@ -4667,7 +4732,7 @@ class RunManager(LabscriptApplication):
 
     def prepare_default_shot(self, labscript_file, send_to_runviewer):
         """Write and compile one default shot, and leave it ready to hand over."""
-        run_file = None
+        row = None
         try:
             active_groups = inmain(self.get_active_groups, interactive=False)
             sequence_globals, runglobals = runmanager.get_default_shot_globals(
@@ -4677,7 +4742,6 @@ class RunManager(LabscriptApplication):
                 runmanager.new_sequence_details(
                     labscript_file,
                     config=self.exp_config,
-                    increment_sequence_index=True,
                     default=True,
                     format_globals=runglobals,
                 )
@@ -4686,25 +4750,35 @@ class RunManager(LabscriptApplication):
                 output_folder,
                 '{}.h5'.format(filename_prefix),
             )
-            start = self._next_default_shot_index.get(run_file_base, 0)
+            key = (sequence_attrs['sequence_id'], sequence_attrs['sequence_index'])
+            if key in self.sequences:
+                start = self.sequences[key][2]
+            else:
+                # After a restart the day's files are counted from one listing
+                # of the folder, not a stat per number.
+                names = os.listdir(output_folder) if os.path.isdir(output_folder) else []
+                ends = [os.path.splitext(n)[0].rpartition('_')[2] for n in names]
+                start = 1 + max((int(end) for end in ends if end.isdigit()), default=-1)
             run_file, default_index = next_available_indexed_filepath(
                 run_file_base,
                 '_{index}',
                 start=start,
             )
-            self._next_default_shot_index[run_file_base] = default_index + 1
+            self.sequences[key] = (run_file, sequence_attrs, default_index + 1, None)
             # No shot_id, deliberately. A default shot is runmanager's own,
             # produced to keep the apparatus busy, and it is written here --
             # before it is a queue row and before it has an id. A file with no
             # shot_id is visibly not a shot anybody submitted, which is the
             # right answer for a caller matching results to what it asked for.
+            # Numbered by its place in the day's default sequence, which all of
+            # that day's default shots share.
             runmanager.make_single_run_file(
                 run_file,
                 sequence_globals,
                 runglobals,
                 sequence_attrs,
-                0,
-                1,
+                default_index,
+                default_index + 1,
             )
             if not self.compile_run_file(labscript_file, run_file):
                 raise RuntimeError(
@@ -4712,14 +4786,21 @@ class RunManager(LabscriptApplication):
                 )
             if send_to_runviewer:
                 self.send_to_runviewer(run_file)
+            row = {
+                'path': run_file,
+                'compiled': True,
+                'default_shot': True,
+                'sequence_attrs': sequence_attrs,
+                'run_no': default_index,
+                'n_runs': default_index + 1,
+            }
         except Exception as e:
             self.output_box.output(
                 'Could not produce a default shot: %s\n' % str(e), red=True
             )
-            run_file = None
         finally:
             with self._default_shot_lock:
-                self._default_shot_ready = run_file
+                self._default_shot_ready = row
                 self._default_shot_preparing = False
 
     def queue_exchange(self, outcome=None, request_shot=True):
@@ -4883,8 +4964,8 @@ class RunManager(LabscriptApplication):
                 # finishing -- and it says nothing about which sequence the
                 # shot last sent belongs to. "Add shots to last sequence"
                 # means that sequence whether or not anything is queued now;
-                # the anchor is let go of only where that shot's file is
-                # deleted, and otherwise stands until another shot is sent.
+                # the anchor is let go of where that shot's file is deleted or
+                # a configuration is loaded, and stands until another is sent.
                 return no_shot
             if not os.path.isfile(labscript_file):
                 raise RuntimeError(
@@ -4894,8 +4975,8 @@ class RunManager(LabscriptApplication):
             # the shot file and compiling it. That happens off this thread for
             # the same reason a queued shot's compile does: it must not hold up
             # the remote server, nor finish into a client that stopped waiting.
-            run_file = self.take_default_shot(labscript_file)
-            if run_file is None:
+            row = self.take_default_shot(labscript_file)
+            if row is None:
                 return no_shot
             # The default shot joins the queue as an ordinary row and is then
             # offered like one. That is the whole of its lifecycle: it is
@@ -4906,9 +4987,7 @@ class RunManager(LabscriptApplication):
             # step. It is also what stops a second default shot being made
             # while the first still needs attention: a red row is the head of
             # the queue, so it is what the next request is offered.
-            self.queue_manager.enqueue(
-                [{'path': run_file, 'compiled': True, 'default_shot': True}]
-            )
+            self.queue_manager.enqueue([row])
             item = self.queue_manager.offer_next()
             if item is None:
                 return no_shot
@@ -4918,11 +4997,12 @@ class RunManager(LabscriptApplication):
             self.discard_default_shot()
         agnostic_path = shared_drive.path_to_agnostic(item['path'])
         if not item['default_shot']:
-            # Only shots a user engaged are recorded here. A default shot is
-            # not part of a sequence, and lives in the daily default
-            # directory, so it must not become the anchor that "add shots to
-            # last sequence" writes the next batch alongside:
-            self.queue_manager.set_last_sent_from_queue(agnostic_path)
+            # Only shots a user engaged are recorded here. A default shot
+            # belongs to the day's default sequence, which no batch joins, so
+            # it must not become the anchor "add shots to last sequence" uses:
+            self.queue_manager.set_last_sent_from_queue(
+                agnostic_path, item['sequence_attrs']
+            )
         return {
             'state': PROVIDER_SHOT,
             'shot_id': item['shot_id'],
@@ -4987,6 +5067,16 @@ class RemoteServer(ZMQServer):
             return bool(value)
         raise TypeError('%s must be a bool, not %s' % (name, value.__class__.__name__))
 
+    @staticmethod
+    def _with_trailing_comment(expression, previous):
+        """``expression`` followed by the comment ``previous`` ends with, if any."""
+        comments = runmanager.find_comments(previous)
+        if comments:
+            comment_start, comment_end = comments[-1]
+            if comment_end == len(previous):
+                expression += previous[comment_start:comment_end]
+        return expression
+
     @inmain_decorator()
     def _set_expression_field_values(self, getter, setter, changer_name, globals, raw=False):
         _, _, locations = self._get_active_global_locations()
@@ -5004,11 +5094,7 @@ class RemoteServer(ZMQServer):
                         "Global %s not found in any active group" % global_name
                     )
                 previous_value = getter(globals_file, group_name, global_name)
-                comments = runmanager.find_comments(previous_value)
-                if comments:
-                    comment_start, comment_end = comments[-1]
-                    if comment_end == len(previous_value):
-                        new_value += previous_value[comment_start:comment_end]
+                new_value = self._with_trailing_comment(new_value, previous_value)
                 try:
                     group_tab = app.currently_open_groups[globals_file, group_name]
                 except KeyError:
@@ -5198,31 +5284,23 @@ class RemoteServer(ZMQServer):
     def handle_reset_shot_output_folder(self):
         app.on_reset_shot_output_folder_clicked(None)
 
-    def handle_get_empty_queue_policy(self):
-        """What runmanager does when the queue runs out.
-
-        Read-only, and not a GUI read: the policy lives in the queue
-        controller, which is safe to ask from any thread."""
-        return app.queue_manager.get_empty_queue_policy()
-
-    def handle_submit_shots(self, entries):
+    def handle_submit_shots(self, entries, sequence=None, sequence_index=None):
         """Submit one shot per entry, each with the globals that entry names.
 
-        An entry is a dict of global name to value. The globals it names are
-        set in the window and left there, so that an operator watching can see
-        what is being run; globals no entry names are untouched, and keep
-        whatever the operator last gave them.
+        An entry is a dict of global name to value, and every entry names the
+        same globals. Each entry's shot is evaluated from one read of the
+        globals, as the window would hold them with that entry's values set.
+        The window is then set to the last entry and left so, so that an
+        operator watching can see what is being run; globals no entry names
+        are untouched, and keep whatever the operator last gave them.
 
-        Returns one descriptor per entry -- shot_id, sequence_id, run_number
-        and path -- in the order submitted.
+        Returns one descriptor per entry -- shot_id, sequence_id,
+        sequence_index, run_number and path -- in the order submitted.
 
-        The window holds one entry's globals at a time, which is what the
-        operator sees and what that entry's shot is evaluated against. A
-        global another entry names but this one does not is put back to the
-        operator's own expression first, so that nothing an earlier entry
-        asked for reaches a later entry's shot -- a result recorded against
-        parameters that never ran is worse than no result. The window is left
-        holding the last entry submitted.
+        A remote session is one sequence. With no ``sequence`` the batch
+        starts a sequence of its own; ``sequence`` is the sequence_id of an
+        earlier submission, and the batch joins it whatever ran in between.
+        ``sequence_index`` tells it from a sequence started in the same second.
 
         Every entry is evaluated before any shot is made, and the whole batch
         is then made and submitted in one go. That is what makes it safe to
@@ -5233,13 +5311,9 @@ class RemoteServer(ZMQServer):
         run number are claimed by the batch being made, so entries submitted
         one at a time would each find the same number free.
 
-        The globals of a refused batch are left set, at whichever entry the
-        refusal reached. Nothing is queued and nothing runs.
-
-        Within the batch the window is free between entries, so an operator
-        editing a global that no entry names can still change the experiment
-        partway through; that is no different from two consecutive Engages,
-        and holding the window for the length of a batch would be worse.
+        A batch refused while its entries are evaluated sets no global; one
+        refused as it is queued is left set to its last entry. Nothing is
+        queued and nothing runs.
         """
         entries = [dict(entry) for entry in entries]
         if not entries:
@@ -5247,138 +5321,70 @@ class RemoteServer(ZMQServer):
             # nothing, rather than asked wrongly. Nothing is made, so nothing
             # claims a filename or a run number.
             return []
-        named = set()
-        for entry in entries:
-            named.update(entry)
-        baseline = self._operator_expressions(named)
+        names = set(entries[0])
+        if any(set(entry) != names for entry in entries):
+            raise ValueError('Cannot submit entries that name different globals')
+        # The preparse writes each global's expansion type, so the globals are
+        # read once it has finished, as an Engage reads them.
+        app.wait_until_preparse_complete()
+        active_groups = inmain(app.get_active_groups, interactive=False)
+        globals_details = runmanager.get_globals_details(active_groups)
+        group_of = {
+            name: group for group, records in globals_details.items() for name in records
+        }
+        missing = sorted(names - set(group_of))
+        if missing:
+            raise ValueError('Global %s not found in any active group' % missing[0])
         send_to_runviewer = self.handle_get_view_shots()
         batch = []
         for entry in entries:
-            restore = {
-                name: baseline[name] for name in sorted(named - set(entry))
-            }
-            if restore:
-                self.handle_set_globals(restore, raw=True)
-            self.handle_set_globals(entry)
-            # Setting a global asks the preparse thread to run again, and the
-            # preparse is what writes each global's expansion type and rebuilds
-            # the axes the shots are expanded along. Reading either while it is
-            # being rewritten is reading it half done -- see handle_engage,
-            # which waits for the same reason.
-            app.wait_until_preparse_complete()
-            if self.handle_error_in_globals():
+            # The globals as the window would hold them with this entry set.
+            details = {group: dict(records) for group, records in globals_details.items()}
+            for name, value in entry.items():
+                group_records = details[group_of[name]]
+                previous = group_records[name]['default']
+                default = self._with_trailing_comment(repr(value), previous)
+                group_records[name] = dict(group_records[name], default=default)
+            sequence_globals = runmanager._details_to_sequence_globals(details)
+            evaled_globals, _, expansions = runmanager.evaluate_globals(sequence_globals)
+            shots = runmanager.expand_globals(sequence_globals, evaled_globals)
+            if len(shots) != 1:
+                expanding = sorted(name for name in expansions if expansions[name])
                 raise ValueError(
-                    'Cannot submit %r: the globals it produces cannot be '
-                    'evaluated.' % entry
+                    'Cannot submit %r as one shot: the globals as they stand '
+                    'produce %d. Expanded by: %s.'
+                    % (entry, len(shots), ', '.join(expanding) or 'none')
                 )
-            batch.append(self._shot_for_entry(entry))
-        # Added to the last sequence, which between one submission and the
-        # next is the shot last sent to BLACS: a caller that waits for each
-        # result before sending the next finds the queue empty every time, and
-        # a new sequence each time would leave a run of a hundred shots as a
-        # hundred sequences of one. On a runmanager that has run nothing there
-        # is no last sequence, and the batch starts one.
+            batch.append((shots[0], runmanager.get_frozen_globals(details, shots[0])))
+        self.handle_set_globals(entries[-1])
+        # Joined by id, not by the queue's last shot, which is whoever
+        # submitted last: an operator's Engage in between would otherwise take
+        # the session's later shots into the operator's sequence.
         records = inmain(
             app.compile_and_queue_shots,
-            SUBMISSION_MODE_ADD_SHOTS,
+            SUBMISSION_MODE_NEW_FOLDER if sequence is None else SUBMISSION_MODE_ADD_SHOTS,
             True,
             send_to_runviewer,
             batch,
+            sequence=None if sequence is None else (sequence, sequence_index),
         )
         return [
             {
                 'shot_id': record['shot_id'],
                 'sequence_id': record['sequence_attrs']['sequence_id'],
+                'sequence_index': record['sequence_attrs']['sequence_index'],
                 'run_number': record['run_no'],
                 'path': record['path'],
             }
             for record in records
         ]
 
-    def _operator_expressions(self, names):
-        """What the operator has these globals set to, before any entry is.
-
-        Read once, at the start, and put back around every entry that does not
-        name them. Without that the window ends up holding the union of every
-        entry's globals, and each shot is compiled with the values of the
-        entries before it as well as its own.
-
-        Expressions and not values: what the operator wrote may be in terms of
-        other globals, and a number frozen out of it stops following them.
-
-        A name no active group has is refused here rather than at the entry
-        that carries it, because the globals of a refused batch are left set
-        and this one can be refused before any of them are.
-        """
-        expressions = self.handle_get_default_globals(raw=True)
-        missing = sorted(set(names) - set(expressions))
-        if missing:
-            raise ValueError('Global %s not found in any active group' % missing[0])
-        return {
-            name: self._without_trailing_comment(expressions[name]) for name in names
-        }
-
-    @staticmethod
-    def _without_trailing_comment(expression):
-        """An expression without the comment the window keeps on the end of it.
-
-        Setting a global puts back whatever comment the expression it replaces
-        ended with, so an expression handed back with its own comment still
-        attached would return carrying two of them."""
-        comments = runmanager.find_comments(expression)
-        if comments and comments[-1][1] == len(expression):
-            return expression[: comments[-1][0]]
-        return expression
-
-    @inmain_decorator()
-    def _shot_for_entry(self, entry):
-        """The one shot the window now stands for, and what to freeze with it.
-
-        Both read here, while the window is holding this entry's globals and
-        nothing else's: the expressions a queue record freezes are the ones
-        standing in the window when its shot was evaluated, and a batch that
-        read them once at the end would carry the last entry's for every shot
-        in it.
-
-        Anything but one shot is refused. A global with a scan enabled ignores
-        the value just set for it, so this is not only the wrong number of
-        shots: it is a shot that did not use the parameters it was asked for,
-        and a cost attributed to parameters that never ran is worse than no
-        cost at all. Refused rather than mended, because the scan is the
-        operator's and turning it off under them is not this command's to do.
-        Refused here, too, where one shot per entry is first relied on, rather
-        than counted afterwards when the shots are already queued.
-        """
-        active_groups = app.get_active_groups(interactive=False)
-        _, shots, _, _, _ = app.parse_globals(active_groups)
-        if len(shots) != 1:
-            raise ValueError(
-                'Cannot submit %r as one shot: the globals as they stand '
-                'produce %d. Expanded by: %s.'
-                % (entry, len(shots), ', '.join(self._expanding_globals()) or 'none')
-            )
-        globals_details = runmanager.get_globals_details(active_groups)
-        return shots[0], runmanager.get_frozen_globals(globals_details, shots[0])
-
-    def _expanding_globals(self):
-        """The globals that turn one set of values into more than one shot.
-
-        Copied before it is read. The dictionary belongs to the preparse
-        thread, which assigns a guess into it per global, so a read that steps
-        through it raises as soon as a guess arrives partway -- and replaces
-        the refusal a caller can act on with an error about a dictionary."""
-        return sorted(
-            name
-            for name, expansion in dict(app.previous_expansions).items()
-            if expansion
-        )
-
     def handle_shot_status(self, shot_ids):
         """Whether each of these shots can still produce a result.
 
-        Read-only and batched: a caller waiting on many shots asks once. Like
-        the policy above, the queue controller is safe to ask from any thread,
-        so this is not a GUI read."""
+        Read-only and batched: a caller waiting on many shots asks once. The
+        queue controller is safe to ask from any thread, so this is not a GUI
+        read."""
         return app.queue_manager.get_shot_statuses(list(shot_ids))
 
     def handle_queue_exchange(self, outcome=None, request_shot=True):

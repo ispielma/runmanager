@@ -27,7 +27,8 @@ located in a always visible toolbar at the top of the runmanager interface. Thes
     text so that any mistakes made when defining the parameter space scan can be quickly
     corrected prior to beginning shot generation. This button can also be ‘clicked’ via the
     F5 key on a keyboard.
-#.  The abort button: This stops the production of shot files prematurely.
+#.  The empty queue button: This removes every shot waiting in the queue, including
+    one still compiling. A shot BLACS has is kept.
 #.  The restart subprocess button: Primarily for debugging and for use during labscript
     development, this button restarts the subprocess that manages the execution of the
     labscript experiment logic file, which in turn generates and stores hardware instructions
@@ -428,9 +429,10 @@ configuration, in a directory named after the labscript file. Within that, the
 directory and filename are built from the ``output_folder_format`` and
 ``filename_prefix_format`` settings in the ``runmanager`` section of the lab
 configuration, which default to ``%Y/%m/%d/{sequence_index:05d}`` and
-``{sequence_timestamp}_{script_basename}`` respectively. Each press of engage
-claims a new sequence index, so an ordinary sequence gets a numbered directory
-of its own and its shots are named with an index suffix within it.
+``{sequence_timestamp}_{script_basename}`` respectively. An engage that starts a
+sequence claims a new sequence index, so an ordinary sequence gets a numbered
+directory of its own and its shots are named with an index suffix within it. An
+engage that adds shots to a sequence claims none.
 
 Runmanager owns the shot queue. Shots produced by engage are placed in that
 queue, and BLACS asks runmanager for the next shot when it is ready to run one,
@@ -491,11 +493,10 @@ numbered sequence directory each:
     accumulate rather than overwrite one another, and the numbering continues
     from the existing files if runmanager is restarted.
 
-A sequence index is still claimed for each default shot even though it does not
-appear in the path. Sequence numbers for ordinary runs consequently advance
-faster than the number of sequences actually run, and the numbered sequence
-directories are not contiguous. This is expected, and is not a sign that
-sequences have been lost.
+All of a day's default shots belong to one sequence, dated from the start of
+the day, whose ``sequence_index`` is ``-1``; each shot's run number is its place
+in it. No sequence index is claimed for a default shot, so the numbering of
+ordinary sequences is left alone.
 
 .. rubric:: Footnotes
 
