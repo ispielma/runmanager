@@ -977,6 +977,41 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
             submission_mode, True, False, self.app.expand_pending_shots()
         )
 
+    def wait_until(self, predicate):
+        for _ in range(500):
+            if predicate():
+                return True
+            time.sleep(0.01)
+        return False
+
+    def test_a_replacement_takes_no_name_of_a_shot_still_compiling(self):
+        # That shot writes its file after the replacement is named, and then
+        # deletes it, its row having gone with the Clear.
+        self.enqueue('experiment_000.h5', run_no=0, n_runs=1)
+        [compiling] = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
+        self.assertTrue(self.wait_until(self.app.queue_manager.get_compiling_paths))
+        runmanager.set_scan(self.app.globals_file, 'group', 'x', '[1, 2]')
+        runmanager.set_scan_enabled(self.app.globals_file, 'group', 'x', True)
+        runmanager.set_expansion(self.app.globals_file, 'group', 'x', 'outer')
+
+        replacement = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE)
+
+        self.assertEqual([record['run_no'] for record in replacement], [0, 2])
+        self.assertNotIn(compiling['path'], [record['path'] for record in replacement])
+
+    def test_a_join_after_a_replacement_numbers_after_both_batches(self):
+        self.enqueue('experiment_000.h5', run_no=0, n_runs=1)
+        self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
+        self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE)
+        self.app.compiling.set()
+        self.assertTrue(
+            self.wait_until(lambda: not self.app.queue_manager.get_compiling_paths())
+        )
+
+        later = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
+
+        self.assertEqual([record['run_no'] for record in later], [2])
+
     def test_adding_twice_before_the_first_compiles_does_not_reuse_its_numbers(self):
         # The first batch's shot is still compiling, with no row and no file,
         # so the queue's last row is still the shot it was added to. The second

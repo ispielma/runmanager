@@ -2564,6 +2564,9 @@ class RunManager(LabscriptApplication):
         _, _, index_str = candidate_stem.rpartition('_')
         width = len(index_str) if index_str.isdigit() else 1
         suffix_format = '_{index:0%dd}' % width
+        # A shot still compiling writes its file after this batch is named, and
+        # deletes it again if its row has gone, so its name is not given out.
+        compiling = self.queue_manager.get_compiling_paths()
         next_index = index_start
         for run_file_info in run_file_infos:
             run_file, next_index = next_available_indexed_filepath(
@@ -2571,6 +2574,12 @@ class RunManager(LabscriptApplication):
                 suffix_format,
                 start=next_index,
             )
+            while os.path.abspath(run_file) in compiling:
+                run_file, next_index = next_available_indexed_filepath(
+                    indexed_path_base,
+                    suffix_format,
+                    start=next_index + 1,
+                )
             run_file_info['path'] = run_file
             # A shot file is named after the run number written into it, and
             # a run number is unique within its sequence, so renumbering the
@@ -2774,12 +2783,13 @@ class RunManager(LabscriptApplication):
                 }
             )
         # For a later batch to join. Its next run number is kept here rather
-        # than read from files, which shots still being compiled do not have.
+        # than read from files, which shots still being compiled do not have,
+        # and never goes down, though a replacement numbers from 0 again.
         last = queue_records[-1]
         attrs = last['sequence_attrs']
-        self.sequences[attrs['sequence_id'], attrs['sequence_index']] = (
-            last['path'], last['sequence_attrs'], last['run_no'] + 1
-        )
+        key = (attrs['sequence_id'], attrs['sequence_index'])
+        next_run = max(last['run_no'] + 1, self.sequences.get(key, (None, None, 0))[2])
+        self.sequences[key] = (last['path'], last['sequence_attrs'], next_run)
         return self.queue_manager.compile_shots(
             queue_records, send_to_BLACS, send_to_runviewer
         )

@@ -61,7 +61,7 @@ and labscript-style skills. A box is ticked only where every criterion below
 it is met.
 
 - [x] Slice 1: A failed preparse no longer wedges the remote server
-- [ ] Slice 2: A replacement batch never takes an in-flight shot's number
+- [x] Slice 2: A replacement batch never takes an in-flight shot's number
 - [x] Slice 3: Two sequences started in the same second stay two sequences (HITL)
       — decided: key the record by `(sequence_id, sequence_index)`
 - [x] Slice 4: A join refuses a sequence of another labscript file
@@ -145,32 +145,27 @@ None - can start immediately.
 
 ### What to build
 
-The replace-queue modes number the replacement from 0 and skip only files that
-already exist (`compile_and_queue_shots`, `index_start = 0`). Under eager
-compile, a batch of the same sequence can still be with the worker: its shots
-have neither rows nor files, and the Clear does not touch them. The replacement
-is then handed those shots' run numbers and paths. When both batches have
-compiled, two rows name one file, and the file holds only whichever was written
-last (`make_single_run_file` opens with `'w'`).
+The replace-queue modes number the replacement from 0, taking back the names
+the Clear's rows gave up. A shot still compiling at the Clear writes its file
+after the replacement is named, and deletes it on finding its row gone, so a
+replacement given that name loses its file. Numbering the record from the
+replacement would also lower its next run number, and a later join would be
+numbered onto names already used.
 
-The record update after the batch also lowers `self.sequences[id]`'s next run
-number, from 13 to 10 in the reproduction, so a later join through the record
-is numbered onto in-flight paths as well.
-
-Rule to implement: a replacement takes back only the run numbers of the rows
-this Clear removed; otherwise it numbers after the record. A sequence's next run
-number in the record never goes down.
+Rule: a replacement takes back the names of the rows the Clear removed, except
+those of shots still compiling, and a sequence's next run number in the record
+never goes down.
 
 ### Acceptance criteria
 
-- [ ] An add-shots batch still compiling, followed by "Empty queue, then add
+- [x] An add-shots batch still compiling, followed by "Empty queue, then add
       shots to last sequence", leaves no two rows naming one path and no file
       overwritten.
-- [ ] The record's next run number never decreases, so a join after the
+- [x] The record's next run number never decreases, so a join after the
       replacement numbers after every shot of both batches.
-- [ ] A replacement still reuses the numbers of the rows the Clear deleted,
+- [x] A replacement still reuses the numbers of the rows the Clear deleted,
       as the existing tests pin.
-- [ ] A test of the in-flight case fails without the fix.
+- [x] A test of the in-flight case fails without the fix.
 
 ### Blocked by
 

@@ -252,6 +252,9 @@ class QueueController(object):
         # Kept so that a batch added to that shot's sequence reads no file.
         self.last_sent_sequence_attrs = None
         self._items = []
+        # Whether or not their rows are still queued: a compile that finishes
+        # after its row has gone writes its file and then deletes it.
+        self._compiling_paths = set()
         self._lock = threading.RLock()
 
     def _normalise_item(self, item):
@@ -821,6 +824,7 @@ class QueueController(object):
             if item['compiling']:
                 return None, True
             item['compiling'] = True
+            self._compiling_paths.add(item['path'])
             return item, True
 
     def claim_next_to_compile_ahead(self):
@@ -837,8 +841,14 @@ class QueueController(object):
                     and item['state'] not in REFUSED_STATES
                 ):
                     item['compiling'] = True
+                    self._compiling_paths.add(item['path'])
                     return item
             return None
+
+    def get_compiling_paths(self):
+        """The paths of the shots being compiled now."""
+        with self._lock:
+            return set(self._compiling_paths)
 
     def finish_compile(self, item, success, message=''):
         """Record the outcome of a background compile.
@@ -859,6 +869,7 @@ class QueueController(object):
         operator while it was compiling."""
         with self._lock:
             item['compiling'] = False
+            self._compiling_paths.discard(item['path'])
             item['compiled'] = bool(success)
             for queued in self._items:
                 if queued is item:
@@ -1152,6 +1163,9 @@ class QueueManager(QtCore.QObject):
 
     def get_shot_path(self, shot_id):
         return self.controller.get_shot_path(shot_id)
+
+    def get_compiling_paths(self):
+        return self.controller.get_compiling_paths()
 
     def get_queue_state(self):
         return self.controller.get_queue_state()
