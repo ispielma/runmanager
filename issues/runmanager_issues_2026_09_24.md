@@ -71,7 +71,7 @@ it is met.
       labscript-optimization; runmanager already exposes both boxes
 - [ ] Slice 7: A timed-out submission is not left running unaccounted (HITL)
       — decided: `submit_shots` is made practically instant; no recovery path
-- [ ] Slice 8: A cancelled shot that can still complete stays pending
+- [x] Slice 8: A cancelled shot that can still complete stays pending
 - [ ] Slice 9: Joined shots are named from the template and their own globals
 - [ ] Slice 10: Default shots are numbered per sequence
 - [ ] ~~Slice 11: The day's default sequence sorts as current in lyse (HITL,
@@ -412,12 +412,12 @@ it.
 
 ### Acceptance criteria
 
-- [ ] Deleting a running remote shot's row leaves its status pending with
+- [x] Deleting a running remote shot's row leaves its status pending with
       state `'cancelled'`.
-- [ ] Once BLACS reports it, or asks with no outcome for it, its status is not
+- [x] Once BLACS reports it, or asks with no outcome for it, its status is not
       pending.
-- [ ] Rows behind a cancelled head are still pending and offered as now.
-- [ ] labscript-optimization is told that `'cancelled'` can still complete.
+- [x] Rows behind a cancelled head are still pending and offered as now.
+- [x] labscript-optimization is told that `'cancelled'` can still complete.
 
 ### Blocked by
 

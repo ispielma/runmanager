@@ -472,7 +472,9 @@ class QueueController(object):
         """Say, for each of these shot ids, whether its shot can still run.
 
         ``{shot_id: {'pending': bool, 'state': str}}``, one entry per id asked
-        about. ``pending`` is whether the queue would still hand that row over.
+        about. ``pending`` is whether the shot can still produce a result: the
+        queue would still hand its row over, or, for a cancelled row, BLACS
+        has it and can still complete it.
         That is a question about the row and about what is in front of it:
         only the head is ever offered, so a row the queue refuses to hand over
         and does not clear itself holds up every row behind it until an
@@ -493,7 +495,10 @@ class QueueController(object):
                 state = item['state']
                 if state in REFUSED_STATES:
                     # Its own reason, which is what an operator has to act on.
-                    statuses[item['shot_id']] = {'pending': False, 'state': state}
+                    statuses[item['shot_id']] = {
+                        'pending': state == 'cancelled',
+                        'state': state,
+                    }
                     held = held or REFUSED_STATES[state]
                 elif held:
                     statuses[item['shot_id']] = {

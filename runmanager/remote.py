@@ -209,8 +209,9 @@ class Client(ZMQClient):
 
         Answers ``{shot_id: {'pending': bool, 'state': str}}``, one entry per
         id asked about. ``pending`` is false once nothing further will happen
-        to that shot -- it completed and left the queue, it was cancelled, or
-        it is held waiting on an operator.
+        to that shot -- it completed and left the queue, or it is held waiting
+        on an operator. A shot cancelled while BLACS has it is pending until
+        BLACS is done with it, as it can still complete.
 
         ``state`` is the queue row's own state, for a human reading a log,
         plus two answers no row is ever in. ``'submitted'`` is a shot

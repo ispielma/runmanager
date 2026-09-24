@@ -739,9 +739,10 @@ class ShotStatusTests(RemoteCommandTestCase):
     """Whether a shot that was submitted can still produce a result.
 
     A caller waiting on the results of shots it submitted needs to know when
-    to stop waiting for one. ``pending`` answers exactly that, and answers it
-    as the queue itself would: it is true while the queue would still hand the
-    row over, and false once the row is waiting on an operator instead.
+    to stop waiting for one. ``pending`` answers exactly that: it is true
+    while the queue would still hand the row over, or BLACS has a cancelled
+    row it can still complete, and false once the row is waiting on an
+    operator instead.
 
     A row is not only its own state. Only the head of the queue is ever
     offered, so a row the queue will not hand over holds up every row behind
@@ -752,8 +753,8 @@ class ShotStatusTests(RemoteCommandTestCase):
     different afterwards.
     """
 
-    # Every state a queue row can be in: whether the queue would still hand
-    # that row over, and whether a row in it holds up the rows behind it.
+    # Every state a queue row can be in: whether a shot in it can still
+    # produce a result, and whether a row in it holds up the rows behind it.
     #
     # offer_next() hands over a waiting row, a row already marked running --
     # which is the reclaim -- and a failed one, which is the retry. It refuses
@@ -764,15 +765,16 @@ class ShotStatusTests(RemoteCommandTestCase):
     #
     # Of the three refusals only the cancelled row clears itself: the queue
     # drops it at the next request from BLACS, so the shots behind it are
-    # waiting their turn rather than waiting on somebody. The other two stay
-    # where they are until an operator deletes them.
+    # waiting their turn rather than waiting on somebody. It was deleted while
+    # BLACS had it, and BLACS can still complete it, so it is pending. The
+    # other two stay where they are until an operator deletes them.
     EXPECTED = {
-        # state: (would be handed over, holds up the rows behind it)
+        # state: (pending, holds up the rows behind it)
         '': (True, False),
         'running': (True, False),
         'failed': (True, False),
         'rejected': (False, True),
-        'cancelled': (False, False),
+        'cancelled': (True, False),
         'compile_failed': (False, True),
     }
 
@@ -806,7 +808,7 @@ class ShotStatusTests(RemoteCommandTestCase):
             'produce a result, or is it waiting on an operator?',
         )
 
-    def test_pending_is_whether_the_queue_would_still_offer_the_row(self):
+    def test_pending_is_whether_the_shot_can_still_produce_a_result(self):
         for state, (pending, _) in sorted(self.EXPECTED.items()):
             with self.subTest(state=state):
                 self.queue((state or 'waiting', state))
