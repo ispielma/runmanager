@@ -16,6 +16,7 @@ import queue
 import shutil
 import tempfile
 import threading
+import time
 import types
 import unittest
 from unittest import mock
@@ -32,7 +33,6 @@ from runmanager.queueing import (
     BLOCKED_SHOT_STATE,
     COMPILE_MODE_EAGER,
     QueueManager,
-    SUBMITTED_SHOT_STATE,
     UNKNOWN_SHOT_STATE,
 )
 
@@ -65,7 +65,6 @@ class FakeApp(object):
             lambda labscript_file, path: True,
             lambda path: None,
             lambda *args, **kwargs: None,
-            lambda enabled: None,
         )
 
 
@@ -197,13 +196,11 @@ class SubmittingApp(object):
     get right.
 
     What is stood in for is the window around that: the group tabs a global
-    would be written through, the preparse thread and everything it writes for
-    a submission to read afterwards, and the abort button.
+    would be written through, and the preparse thread and everything it writes
+    for a submission to read afterwards.
 
     The compile callback blocks until the test releases it, which is where a
-    shot waits under eager compilation -- so no record reaches the queue while
-    a submission is being made, and each entry sees the queue the next one
-    would really see.
+    shot waits while it compiles.
     """
 
     AXES_COL_NAME = RunManager.AXES_COL_NAME
@@ -252,7 +249,6 @@ class SubmittingApp(object):
                 text=lambda: self.directory
             ),
             pushButton_shuffle=types.SimpleNamespace(checkState=lambda: 0),
-            pushButton_abort=types.SimpleNamespace(setEnabled=lambda enabled: None),
         )
         # Where each submission asked for its shots to be sent, and the
         # records of each batch that reached the queue.
@@ -264,7 +260,6 @@ class SubmittingApp(object):
             self.compile_run_file,
             lambda path: None,
             lambda *args, **kwargs: None,
-            lambda enabled: None,
         )
         submit_batch = self.queue_manager.compile_shots
 
@@ -470,7 +465,14 @@ class SubmitShotsTests(RemoteCommandTestCase):
         # The queue's last shot is the operator's, as an Engage between two
         # submissions leaves it; the session names its own sequence instead.
         first = self.submit({'x': 1})
-        self.assertEqual(self.app.get_queue_append_filepath(), self.anchor)
+        self.app.wait_until_preparse_complete()
+        [engaged] = self.app.compile_and_queue_shots(
+            main_module.SUBMISSION_MODE_NEW_FOLDER,
+            True,
+            False,
+            self.app.expand_pending_shots(),
+        )
+        self.assertEqual(self.app.get_queue_append_filepath(), engaged['path'])
 
         second = self.submit({'x': 2}, sequence=first[0]['sequence_id'])
 
@@ -856,27 +858,17 @@ class ShotStatusTests(RemoteCommandTestCase):
         # docstring does not name is one the caller has to guess at --
         # including whether a shot in it is still coming.
         docstring = runmanager.remote.Client.shot_status.__doc__
-        for state in (
-            BLOCKED_SHOT_STATE,
-            SUBMITTED_SHOT_STATE,
-            UNKNOWN_SHOT_STATE,
-        ):
+        for state in (BLOCKED_SHOT_STATE, UNKNOWN_SHOT_STATE):
             with self.subTest(state=state):
                 self.assertIn(state, docstring)
 
 
-class AbortDuringSubmissionTests(RemoteCommandTestCase):
-    """An abort the operator has pressed is not called off by a submission.
+class EmptyQueueTests(RemoteCommandTestCase):
+    """Empty queue, in Abort's place, backs out of the work that is waiting.
 
-    Abort stops the batch being compiled and every batch already queued behind
-    it. A submission landing while those are draining is work the operator has
-    just said they do not want, and a remote caller is in no position to decide
-    otherwise: it cannot see the window, and the operator cannot see it.
-
-    It has to end by itself, though. Nothing holds an abort open once the
-    batches it stopped have been let go of, so the next submission compiles
-    without anybody having to press anything -- there is no Engage button a
-    remote caller could press.
+    A batch is queued as rows the moment it is submitted, so emptying the
+    queue takes all of it, including a shot still compiling, whose file goes
+    when its compile finishes.
     """
 
     def make_app(self):
@@ -898,114 +890,34 @@ class AbortDuringSubmissionTests(RemoteCommandTestCase):
         self.addCleanup(self.app.compiling.set)
         runmanager.new_global(self.app.globals_file, 'group', 'x')
         runmanager.set_value(self.app.globals_file, 'group', 'x', '0')
-        self.app.queue_manager.enqueue(
-            [
-                {
-                    'path': os.path.join(self.directory, 'experiment_007.h5'),
-                    'compiled': True,
-                    'run_no': 7,
-                    'n_runs': 8,
-                    'sequence_attrs': {
-                        'script_basename': 'experiment',
-                        'sequence_date': '2026-09-18',
-                        'sequence_index': 7,
-                        'sequence_id': '20260918T101112_experiment',
-                    },
-                }
-            ]
-        )
-        # Where a batch is when Abort reaches it: the worker has it and is in
-        # the middle of compiling its first shot. Waited on rather than slept
-        # through, so that what the operator interrupts is settled.
-        self.compiling_started = threading.Event()
+
+    def test_a_batch_still_compiling_goes_with_its_files(self):
+        started, written, compiled = threading.Event(), threading.Event(), []
         compile_run_file = self.app.queue_manager.compile_run_file_callback
 
-        def note_compile_started(labscript_file, path):
-            self.compiling_started.set()
-            return compile_run_file(labscript_file, path)
+        def compile_writing_its_file(labscript_file, path):
+            compiled.append(path)
+            started.set()
+            result = compile_run_file(labscript_file, path)
+            open(path, 'w').close()
+            written.set()
+            return result
 
-        self.app.queue_manager.compile_run_file_callback = note_compile_started
-        # The queue turns the Abort button off as it lets go of the last batch
-        # it was holding, which is the moment to ask what it left behind.
-        self.batches_finished = threading.Event()
-        self.app.queue_manager.set_abort_enabled = self.note_abort_enabled
+        self.app.queue_manager.compile_run_file_callback = compile_writing_its_file
+        descriptors = self.request('submit_shots', [{'x': 1}, {'x': 2}])
+        self.assertTrue(started.wait(5), 'the first shot is compiling')
 
-    def note_abort_enabled(self, enabled):
-        if not enabled:
-            self.batches_finished.set()
-
-    def submit(self, *entries):
-        return self.request('submit_shots', [dict(entry) for entry in entries])
-
-    def status(self, descriptors):
-        shot_ids = [descriptor['shot_id'] for descriptor in descriptors]
-        return self.app.queue_manager.get_shot_statuses(shot_ids)
-
-    def test_a_submission_does_not_call_off_an_abort_that_is_in_force(self):
-        first = self.submit({'x': 1})
-        self.assertTrue(
-            self.compiling_started.wait(5), 'the worker has the first batch'
-        )
-        self.app.on_abort_clicked()
-        stopped = self.submit({'x': 2})
+        self.request('abort')
         self.app.compiling.set()
 
-        self.assertTrue(self.batches_finished.wait(5), 'the batches were let go')
-        self.assertEqual(
-            [status['state'] for status in self.status(stopped).values()],
-            [UNKNOWN_SHOT_STATE],
-            'the batch submitted during the abort was stopped by it: no row '
-            'was ever made for its shot, and nothing further will happen to it',
-        )
-        self.assertEqual(
-            [status['pending'] for status in self.status(first).values()],
-            [True],
-            'and the shot that was already compiling when Abort was pressed '
-            'is not taken back out of the queue',
-        )
-
-    def test_an_abort_with_nothing_to_stop_stops_nothing(self):
-        # Abort is reachable from a remote caller at any time, including while
-        # runmanager is idle and the operator's own Abort button is greyed
-        # out. An abort kept over work that has not been submitted yet would
-        # stop the next batch to arrive, whoever sent it and however long
-        # afterwards.
-        self.app.compiling.set()
-        self.app.on_abort_clicked()
-
-        carries_on = self.submit({'x': 1})
-
-        self.assertTrue(self.batches_finished.wait(5))
-        self.assertEqual(
-            [status['pending'] for status in self.status(carries_on).values()],
-            [True],
-            'there was nothing to stop, so nothing was stopped',
-        )
-
-    def test_the_abort_ends_with_the_batches_it_stopped(self):
-        # An abort that outlived the work it stopped would refuse every later
-        # submission, with nothing in the window saying why.
-        self.submit({'x': 1})
-        self.assertTrue(self.compiling_started.wait(5))
-        self.app.on_abort_clicked()
-        self.submit({'x': 2})
-        self.app.compiling.set()
-        self.assertTrue(self.batches_finished.wait(5))
-        self.batches_finished.clear()
-
-        carries_on = self.submit({'x': 3})
-
-        self.assertTrue(self.batches_finished.wait(5))
-        self.assertFalse(
-            self.app.queue_manager.compilation_aborted.is_set(),
-            'the abort is over',
-        )
-        self.assertEqual(
-            [status['pending'] for status in self.status(carries_on).values()],
-            [True],
-            'and the next batch compiles and queues as though nothing had '
-            'happened',
-        )
+        self.assertTrue(written.wait(5), 'and its compile finished')
+        for _ in range(500):
+            if not os.path.exists(descriptors[0]['path']):
+                break
+            time.sleep(0.01)
+        self.assertEqual(self.app.queue_manager.get_queue_paths(), [])
+        self.assertEqual(compiled, [descriptors[0]['path']], 'the second never compiled')
+        self.assertFalse(os.path.exists(descriptors[0]['path']), 'and no file is left')
 
 
 class SubmissionAnchorTests(RemoteCommandTestCase):
@@ -1111,6 +1023,19 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
             [self.SEQUENCE['sequence_id']],
         )
 
+    def test_adding_to_the_last_sequence_joins_one_still_compiling(self):
+        # "Last sequence" is the one submitted last, compiled or not: its rows
+        # are in the queue from the moment it is submitted.
+        self.enqueue('experiment_007.h5')
+        engaged = self.engage(main_module.SUBMISSION_MODE_NEW_FOLDER)
+
+        added = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
+
+        self.assertEqual(
+            added[0]['sequence_attrs']['sequence_id'],
+            engaged[0]['sequence_attrs']['sequence_id'],
+        )
+
     def test_adding_to_nothing_at_all_starts_a_sequence(self):
         records = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
 
@@ -1170,7 +1095,7 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         )
         self.assertEqual(
             self.app.queue_manager.get_queue_paths(),
-            [],
+            [record['path'] for record in records],
             'and the work that was waiting was thrown away, which is the '
             'other half of what the mode offers',
         )

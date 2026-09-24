@@ -103,10 +103,6 @@ REFUSED_STATES = {
 # row is not going anywhere either, and the empty state it is in would read as
 # work about to be done.
 BLOCKED_SHOT_STATE = 'blocked'
-# What a shot the queue has taken on but has no row for yet is answered with.
-# The row is made when the worker reaches that record, which under eager
-# compilation is a whole labscript compile after the shot was submitted.
-SUBMITTED_SHOT_STATE = 'submitted'
 # What a shot id with no row in the queue is answered with. Not the empty
 # state, which a row waiting its turn has.
 UNKNOWN_SHOT_STATE = 'unknown'
@@ -256,11 +252,6 @@ class QueueController(object):
         # Kept so that a batch added to that shot's sequence reads no file.
         self.last_sent_sequence_attrs = None
         self._items = []
-        # Shots taken on for the queue that have no row yet; see
-        # register_accepted(). Of this session only, like a compile in
-        # progress: a batch being compiled when runmanager stops is not
-        # resumed by the one that starts next.
-        self._accepted = set()
         self._lock = threading.RLock()
 
     def _normalise_item(self, item):
@@ -345,40 +336,6 @@ class QueueController(object):
         records = [self._normalise_item(item) for item in items]
         with self._lock:
             self._items.extend(records)
-            # Each shot has its row now, which is what answers for it from
-            # here on -- including once that row leaves, a completed shot
-            # being finished with however busy the batch it came in still is.
-            self._accepted.difference_update(
-                record['shot_id'] for record in records
-            )
-
-    def register_accepted(self, shot_ids):
-        """Take on these shot ids, before there is a row for any of them.
-
-        A shot is taken on when it is submitted; its row is made once the
-        worker has reached that record, which under eager compilation is a
-        whole labscript compile later. In between, the id is this queue's to
-        answer for. Without that the answer is that there is no such shot,
-        whose meaning is that nothing further will happen to it -- so a caller
-        polling for the results of what it has just submitted is told its work
-        was dropped, and submits it all over again.
-
-        Whatever registers ids releases them again: see forget_accepted."""
-        with self._lock:
-            self._accepted.update(str(shot_id) for shot_id in shot_ids)
-
-    def forget_accepted(self, shot_ids):
-        """Let go of ids that have no row and now never will.
-
-        The counterpart of register_accepted, for every way a record can be
-        abandoned. An id left on the books is called pending for the rest of
-        the session, for a shot that will never run, which strands a caller
-        waiting on it exactly as thoroughly as being told it was dropped.
-
-        Ids that did become rows are already gone from the set, so releasing a
-        whole batch releases precisely the records of it that never made one."""
-        with self._lock:
-            self._accepted.difference_update(str(shot_id) for shot_id in shot_ids)
 
     def delete_rows(self, shot_ids):
         """Delete the queued shots with these stable ids.
@@ -484,9 +441,8 @@ class QueueController(object):
         ``blocked``, which is the fact about them a caller waiting on their
         results needs.
 
-        ``state`` is for a human reading it. A shot that has been taken on but
-        has no row yet is pending and says ``submitted``; an id that is
-        neither is not pending, because nothing further will happen to it.
+        ``state`` is for a human reading it. An id with no row is not pending,
+        because nothing further will happen to it.
 
         Reads only. A caller may ask as often as it likes, about shots that
         finished long ago, and the queue is no different afterwards."""
@@ -509,13 +465,10 @@ class QueueController(object):
                     }
                 else:
                     statuses[item['shot_id']] = {'pending': True, 'state': state}
-            accepted = set(self._accepted)
         answer = {}
         for shot_id in shot_ids:
             if shot_id in statuses:
                 answer[shot_id] = dict(statuses[shot_id])
-            elif shot_id in accepted:
-                answer[shot_id] = {'pending': True, 'state': SUBMITTED_SHOT_STATE}
             else:
                 answer[shot_id] = {'pending': False, 'state': UNKNOWN_SHOT_STATE}
         return answer
@@ -870,6 +823,23 @@ class QueueController(object):
             item['compiling'] = True
             return item, True
 
+    def claim_next_to_compile_ahead(self):
+        """Claim the first eager row still to be compiled, or return None.
+
+        Wherever it is in the queue: a row that failed to compile holds the
+        queue only once it is the head, so the rows after it go on compiling."""
+        with self._lock:
+            for item in self._items:
+                if (
+                    item['compile_mode'] == COMPILE_MODE_EAGER
+                    and not item['compiled']
+                    and not item['compiling']
+                    and item['state'] not in REFUSED_STATES
+                ):
+                    item['compiling'] = True
+                    return item
+            return None
+
     def finish_compile(self, item, success, message=''):
         """Record the outcome of a background compile.
 
@@ -924,7 +894,6 @@ class QueueManager(QtCore.QObject):
         compile_run_file,
         send_to_runviewer,
         output,
-        set_abort_enabled,
     ):
         QtCore.QObject.__init__(self)
         self.controller = QueueController()
@@ -933,14 +902,6 @@ class QueueManager(QtCore.QObject):
         self.compile_run_file_callback = compile_run_file
         self.send_to_runviewer_callback = send_to_runviewer
         self.output = output
-        # Set by abort() and let go of by the worker when the last batch it
-        # covers is done with. Nothing outside this class touches it: an
-        # abort is a thing the queue is asked for, not a flag to be raised
-        # behind its back.
-        self.compilation_aborted = threading.Event()
-        self.set_abort_enabled = set_abort_enabled
-        self.batches_pending = 0
-        self.batches_lock = threading.Lock()
         self.thread = threading.Thread(target=self.mainloop)
         self.thread.daemon = True
         self.thread.start()
@@ -954,39 +915,17 @@ class QueueManager(QtCore.QObject):
         self.controller.enqueue(list(items))
         self.queueChanged.emit()
 
-    def abort(self):
-        """Stop the batches this queue is holding.
-
-        An abort is about work that has been submitted: the batch being
-        compiled and every batch waiting behind it. With none of them here
-        there is nothing to stop, and setting the flag anyway would leave it
-        set with nothing coming that would clear it -- which is every later
-        submission refused, by a runmanager that looks idle.
-
-        Counted under the same lock the worker gives a batch back under, so a
-        batch is either stopped by this abort or submitted after it, and never
-        both at once."""
-        with self.batches_lock:
-            if self.batches_pending:
-                self.compilation_aborted.set()
-
     def compile_shots(self, records, send_to_BLACS, send_to_runviewer):
-        """Compile these records and, if send_to_BLACS, queue them.
+        """Queue these records if send_to_BLACS, and compile them.
 
-        Returns the records, each now carrying the identifier its row will
-        have, for a caller that has to say which shots it submitted.
+        Returns the records, each now carrying the identifier its row has, for
+        a caller that has to say which shots it submitted.
 
-        The id is settled here rather than in enqueue because the eager path
-        compiles a record before enqueueing it: a file written on that path
-        would have been written before its shot had an id to put in it. What
-        the id is does not change -- enqueue keeps whatever a record arrives
-        with, and a caller that chose its own keeps that.
-
-        A batch bound for the queue is taken on here too, id by id, so that
-        the whole of the compile it is about to wait through is answered for.
-        A batch that is not bound for the queue is compiled and looked at and
-        queues nothing, so the queue takes on nothing and has nothing to say
-        about it."""
+        A batch bound for the queue is queued at once, so that its rows are
+        there to show, to add to and to empty while they compile: the worker
+        compiles the eager ones in order, and a lazy one is compiled when
+        BLACS asks for it. A batch not bound for the queue is compiled for
+        runviewer and queues nothing."""
         records = list(records)
         for record in records:
             # As text, which is what the row made from this record will hold
@@ -997,17 +936,10 @@ class QueueManager(QtCore.QObject):
                 str(record['shot_id']) if record.get('shot_id') else new_shot_id()
             )
         if send_to_BLACS:
-            # Before the command goes on the worker's list, never after: the
-            # worker can enqueue a record the moment it has one, and an id
-            # registered after its row was made is an id nothing clears.
-            self.controller.register_accepted(
-                record['shot_id'] for record in records
-            )
-        with self.batches_lock:
-            self.batches_pending += 1
-        self.command_queue.put(
-            ('compile_shots', (records, send_to_BLACS, send_to_runviewer))
-        )
+            self.enqueue(records)
+            self.command_queue.put(('compile_ahead', (send_to_runviewer,)))
+            return records
+        self.command_queue.put(('compile_shots', (records, send_to_runviewer)))
         return records
 
     def _compile_shot(self, item, send_to_runviewer=False):
@@ -1021,8 +953,7 @@ class QueueManager(QtCore.QObject):
         # finish_compile: marking it here would make it offerable before the
         # compile is recorded, and the offer's running state would then be
         # wiped by the compile finishing -- so the row would be handed to BLACS
-        # and offered again afterwards as though it never had been. The eager
-        # caller below marks its own record, which is not in the queue yet.
+        # and offered again afterwards as though it never had been.
         return success
 
     def compile_next_in_background(self, send_to_runviewer):
@@ -1074,8 +1005,8 @@ class QueueManager(QtCore.QObject):
             self._delete_queue_files([item['path']])
         elif not success and changed:
             self.output(
-                'Queued shot %s could not be compiled. It is held at the head '
-                'of the queue; delete it to go on.\n'
+                'Queued shot %s could not be compiled. It holds the queue once it '
+                'is at the head; delete it to go on.\n'
                 % os.path.basename(item['path']),
                 red=True,
             )
@@ -1243,71 +1174,21 @@ class QueueManager(QtCore.QObject):
                 if command == 'close':
                     return
 
-                if command == 'compile_shots':
-                    records, send_to_BLACS, send_to_runviewer = args
-                    aborted = False
-                    try:
-                        for item in records:
-                            if self.compilation_aborted.is_set():
-                                aborted = True
-                                break
-                            compile_now = (
-                                not send_to_BLACS
-                                or item['compile_mode'] == COMPILE_MODE_EAGER
-                            )
-                            if compile_now:
-                                success = self._compile_shot(
-                                    item, send_to_runviewer=send_to_runviewer
-                                )
-                                # Safe here, and only here: this record is not
-                                # in the queue until enqueue() below, so no
-                                # other thread can see it half-marked.
-                                item['compiled'] = bool(success)
-                                if not success:
-                                    self.compilation_aborted.set()
-                                    aborted = True
-                                    break
-                            if send_to_BLACS:
-                                # Enqueue each shot as it is compiled, so that
-                                # BLACS can collect it without waiting for the
-                                # rest of the batch:
-                                self.enqueue([item])
-                                self.output(
-                                    'Queued shot %s in runmanager.\n'
-                                    % os.path.basename(item['path'])
-                                )
-                        if aborted:
+                if command == 'compile_ahead':
+                    (send_to_runviewer,) = args
+                    item = self.controller.claim_next_to_compile_ahead()
+                    while item is not None:
+                        self._background_compile(item, send_to_runviewer)
+                        item = self.controller.claim_next_to_compile_ahead()
+                    self.output('Ready.\n\n')
+                elif command == 'compile_shots':
+                    records, send_to_runviewer = args
+                    for item in records:
+                        if not self._compile_shot(item, send_to_runviewer=send_to_runviewer):
                             self.output('Compilation aborted.\n\n', red=True)
-                        else:
-                            self.output('Ready.\n\n')
-                    finally:
-                        # However the batch ended -- every record queued, an
-                        # abort, a shot that would not compile, or a raise on
-                        # the way out -- nothing of it is merely taken on any
-                        # more. The records that reached the queue gave up
-                        # their place as they were enqueued, so this releases
-                        # exactly those that never got there, which would
-                        # otherwise be answered for as work still to come for
-                        # the rest of the session.
-                        self.controller.forget_accepted(
-                            record['shot_id'] for record in records
-                        )
-                        # An abort applies to every batch this queue is
-                        # holding, not only the one it interrupted, so the flag
-                        # outlives this batch while others are still pending --
-                        # including batches submitted while it was in force,
-                        # which are counted in under this same lock. It is let
-                        # go of with the last of them: whoever aborted has had
-                        # everything they asked for stopped, and a flag left
-                        # set would stop work nobody has asked for yet. Abort
-                        # stays available for exactly as long.
-                        with self.batches_lock:
-                            self.batches_pending -= 1
-                            last_batch = self.batches_pending == 0
-                            if last_batch:
-                                self.compilation_aborted.clear()
-                        if last_batch:
-                            self.set_abort_enabled(False)
+                            break
+                    else:
+                        self.output('Ready.\n\n')
                 else:
                     raise ValueError('Invalid queue command: %s' % command)
             except Exception as exc:

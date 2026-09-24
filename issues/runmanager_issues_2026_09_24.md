@@ -21,8 +21,8 @@ deliberate and tested; do not "fix" them:
 
 - An abort also stops batches submitted while it is in force, until every
   batch it covers has drained (`QueueManager.abort`, and the comment beside
-  `compilation_aborted`). Slice 12 replaces Abort with Empty queue, so this
-  holds only until then.
+  `compilation_aborted`). Abort is now Empty queue (Slice 12), so this no
+  longer applies.
 - "Empty queue, then add shots to last sequence" prefers the shot last sent
   to BLACS over the queue's last row. The `SUBMISSION_MODES` comment gives the
   reasoning.
@@ -65,7 +65,7 @@ it is met.
 - [x] Slice 3: Two sequences started in the same second stay two sequences (HITL)
       — decided: key the record by `(sequence_id, sequence_index)`
 - [x] Slice 4: A join refuses a sequence of another labscript file
-- [ ] Slice 5: "Add shots to last sequence" sees a sequence still compiling (HITL)
+- [x] Slice 5: "Add shots to last sequence" sees a sequence still compiling (HITL)
       — decided: done by Slice 12
 - [ ] ~~Slice 6: Each entry runs the values it names (HITL)~~ — moved to
       labscript-optimization; runmanager already exposes both boxes
@@ -76,7 +76,7 @@ it is met.
 - [x] Slice 10: Default shots are numbered per sequence
 - [ ] ~~Slice 11: The day's default sequence sorts as current in lyse (HITL,
       lyse)~~ — dropped
-- [ ] Slice 12: Emptying the queue also stops the batches it discards (HITL)
+- [x] Slice 12: Emptying the queue also stops the batches it discards (HITL)
       — decided: queue each batch's rows at submission; Abort becomes
       Empty queue
 - [x] Slice 13: A refused entry says which global failed and why
@@ -174,7 +174,7 @@ number in the record never goes down.
 
 ### Blocked by
 
-None - can start immediately.
+Slice 12, which changes how shots still compiling are held.
 
 ### Review findings covered
 
@@ -288,10 +288,10 @@ submitted last. Nothing is built here beyond Slice 12.
 
 ### Acceptance criteria
 
-- [ ] Engaging a new sequence and choosing "add shots to last sequence" before
+- [x] Engaging a new sequence and choosing "add shots to last sequence" before
       its first shot has compiled adds to the new sequence, never to the
       previous one.
-- [ ] A test of that interleaving fails without the fix.
+- [x] A test of that interleaving fails without the fix.
 
 ### Blocked by
 
@@ -579,19 +579,19 @@ submitting shots that do not compile the operator can back out. The remote
 
 ### Acceptance criteria
 
-- [ ] A batch's rows are in the queue when its submission returns, in both
+- [x] A batch's rows are in the queue when its submission returns, in both
       compile modes.
-- [ ] Emptying the queue while a batch is compiling leaves none of its shots
+- [x] Emptying the queue while a batch is compiling leaves none of its shots
       to run and no file of a deleted row behind.
-- [ ] Empty queue, in Abort's place, removes every waiting row, and a row still
+- [x] Empty queue, in Abort's place, removes every waiting row, and a row still
       compiling has its file deleted when its compile finishes.
-- [ ] A failed compile marks its row and holds the queue only once that row
+- [x] A failed compile marks its row and holds the queue only once that row
       is the head, in both compile modes.
-- [ ] A test of emptying the queue during a compile fails without the fix.
+- [x] A test of emptying the queue during a compile fails without the fix.
 
 ### Blocked by
 
-Slice 2.
+None. Built before Slice 2, which it changes.
 
 ### Review findings covered
 

@@ -1860,9 +1860,6 @@ class RunManager(LabscriptApplication):
             compile_run_file=self.compile_run_file,
             send_to_runviewer=self.send_to_runviewer,
             output=self.output_box.output,
-            set_abort_enabled=lambda enabled: inmain(
-                self.ui.pushButton_abort.setEnabled, enabled
-            ),
         )
         self.setup_queue_tab()
         run_view_layout = self.ui.findChild(QtWidgets.QLayout, 'verticalLayout_2')
@@ -2783,19 +2780,16 @@ class RunManager(LabscriptApplication):
         self.sequences[attrs['sequence_id'], attrs['sequence_index']] = (
             last['path'], last['sequence_attrs'], last['run_no'] + 1
         )
-        self.ui.pushButton_abort.setEnabled(True)
         return self.queue_manager.compile_shots(
             queue_records, send_to_BLACS, send_to_runviewer
         )
 
     def on_abort_clicked(self):
-        """Stop the batches that have been submitted and not yet compiled.
+        """Empty the queue, as the replacement modes' Clear does.
 
-        The queue decides what that means and how long it lasts, because it is
-        the queue that knows which batches are still in hand. Nothing here
-        calls an abort off again: a submission is work asked for, not a reason
-        to stop stopping."""
-        self.queue_manager.abort()
+        Every waiting row goes, and a row still compiling has its file deleted
+        once its compile finishes. A shot BLACS has is kept."""
+        self.queue_manager.clear()
 
     def on_restart_subprocess_clicked(self):
         # Kill and restart the compilation subprocess

@@ -88,7 +88,9 @@ class Client(ZMQClient):
         return self.request('engage')
 
     def abort(self):
-        """Trigger abort compilation/submission"""
+        """Empty runmanager's queue, as its Empty queue button does.
+
+        A shot BLACS has is kept."""
         return self.request('abort')
 
     def get_run_shots(self):
@@ -215,12 +217,10 @@ class Client(ZMQClient):
         BLACS is done with it, as it can still complete.
 
         ``state`` is the queue row's own state, for a human reading a log,
-        plus two answers no row is ever in. ``'submitted'`` is a shot
-        runmanager has taken on but has no row for yet, which is still
-        pending; ``'blocked'`` is a row runmanager would hand over sitting
-        behind one it will not, which is not pending until an operator moves
-        what is in front of it. An id runmanager knows nothing of at all is
-        reported as ``'unknown'``.
+        plus one answer no row is ever in: ``'blocked'`` is a row runmanager
+        would hand over sitting behind one it will not, which is not pending
+        until an operator moves what is in front of it. An id runmanager
+        knows nothing of at all is reported as ``'unknown'``.
 
         Reads only: nothing is consumed by asking, so the same ids can be asked
         about as often as wanted."""
