@@ -1842,7 +1842,6 @@ class RunManager(LabscriptApplication):
         # two started in the same second share an id: its newest shot's path,
         # attributes and next run number. In memory only, lost on a restart.
         self.sequences = {}
-        self._next_default_shot_index = {}
         # A default shot is produced off the request thread; these track the one
         # being made and the one waiting to be handed over:
         self._default_shot_lock = threading.Lock()
@@ -2731,7 +2730,7 @@ class RunManager(LabscriptApplication):
             sequence_id, sequence_index = sequence
             # An id alone names the one sequence recorded with it.
             keys = [
-                key for key in self.sequences
+                key for key in list(self.sequences)
                 if key[0] == sequence_id and sequence_index in (None, key[1])
             ]
             if len(keys) != 1:
@@ -4684,24 +4683,25 @@ class RunManager(LabscriptApplication):
         BLACS later as though they were current. This happens when the queue
         has taken over, or the empty-queue policy no longer calls for one."""
         with self._default_shot_lock:
-            run_file = self._default_shot_ready
+            row = self._default_shot_ready
             self._default_shot_ready = None
-        if run_file is not None:
+        if row is not None:
             try:
-                os.remove(run_file)
+                os.remove(row['path'])
             except OSError:
                 pass
 
     def take_default_shot(self, labscript_file):
-        """Return a compiled default shot, or None while one is being produced.
+        """Return a compiled default shot's queue row, or None while one is
+        being produced.
 
         At most one is produced at a time, however often BLACS asks. The shot
         is collected by a later request once it is ready."""
         with self._default_shot_lock:
-            run_file = self._default_shot_ready
-            if run_file is not None:
+            row = self._default_shot_ready
+            if row is not None:
                 self._default_shot_ready = None
-                return run_file
+                return row
             if self._default_shot_preparing:
                 return None
             self._default_shot_preparing = True
@@ -4716,7 +4716,7 @@ class RunManager(LabscriptApplication):
 
     def prepare_default_shot(self, labscript_file, send_to_runviewer):
         """Write and compile one default shot, and leave it ready to hand over."""
-        run_file = None
+        row = None
         try:
             active_groups = inmain(self.get_active_groups, interactive=False)
             sequence_globals, runglobals = runmanager.get_default_shot_globals(
@@ -4734,13 +4734,21 @@ class RunManager(LabscriptApplication):
                 output_folder,
                 '{}.h5'.format(filename_prefix),
             )
-            start = self._next_default_shot_index.get(run_file_base, 0)
+            key = (sequence_attrs['sequence_id'], sequence_attrs['sequence_index'])
+            if key in self.sequences:
+                start = self.sequences[key][2]
+            else:
+                # After a restart the day's files are counted from one listing
+                # of the folder, not a stat per number.
+                names = os.listdir(output_folder) if os.path.isdir(output_folder) else []
+                ends = [os.path.splitext(n)[0].rpartition('_')[2] for n in names]
+                start = 1 + max((int(end) for end in ends if end.isdigit()), default=-1)
             run_file, default_index = next_available_indexed_filepath(
                 run_file_base,
                 '_{index}',
                 start=start,
             )
-            self._next_default_shot_index[run_file_base] = default_index + 1
+            self.sequences[key] = (run_file, sequence_attrs, default_index + 1)
             # No shot_id, deliberately. A default shot is runmanager's own,
             # produced to keep the apparatus busy, and it is written here --
             # before it is a queue row and before it has an id. A file with no
@@ -4762,14 +4770,21 @@ class RunManager(LabscriptApplication):
                 )
             if send_to_runviewer:
                 self.send_to_runviewer(run_file)
+            row = {
+                'path': run_file,
+                'compiled': True,
+                'default_shot': True,
+                'sequence_attrs': sequence_attrs,
+                'run_no': default_index,
+                'n_runs': default_index + 1,
+            }
         except Exception as e:
             self.output_box.output(
                 'Could not produce a default shot: %s\n' % str(e), red=True
             )
-            run_file = None
         finally:
             with self._default_shot_lock:
-                self._default_shot_ready = run_file
+                self._default_shot_ready = row
                 self._default_shot_preparing = False
 
     def queue_exchange(self, outcome=None, request_shot=True):
@@ -4944,8 +4959,8 @@ class RunManager(LabscriptApplication):
             # the shot file and compiling it. That happens off this thread for
             # the same reason a queued shot's compile does: it must not hold up
             # the remote server, nor finish into a client that stopped waiting.
-            run_file = self.take_default_shot(labscript_file)
-            if run_file is None:
+            row = self.take_default_shot(labscript_file)
+            if row is None:
                 return no_shot
             # The default shot joins the queue as an ordinary row and is then
             # offered like one. That is the whole of its lifecycle: it is
@@ -4956,9 +4971,7 @@ class RunManager(LabscriptApplication):
             # step. It is also what stops a second default shot being made
             # while the first still needs attention: a red row is the head of
             # the queue, so it is what the next request is offered.
-            self.queue_manager.enqueue(
-                [{'path': run_file, 'compiled': True, 'default_shot': True}]
-            )
+            self.queue_manager.enqueue([row])
             item = self.queue_manager.offer_next()
             if item is None:
                 return no_shot

@@ -555,7 +555,9 @@ class FakeRunManager(object):
 
     def take_default_shot(self, labscript_file):
         self.default_shots_taken += 1
-        return self.default_shot_file
+        if self.default_shot_file is None:
+            return None
+        return {'path': self.default_shot_file, 'compiled': True, 'default_shot': True}
 
     def discard_default_shot(self):
         self.default_shot_file = None

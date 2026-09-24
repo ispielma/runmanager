@@ -73,7 +73,7 @@ it is met.
       — decided: `submit_shots` is made practically instant; no recovery path
 - [x] Slice 8: A cancelled shot that can still complete stays pending
 - [ ] Slice 9: Joined shots are named from the template and their own globals
-- [ ] Slice 10: Default shots are numbered per sequence
+- [x] Slice 10: Default shots are numbered per sequence
 - [ ] ~~Slice 11: The day's default sequence sorts as current in lyse (HITL,
       lyse)~~ — dropped
 - [ ] Slice 12: Emptying the queue also stops the batches it discards (HITL)
@@ -500,12 +500,12 @@ the sequence attributes, run number and n_runs it was written with.
 
 ### Acceptance criteria
 
-- [ ] With a global in the prefix, a day's default shots have distinct,
+- [x] With a global in the prefix, a day's default shots have distinct,
       increasing run numbers.
-- [ ] After a restart, numbering continues from the day's files with one
+- [x] After a restart, numbering continues from the day's files with one
       directory listing, not one stat per file.
-- [ ] The default row carries the sequence and run number its file has.
-- [ ] The existing default-sequence tests pass.
+- [x] The default row carries the sequence and run number its file has.
+- [x] The existing default-sequence tests pass.
 
 ### Blocked by
 
