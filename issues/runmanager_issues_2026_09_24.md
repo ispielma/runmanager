@@ -84,7 +84,7 @@ it is met.
 - [ ] Slice 15: A batch no longer holds BLACS's server thread (HITL)
       — decided: evaluate each entry from one read; keep one server. Built:
       50 entries take 129 ms in the test harness; apparatus measurement to do
-- [ ] Slice 16: A join reads no shot file and takes no lock on the GUI thread
+- [x] Slice 16: A join reads no shot file and takes no lock on the GUI thread
 - [ ] ~~Slice 17: Abort stays enabled while a batch is pending~~ — goes with
       Slice 12's Empty queue
 - [ ] Slice 18: The tests exercise what they claim, inside temporary directories
@@ -732,9 +732,9 @@ from the join branch. `forget_last_sent` keeps its current, tested behaviour.
 
 ### Acceptance criteria
 
-- [ ] "Add shots to last sequence" joins the last-sent shot's sequence while
+- [x] "Add shots to last sequence" joins the last-sent shot's sequence while
       that shot's file is held by another process.
-- [ ] A join takes no shot-storage lock on the GUI thread.
+- [x] A join takes no shot-storage lock on the GUI thread.
 
 ### Blocked by
 

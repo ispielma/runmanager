@@ -253,6 +253,8 @@ class QueueController(object):
         # unaffected and resuming offers the same head again.
         self.paused = False
         self.last_sent_from_queue = None
+        # Kept so that a batch added to that shot's sequence reads no file.
+        self.last_sent_sequence_attrs = None
         self._items = []
         # Shots taken on for the queue that have no row yet; see
         # register_accepted(). Of this session only, like a compile in
@@ -532,6 +534,10 @@ class QueueController(object):
             for item in reversed(self._items):
                 if item['path'] == path:
                     return dict(item['sequence_attrs']) or None
+            if self.last_sent_from_queue and self.last_sent_sequence_attrs:
+                last_sent = shared_drive.path_to_local(self.last_sent_from_queue)
+                if os.path.abspath(last_sent) == os.path.abspath(path):
+                    return dict(self.last_sent_sequence_attrs)
         return None
 
     def get_shot_path(self, shot_id):
@@ -572,10 +578,13 @@ class QueueController(object):
                 )
             return items
 
-    def set_last_sent_from_queue(self, value):
-        """Record the last shot handed out. True if that changed the value."""
+    def set_last_sent_from_queue(self, value, sequence_attrs=None):
+        """Record the last shot handed out, and the sequence it belongs to.
+
+        True if that changed which shot it is."""
         value = str(value) if value else None
         with self._lock:
+            self.last_sent_sequence_attrs = dict(sequence_attrs or {}) or None
             if self.last_sent_from_queue == value:
                 return False
             self.last_sent_from_queue = value
@@ -605,6 +614,7 @@ class QueueController(object):
             if anchor not in wanted:
                 return False
             self.last_sent_from_queue = None
+            self.last_sent_sequence_attrs = None
             return True
 
     def export_state(self):
@@ -668,6 +678,7 @@ class QueueController(object):
             # with the queue running, rather than silently stopped:
             self.paused = bool(state.get('paused', False))
             self.last_sent_from_queue = None
+            self.last_sent_sequence_attrs = None
             self._items = [self._normalise_item(item) for item in state.get('items', [])]
 
     def get_queue_state(self):
@@ -1071,8 +1082,8 @@ class QueueManager(QtCore.QObject):
         if changed:
             self.queueChanged.emit()
 
-    def set_last_sent_from_queue(self, value):
-        if self.controller.set_last_sent_from_queue(value):
+    def set_last_sent_from_queue(self, value, sequence_attrs=None):
+        if self.controller.set_last_sent_from_queue(value, sequence_attrs):
             self.queueChanged.emit()
 
     def _delete_queue_files(self, paths):

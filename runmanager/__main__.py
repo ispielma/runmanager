@@ -4478,22 +4478,11 @@ class RunManager(LabscriptApplication):
     def get_sequence_attrs_to_extend(self, path):
         """The sequence a batch added to the shot at ``path`` belongs to.
 
-        The queue row is asked first, and the shot file only when no row holds
-        that path or the row records no sequence. It has to be that way round
-        rather than simply reading the file: a queued shot is not written
-        until it is compiled, which under lazy compilation is not until BLACS
-        asks for it, so the shot a batch is added to often has no file yet. A
-        shot whose row has gone -- the one last sent to BLACS, after "empty
-        queue, then add shots to last sequence" has emptied the queue -- has
-        been written by then, and its file still says which sequence it is in.
-
-        Reading the file takes the cross-process lock on it, because
-        runmanager opens shot files through labscript_utils' h5_lock, and it
-        takes it on whichever thread asks. A submission asks on the GUI
-        thread, so a shot file something else is holding stops the window
-        until the lock comes free or times out. Asking the row first is
-        therefore also the difference between a dictionary this process
-        already has and a locked read of a file across the network."""
+        The queue is asked first. It keeps the sequence of each queued row and
+        of the shot last sent, so a join reads no file: a queued shot may not
+        be written yet, and reading one takes h5_lock's cross-process lock on
+        the asking thread, which for a submission is the GUI thread. The file
+        is read only for a shot the queue holds no sequence for."""
         sequence_attrs = self.queue_manager.get_queued_sequence_attrs(path)
         if sequence_attrs is not None:
             return sequence_attrs
@@ -4553,7 +4542,6 @@ class RunManager(LabscriptApplication):
             # passes it in; see compile_and_queue_shots.
             if sequence_attrs is None:
                 sequence_attrs = self.get_sequence_attrs_to_extend(indexed_path_base)
-            self.check_output_folder_update()
             run_files = self.reindex_run_file_infos(
                 [
                     {
@@ -4985,7 +4973,9 @@ class RunManager(LabscriptApplication):
             # not part of a sequence, and lives in the daily default
             # directory, so it must not become the anchor that "add shots to
             # last sequence" writes the next batch alongside:
-            self.queue_manager.set_last_sent_from_queue(agnostic_path)
+            self.queue_manager.set_last_sent_from_queue(
+                agnostic_path, item['sequence_attrs']
+            )
         return {
             'state': PROVIDER_SHOT,
             'shot_id': item['shot_id'],

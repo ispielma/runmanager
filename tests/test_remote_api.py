@@ -1097,6 +1097,23 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
             [self.SEQUENCE['sequence_id']],
         )
 
+    def test_adding_to_the_last_sequence_reads_no_file_and_takes_no_lock(self):
+        # Both would be on the GUI thread, and lyse can hold the file of the
+        # shot BLACS has just run for as long as it likes.
+        sent = os.path.join(self.directory, 'experiment_007.h5')
+        self.app.queue_manager.set_last_sent_from_queue(sent, dict(self.SEQUENCE))
+
+        with mock.patch.object(
+            self.app, 'check_output_folder_update', side_effect=AssertionError
+        ):
+            records = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
+
+        self.assertFalse(os.path.exists(sent), 'there was no file to read')
+        self.assertEqual(
+            [record['sequence_attrs']['sequence_id'] for record in records],
+            [self.SEQUENCE['sequence_id']],
+        )
+
     def test_adding_to_nothing_at_all_starts_a_sequence(self):
         records = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
 
