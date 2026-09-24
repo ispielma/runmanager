@@ -87,7 +87,7 @@ it is met.
 - [x] Slice 16: A join reads no shot file and takes no lock on the GUI thread
 - [ ] ~~Slice 17: Abort stays enabled while a batch is pending~~ — goes with
       Slice 12's Empty queue
-- [ ] Slice 18: The tests exercise what they claim, inside temporary directories
+- [x] Slice 18: The tests exercise what they claim, inside temporary directories
 - [ ] Slice 19: Comments and docstrings say what the code does now
 
 ---
@@ -796,8 +796,8 @@ Dropped: Slice 12 replaces Abort with Empty queue.
 
 ### Acceptance criteria
 
-- [ ] The raising test fails if a failed submission leaves shots queued.
-- [ ] No test creates or deletes files outside a temporary directory.
+- [x] The raising test fails if a failed submission leaves shots queued.
+- [x] No test creates or deletes files outside a temporary directory.
 
 ### Blocked by
 

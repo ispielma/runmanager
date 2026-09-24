@@ -537,25 +537,16 @@ class SubmitShotsTests(RemoteCommandTestCase):
         self.assertEqual(self.app.batches, [], 'nothing reached the queue')
 
     def test_a_submission_that_raises_has_queued_nothing_at_all(self):
-        # The window is the operator's throughout, and clearing the labscript
-        # file is one of the things they can do to it while a batch is being
-        # submitted. Whatever the batch then fails on, a caller that was told
-        # the submission failed must not have shots running under identifiers
-        # it was never given and can neither poll nor cancel.
-        reads = []
+        # The window is the operator's throughout, and the labscript file can
+        # be cleared from it at any time. A caller told the submission failed
+        # must not have shots running under identifiers it was never given.
+        self.app.labscript_file = ''
 
-        def labscript_file():
-            reads.append(None)
-            return '' if len(reads) > 1 else self.app.labscript_file
+        with self.assertRaises(Exception):
+            self.submit({'x': 1}, {'x': 2}, {'x': 3})
 
-        self.app.ui.lineEdit_labscript_file.text = labscript_file
-
-        try:
-            descriptors = self.submit({'x': 1}, {'x': 2}, {'x': 3})
-        except Exception:
-            self.assertEqual(self.app.batches, [])
-        else:
-            self.assertEqual(len(descriptors), 3)
+        self.assertEqual(self.app.batches, [])
+        self.assertEqual(self.app.queue_manager.get_queue_paths(), [self.anchor])
 
     def test_the_window_is_left_holding_the_last_shot_submitted(self):
         # Whoever is watching has to be able to see what is running, so the
@@ -719,9 +710,15 @@ class ShotStatusTests(RemoteCommandTestCase):
         'compile_failed': (False, True),
     }
 
+    def setUp(self):
+        super().setUp()
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+
     def enqueue(self, shot_id, state=''):
+        path = os.path.join(self.directory, '%s.h5' % shot_id)
         self.app.queue_manager.enqueue(
-            [{'path': '/tmp/%s.h5' % shot_id, 'shot_id': shot_id, 'compiled': True}]
+            [{'path': path, 'shot_id': shot_id, 'compiled': True}]
         )
         for item in self.app.queue_manager.controller._items:
             if item['shot_id'] == shot_id:

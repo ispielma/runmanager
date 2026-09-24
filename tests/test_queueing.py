@@ -802,13 +802,16 @@ class LazyCompileFailureTests(unittest.TestCase):
     """
 
     def make_runmanager(self, compiles):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
         app = FakeRunManager(compiles=compiles)
         self.addCleanup(app.queue_manager.shutdown)
         app.queue_manager.enqueue(
             [
-                {'path': '/tmp/lazy_a.h5', 'labscript_file': '/tmp/e.py',
+                {'path': os.path.join(self.directory, 'lazy_a.h5'),
+                 'labscript_file': os.path.join(self.directory, 'e.py'),
                  'compile_mode': COMPILE_MODE_LAZY, 'compiled': False},
-                queued_shot('/tmp/shot_b.h5'),
+                queued_shot(os.path.join(self.directory, 'shot_b.h5')),
             ]
         )
         return app
@@ -860,7 +863,7 @@ class LazyCompileFailureTests(unittest.TestCase):
 
         self.assertEqual(
             app.compiled,
-            ['/tmp/lazy_a.h5'],
+            [os.path.join(self.directory, 'lazy_a.h5')],
             'the same row cannot compile twice, so it is only tried once',
         )
 
@@ -985,19 +988,23 @@ class KeptRowReasonTests(unittest.TestCase):
     untruth most likely to send an operator to Abort on idle hardware.
     """
 
-    def app_with(self, *items):
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+
+    def app_with(self, *names):
         app = FakeRunManager()
         self.addCleanup(app.queue_manager.shutdown)
-        app.queue_manager.enqueue(list(items))
+        app.queue_manager.enqueue(
+            [queued_shot(os.path.join(self.directory, name)) for name in names]
+        )
         return app
 
     def test_clear_says_blacs_is_running_the_row_it_kept(self):
         # Clear is the caller that can still keep a row BLACS is genuinely
         # running: Delete now cancels that row rather than keeping it as it
         # was, so this is where the running wording is reached.
-        app = self.app_with(
-            queued_shot('/tmp/shot_a.h5'), queued_shot('/tmp/shot_b.h5')
-        )
+        app = self.app_with('shot_a.h5', 'shot_b.h5')
         app.queue_manager.offer_next()
 
         app.queue_manager.clear()
@@ -1008,7 +1015,7 @@ class KeptRowReasonTests(unittest.TestCase):
         )
 
     def test_delete_says_the_shot_blacs_has_was_cancelled(self):
-        app = self.app_with(queued_shot('/tmp/shot_a.h5'))
+        app = self.app_with('shot_a.h5')
         offered = app.queue_manager.offer_next()
 
         app.queue_manager.delete_rows([offered['shot_id']])
@@ -1020,9 +1027,7 @@ class KeptRowReasonTests(unittest.TestCase):
         )
 
     def test_clear_does_not_say_blacs_is_running_a_row_that_came_back(self):
-        app = self.app_with(
-            queued_shot('/tmp/shot_a.h5'), queued_shot('/tmp/shot_b.h5')
-        )
+        app = self.app_with('shot_a.h5', 'shot_b.h5')
         offered = app.queue_manager.offer_next()
         app.queue_manager.shot_finished(
             offered['shot_id'], 'failed', 'a device would not arm'
@@ -2114,10 +2119,15 @@ class CancelledShotTests(unittest.TestCase):
     """
 
     def queue_with_a_shot_at_blacs(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         app = FakeRunManager()
         self.addCleanup(app.queue_manager.shutdown)
         app.queue_manager.enqueue(
-            [queued_shot('/tmp/X.h5'), queued_shot('/tmp/Y.h5')]
+            [
+                queued_shot(os.path.join(directory, 'X.h5')),
+                queued_shot(os.path.join(directory, 'Y.h5')),
+            ]
         )
         offered = app.queue_manager.offer_next()
         return app, offered['shot_id']
