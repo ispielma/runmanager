@@ -3729,6 +3729,10 @@ class RunManager(LabscriptApplication):
                                                     }
                 elif new_guess != previous_guess:
                     filename = active_groups[group_name]
+                    # A legacy HDF5 globals file is read-only until the user
+                    # converts it, so no guess is stored in one:
+                    if runmanager.globals_file_requires_conversion(filename):
+                        continue
                     runmanager.set_expansion(filename, group_name, global_name, new_guess)
                     expansions[global_name] = new_guess
                     expansion_types_changed = True
@@ -3806,6 +3810,8 @@ class RunManager(LabscriptApplication):
         for global_name, guesses in expansion_types.items():
             if guesses['new_guess'] != guesses['previous_guess']:
                 filename = active_groups[guesses['group_name']]
+                if runmanager.globals_file_requires_conversion(filename):
+                    continue
                 runmanager.set_expansion(
                     filename, str(guesses['group_name']), str(global_name), str(guesses['new_guess']))
                 expansions[global_name] = guesses['new_guess']
