@@ -25,10 +25,7 @@ import os
 import labscript_utils.h5_lock
 import h5py
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover
-    import tomli as tomllib
+import tomllib
 
 import tomli_w
 
