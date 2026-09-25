@@ -150,16 +150,20 @@ def load_legacy_hdf5_document(filename):
         for group_name in globals_root:
             group = f["globals"][group_name]
             units_group = group.get("units")
+            expansion_group = group.get("expansion")
             values = dict(group.attrs)
             units = dict(units_group.attrs) if units_group is not None else {}
+            expansions = dict(expansion_group.attrs) if expansion_group is not None else {}
             document["groups"][group_name] = {"globals": {}}
             for global_name, value in values.items():
+                # A global the h5 file expands is one it scans:
+                expansion = _ensure_str(expansions.get(global_name, ""))
                 document["groups"][group_name]["globals"][global_name] = {
                     "default": _ensure_str(value),
                     "units": _ensure_str(units.get(global_name, "")),
-                    "scan_enabled": False,
-                    "scan": "",
-                    "expansion": "",
+                    "scan_enabled": bool(expansion),
+                    "scan": _ensure_str(value) if expansion else "",
+                    "expansion": expansion,
                 }
     return document
 
