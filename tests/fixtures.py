@@ -82,8 +82,8 @@ with warnings.catch_warnings():
     import runmanager.__main__ as main_module  # noqa: E402
     from runmanager.__main__ import (  # noqa: E402
         FingerTabWidget,
-        RemoteServer,
         RunManager,
+        RunmanagerServer,
         TreeView,
     )
 
@@ -93,8 +93,8 @@ with warnings.catch_warnings():
 # constraint along with it.
 __all__ = [
     'FingerTabWidget',
-    'RemoteServer',
     'RunManager',
+    'RunmanagerServer',
     'Splash',
     'TreeView',
     'main_module',

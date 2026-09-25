@@ -9,14 +9,13 @@ banner on the user's screen and leaves it there** — during a test run, during 
 REPL session, during anything.
 
 Prefer importing the leaf module: `runmanager/queueing.py`, `globals_file.py`
-and `analysis_submission.py` have no import-time side effects and need no
-stubbing.
+and `analysis_submission.py` create no `QApplication` and need no stubbing.
 
 When a test must borrow from `__main__` — to exercise a real method rather than
 a description of it — **import it from `tests/fixtures.py`, never from
 `runmanager.__main__`**:
 
-    from fixtures import RunManager, RemoteServer
+    from fixtures import RunManager, RunmanagerServer
 
 `fixtures` stubs `labscript_utils.splash` in `sys.modules` and then imports the
 application once, so no `QApplication` is created at all rather than one being

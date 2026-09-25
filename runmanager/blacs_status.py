@@ -26,7 +26,7 @@ apparatus. Nothing here sends BLACS anything but a question.
 
 runmanager does not depend on the blacs package -- the dependency runs the
 other way -- so the client is runmanager's own, built on the same ZMQClient
-runmanager.remote is. The wire shape is the contract between them.
+runmanager.client is. The wire shape is the contract between them.
 """
 
 import os

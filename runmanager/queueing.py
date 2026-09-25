@@ -32,21 +32,19 @@ from labscript_utils.qtwidgets.shotqueue import ShotQueueWidget
 from zprocess import raise_exception_in_thread
 
 from runmanager import _plain_value
+from runmanager.client import (
+    BLOCKED_SHOT_STATE,
+    PROVIDER_NONE,
+    PROVIDER_PAUSED,
+    PROVIDER_SHOT,
+    SHOT_OUTCOME_STATUSES,
+    UNKNOWN_SHOT_STATE,
+)
 
 EMPTY_QUEUE_NOTHING = 'nothing'
 EMPTY_QUEUE_DEFAULT_LABSCRIPT = 'default_labscript'
 COMPILE_MODE_EAGER = 'eager'
 COMPILE_MODE_LAZY = 'lazy'
-# What an exchange tells BLACS about this runmanager: it offered a shot, its
-# queue is paused, or it has nothing to offer right now. Paused is told apart
-# from having nothing so that BLACS can show an operator why no queued work is
-# arriving; neither is a reason for BLACS to stop:
-PROVIDER_SHOT = 'shot'
-PROVIDER_PAUSED = 'paused'
-PROVIDER_NONE = 'none'
-# How BLACS may say a shot it was offered turned out. Every one but 'completed'
-# leaves the row at the head of the queue in red; see shot_finished():
-SHOT_OUTCOME_STATUSES = ('completed', 'aborted', 'failed', 'rejected')
 # One colour, for the one thing a colour is needed for. The reserved first row
 # is above the rule, which is what says BLACS was sent that shot, so running is
 # simply what that row looks like and needs no colour of its own. Red marks the
@@ -98,14 +96,6 @@ REFUSED_STATES = {
     # rather than waiting on anybody.
     'cancelled': False,
 }
-# What a row the queue would hand over is answered with while a row it will
-# not hand over sits in front of it. Only the head is ever offered, so such a
-# row is not going anywhere either, and the empty state it is in would read as
-# work about to be done.
-BLOCKED_SHOT_STATE = 'blocked'
-# What a shot id with no row in the queue is answered with. Not the empty
-# state, which a row waiting its turn has.
-UNKNOWN_SHOT_STATE = 'unknown'
 
 
 def new_shot_id():

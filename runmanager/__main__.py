@@ -42,7 +42,6 @@ import subprocess
 import threading
 import ast
 import pprint
-import traceback
 import signal
 import unicodedata
 from pathlib import Path
@@ -73,7 +72,14 @@ import labscript_utils.shared_drive as shared_drive
 from labscript_utils import dedent
 from zprocess import raise_exception_in_thread
 import runmanager
-import runmanager.remote
+from runmanager.client import (
+    DEFAULT_PORT,
+    PROVIDER_NONE,
+    PROVIDER_PAUSED,
+    PROVIDER_SHOT,
+    SHOT_OUTCOME_STATUSES,
+    SequenceRefused,
+)
 from runmanager.analysis_submission import (
     AnalysisSubmission,
     art_dir,
@@ -90,12 +96,8 @@ from runmanager.queueing import (
     COMPILE_MODE_LAZY,
     EMPTY_QUEUE_DEFAULT_LABSCRIPT,
     EMPTY_QUEUE_NOTHING,
-    PROVIDER_NONE,
-    PROVIDER_PAUSED,
-    PROVIDER_SHOT,
     QueueManager,
     RunmanagerQueueWidget,
-    SHOT_OUTCOME_STATUSES,
 )
 
 from qtutils import (
@@ -120,7 +122,7 @@ runmanager_dir = RUNMANAGER_DIR
 # already refers to. Getting it here attaches nothing and opens no log file.
 logger = logging.getLogger(APPLICATION_NAME)
 
-# The running window, which RemoteServer's handlers reach through. Bound here
+# The running window, reached by RunmanagerServer's handlers. Bound here
 # for the same reason the logger is: the name this module reads exists in it,
 # so anything importing the module can put its own window there rather than
 # inventing an attribute that was never declared. Running runmanager replaces
@@ -2754,7 +2756,7 @@ class RunManager(LabscriptApplication):
                 if key[0] == sequence_id and sequence_index in (None, key[1])
             ]
             if len(keys) != 1:
-                raise Exception(
+                raise SequenceRefused(
                     'Cannot add shots to sequence %s: runmanager has no record of '
                     'it, or has two and was not told which' % sequence_id
                 )
@@ -2766,7 +2768,7 @@ class RunManager(LabscriptApplication):
         if sequence_attrs is not None:
             joined = sequence_attrs['script_basename']
             if joined != os.path.splitext(os.path.basename(labscript_file))[0]:
-                raise Exception(
+                raise SequenceRefused(
                     'Cannot add shots to sequence %s: it is a sequence of %s, not '
                     'of %s' % (sequence_attrs['sequence_id'], joined, labscript_file)
                 )
@@ -3494,8 +3496,9 @@ class RunManager(LabscriptApplication):
 
     @inmain_decorator()
     def globals_changed(self):
-        """Called from either self, a GroupTab, or the RemoteServer to inform runmanager
-        that something about globals has changed, and that they need parsing again."""
+        """Called from either self, a GroupTab, or the RunmanagerServer to inform
+        runmanager that something about globals has changed, and that they need
+        parsing again."""
         self.ui.pushButton_engage.setEnabled(False)
         self.preparse_globals_required.put(None)
 
@@ -4821,7 +4824,7 @@ class RunManager(LabscriptApplication):
             return self.offer_shot()
         except Exception as exc:
             # Answered rather than raised, for the same reason an unreadable
-            # outcome is. RemoteServer.handler hands an exception back to
+            # outcome is. RunmanagerServer.handler hands an exception back to
             # BLACS, which cannot tell it from not having reached runmanager,
             # so it would hold the outcome it has already delivered here and
             # send it again for ever -- once a second, showing "Runmanager
@@ -4861,7 +4864,7 @@ class RunManager(LabscriptApplication):
         shot_id = str(fields.get('shot_id') or '')
         status = str(fields.get('status', ''))
         if not shot_id or status not in SHOT_OUTCOME_STATUSES:
-            # Refused rather than raised. RemoteServer.handler hands an
+            # Refused rather than raised. RunmanagerServer.handler hands an
             # exception back to BLACS, which cannot tell it apart from not
             # having reached runmanager at all -- and BLACS holds an outcome
             # until it knows runmanager took it, so it would send the same
@@ -5010,11 +5013,9 @@ class RunManager(LabscriptApplication):
         }
 
 
-class RemoteServer(ZMQServer):
+class RunmanagerServer(ZMQServer):
     def __init__(self):
-        port = app.exp_config.getint(
-            'ports', 'runmanager', fallback=runmanager.remote.DEFAULT_PORT
-        )
+        port = app.exp_config.getint('ports', 'runmanager', fallback=DEFAULT_PORT)
         ZMQServer.__init__(self, port=port)
 
     def _get_active_global_locations(self):
@@ -5390,18 +5391,8 @@ class RemoteServer(ZMQServer):
     def handle_queue_exchange(self, outcome=None, request_shot=True):
         return app.queue_exchange(outcome, bool(request_shot))
 
-    def handler(self, request_data):
-        cmd, args, kwargs = request_data
-        if cmd == 'hello':
-            return 'hello'
-        elif cmd == '__version__':
-            return runmanager.__version__
-        try:
-            return getattr(self, 'handle_' + cmd)(*args, **kwargs)
-        except Exception as e:
-            msg = traceback.format_exc()
-            msg = "Runmanager server returned an exception:\n" + msg
-            return e.__class__(msg)
+    def handle_get_version(self):
+        return runmanager.__version__
 
 
 if __name__ == "__main__":
@@ -5414,7 +5405,7 @@ if __name__ == "__main__":
     qapplication.setAttribute(QtCore.Qt.AA_DontShowIconsInMenus, False)
     app = RunManager()
     splash.update_text('Starting remote server')
-    remote_server = RemoteServer()
+    remote_server = RunmanagerServer()
     splash.hide()
 
     # Let the interpreter run every 500ms so it sees Ctrl-C interrupts:

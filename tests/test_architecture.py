@@ -25,11 +25,11 @@ import os
 import unittest
 
 import runmanager.blacs_status
-import runmanager.remote
+import runmanager.client
 # fixtures stubs the splash and does the guarded import of the
 # application, once, for every test module. Importing
 # runmanager.__main__ here instead would show the startup banner.
-from fixtures import RemoteServer
+from fixtures import RunmanagerServer
 from runmanager.analysis_submission import AnalysisSubmission
 
 # The commands of the superseded handoff: BLACS asking for a shot, saying it
@@ -75,12 +75,12 @@ class SupersededProtocolTests(unittest.TestCase):
     """One exchange, and no way back to the four calls it replaced."""
 
     def test_runmanagers_client_offers_no_superseded_command(self):
-        offered = requested_commands(runmanager.remote)
+        offered = requested_commands(runmanager.client)
         back = sorted(offered & set(SUPERSEDED_COMMANDS))
         if back:
             fail(
-                'runmanager.remote.Client can send the superseded shot-handoff '
-                'command(s) %s again.' % ', '.join(back),
+                'runmanager.client.RunmanagerClient can send the superseded '
+                'shot-handoff command(s) %s again.' % ', '.join(back),
                 'A shot is offered, reported on and requested through '
                 'queue_exchange, and only through it: the outcome is applied '
                 'before the next shot is chosen, which is what makes the '
@@ -89,18 +89,18 @@ class SupersededProtocolTests(unittest.TestCase):
             )
 
     def test_runmanagers_server_answers_no_superseded_command(self):
-        # RemoteServer.handler dispatches whatever handle_<command> it finds,
-        # so a handler is a command whether or not any client calls it.
+        # RunmanagerServer.handler dispatches whatever handle_<command> it
+        # finds, so a handler is a command whether or not any client calls it.
         back = sorted(
             command
             for command in SUPERSEDED_COMMANDS
-            if hasattr(RemoteServer, 'handle_' + command)
+            if hasattr(RunmanagerServer, 'handle_' + command)
         )
         if back:
             fail(
                 'runmanager\'s server answers the superseded shot-handoff '
                 'command(s) %s again.' % ', '.join(back),
-                'RemoteServer.handler dispatches any handle_<command> method, '
+                'RunmanagerServer.handler dispatches any handle_<command> method, '
                 'so adding one puts that command back on the wire even with '
                 'no client for it.',
             )

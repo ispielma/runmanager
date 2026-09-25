@@ -1,38 +1,41 @@
 DEFAULT_PORT = 42523
 
 from labscript_utils.ls_zprocess import ZMQClient
-from labscript_utils.labconfig import LabConfig
+
+# What an exchange tells BLACS about this runmanager: it offered a shot, its
+# queue is paused, or it has nothing to offer right now. Paused is told apart
+# from having nothing so that BLACS can show an operator why no queued work is
+# arriving; neither is a reason for BLACS to stop:
+PROVIDER_SHOT = 'shot'
+PROVIDER_PAUSED = 'paused'
+PROVIDER_NONE = 'none'
+# How BLACS may say a shot it was offered turned out. Every one but 'completed'
+# leaves the row at the head of the queue in red; see shot_finished() in
+# queueing.py:
+SHOT_OUTCOME_STATUSES = ('completed', 'aborted', 'failed', 'rejected')
+# What a row the queue would hand over is answered with while a row it will
+# not hand over sits in front of it. Only the head is ever offered, so such a
+# row is not going anywhere either, and the empty state it is in would read as
+# work about to be done.
+BLOCKED_SHOT_STATE = 'blocked'
+# What a shot id with no row in the queue is answered with. Not the empty
+# state, which a row waiting its turn has.
+UNKNOWN_SHOT_STATE = 'unknown'
 
 
-class Client(ZMQClient):
+class SequenceRefused(ValueError):
+    """Runmanager will not add shots to the sequence asked for."""
+
+
+class RunmanagerClient(ZMQClient):
     """A ZMQClient for communication with runmanager"""
 
-    def __init__(self, host=None, port=None, timeout=None):
-        ZMQClient.__init__(self)
-        if host is None:
-            host = LabConfig().get('servers', 'runmanager', fallback='localhost')
-        if port is None:
-            port = LabConfig().getint('ports', 'runmanager', fallback=DEFAULT_PORT)
-        if timeout is None:
-            timeout = LabConfig().getfloat(
-                'timeouts', 'communication_timeout', fallback=60
-            )
-        self.host = host
-        self.port = port
-        self.timeout = timeout
-
-    def request(self, command, *args, **kwargs):
-        return self.get(
-            self.port, self.host, data=[command, args, kwargs], timeout=self.timeout
-        )
-
-    def say_hello(self):
-        """Ping the runmanager server for a response"""
-        return self.request('hello')
+    server = 'runmanager'
+    default_port = DEFAULT_PORT
 
     def get_version(self):
         """Return the version of runmanager the server is running in"""
-        return self.request('__version__')
+        return self.request('get_version')
 
     def get_default_globals(self, raw=False):
         """Return all active globals' Default values.
@@ -255,7 +258,7 @@ class Client(ZMQClient):
         return self.request('queue_exchange', outcome, request_shot)
 
 
-_default_client = Client()
+_default_client = RunmanagerClient()
 
 say_hello = _default_client.say_hello
 get_version = _default_client.get_version

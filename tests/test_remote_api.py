@@ -4,10 +4,10 @@ BLACS's half of the protocol is guarded in ``test_architecture.py``. This is
 the rest of what runmanager's server offers: the commands a plugin or an
 optimizer sends.
 
-Each is exercised through ``RemoteServer.handler`` under the command name it
-travels as, rather than by calling the handler method directly. The name is
+Each is exercised through ``RunmanagerServer.handler`` under the command name
+it travels as, rather than by calling the handler method directly. The name is
 what crosses the wire -- a handler reachable only under a name no client sends
-is not reachable at all -- and the dispatch is runmanager's own.
+is not reachable at all.
 """
 import copy
 import datetime
@@ -23,11 +23,11 @@ from unittest import mock
 
 from labscript_utils.labconfig import LabConfig
 import runmanager
-import runmanager.remote
+from runmanager.client import RunmanagerClient, SequenceRefused
 # fixtures stubs the splash and does the guarded import of the
 # application, once, for every test module. Importing
 # runmanager.__main__ here instead would show the startup banner.
-from fixtures import RemoteServer, RunManager, main_module
+from fixtures import RunManager, RunmanagerServer, main_module
 from runmanager.queueing import (
     BLACS_STATES,
     BLOCKED_SHOT_STATE,
@@ -37,7 +37,7 @@ from runmanager.queueing import (
 )
 
 
-class LoopbackRemoteServer(RemoteServer):
+class LoopbackRunmanagerServer(RunmanagerServer):
     """Runmanager's own server, without binding a port.
 
     The real one reads a port out of the labconfig and binds a socket in its
@@ -78,13 +78,13 @@ class RemoteCommandTestCase(unittest.TestCase):
     def setUp(self):
         self.app = self.make_app()
         self.addCleanup(self.app.queue_manager.shutdown)
-        # RemoteServer's handlers reach the application through this module
+        # RunmanagerServer's handlers reach the application through this module
         # global, which the application assigns to itself on startup. Nothing
         # starts here, so the test puts it there and takes it away again.
         patcher = mock.patch.object(main_module, 'app', self.app)
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.server = LoopbackRemoteServer()
+        self.server = LoopbackRunmanagerServer()
 
     def request(self, command, *args, **kwargs):
         answer = self.server.handler([command, args, kwargs])
@@ -115,12 +115,12 @@ class ClientCommandNameTests(unittest.TestCase):
             with self.subTest(command=command):
                 sent = []
                 with mock.patch.object(
-                    runmanager.remote.Client,
+                    RunmanagerClient,
                     'request',
                     lambda self, name, *a, **kw: sent.append(name),
                 ):
-                    getattr(runmanager.remote.Client, command)(
-                        runmanager.remote.Client.__new__(runmanager.remote.Client),
+                    getattr(RunmanagerClient, command)(
+                        RunmanagerClient.__new__(RunmanagerClient),
                         *args,
                     )
 
@@ -532,29 +532,21 @@ class SubmitShotsTests(RemoteCommandTestCase):
         first = self.submit({'x': 1})
         self.app.labscript_file = os.path.join(self.directory, 'other.py')
 
-        with self.assertRaises(Exception) as raised:
+        with self.assertRaises(SequenceRefused):
             self.submit(
                 {'x': 2},
                 sequence=first[0]['sequence_id'],
                 sequence_index=first[0]['sequence_index'],
             )
 
-        self.assertIn(
-            'Cannot add shots to sequence %s: ' % first[0]['sequence_id'],
-            str(raised.exception),
-        )
         self.assertEqual(len(self.app.batches), 1, 'the refused batch was not queued')
 
     def test_a_sequence_runmanager_has_no_record_of_is_refused(self):
         # Refused rather than started afresh, which would split the session
-        # quietly in two; the caller stops on this message.
-        with self.assertRaises(Exception) as raised:
+        # quietly in two; the caller stops on this refusal.
+        with self.assertRaises(SequenceRefused):
             self.submit({'x': 1}, sequence='20260923T101112_experiment')
 
-        self.assertIn(
-            'Cannot add shots to sequence 20260923T101112_experiment: ',
-            str(raised.exception),
-        )
         self.assertEqual(self.app.batches, [], 'nothing reached the queue')
 
     def test_a_submission_that_raises_has_queued_nothing_at_all(self):
@@ -876,7 +868,7 @@ class ShotStatusTests(RemoteCommandTestCase):
         # what an answer can say, so a state runmanager answers with and the
         # docstring does not name is one the caller has to guess at --
         # including whether a shot in it is still coming.
-        docstring = runmanager.remote.Client.shot_status.__doc__
+        docstring = RunmanagerClient.shot_status.__doc__
         for state in (BLOCKED_SHOT_STATE, UNKNOWN_SHOT_STATE):
             with self.subTest(state=state):
                 self.assertIn(state, docstring)
