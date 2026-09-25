@@ -9,7 +9,8 @@ banner on the user's screen and leaves it there** — during a test run, during 
 REPL session, during anything.
 
 Prefer importing the leaf module: `runmanager/queueing.py`, `globals_file.py`
-and `analysis_submission.py` create no `QApplication` and need no stubbing.
+and `analysis_submission.py` build no client and no `QApplication` at import,
+and need no stubbing.
 
 When a test must borrow from `__main__` — to exercise a real method rather than
 a description of it — **import it from `tests/fixtures.py`, never from
