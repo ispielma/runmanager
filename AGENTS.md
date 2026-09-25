@@ -58,9 +58,8 @@ setting it at all; anything else suppresses it. A test of the dialog itself can
 instead assign to `labscript_utils.excepthook.NO_ERROR_DIALOG`, which the module
 reads where it uses it.
 
-There is no `QT_QPA_PLATFORM` here, unlike the repositories whose layout tests
-show a window. Nothing in this suite renders, so there is nothing to send
-offscreen.
+`tests/conftest.py` also sets `QT_QPA_PLATFORM` to offscreen, because the
+value-column tests show a group tab in order to click on it.
 
 ## The BLACS handover is a two-repo contract
 

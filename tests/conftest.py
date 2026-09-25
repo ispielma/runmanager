@@ -24,11 +24,11 @@ A test of the dialog can also set `labscript_utils.excepthook.NO_ERROR_DIALOG`
 directly. The module reads that name where it uses it, so assigning to it works
 at any point, whereas the environment is still consulted only once.
 
-Only this one variable. runmanager's tests build widgets but never show one, so
-there is nothing here to render and `QT_QPA_PLATFORM` would be noise -- the
-repositories that set it do so because their layout tests must show a window
-for Qt to lay it out at all.
+`QT_QPA_PLATFORM` is offscreen because the value-column tests show a group tab:
+Qt lays out only a shown widget, and a click lands only on laid-out geometry.
+Setting it yourself decides here too.
 """
 import os
 
 os.environ.setdefault('LABSCRIPT_NO_ERROR_DIALOG', '1')
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
