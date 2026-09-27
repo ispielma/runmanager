@@ -20,16 +20,14 @@ import types
 import unittest
 from unittest import mock
 
-from labscript_utils.labconfig import LabConfig
 from labscript_utils.ls_zprocess import ZMQServer
 from qtutils.qt.QtWidgets import QApplication, QCheckBox
-import tomli_w
 import runmanager
 from runmanager.client import RunmanagerClient, SequenceRefused
 # fixtures stubs the splash and does the guarded import of the
 # application, once, for every test module. Importing
 # runmanager.__main__ here instead would show the startup banner.
-from fixtures import RunManager, RunmanagerServer, main_module
+from fixtures import RunManager, RunmanagerServer, labconfig, main_module
 from runmanager.queueing import (
     BLACS_STATES,
     BLOCKED_SHOT_STATE,
@@ -105,22 +103,6 @@ class RemoteCommandTestCase(unittest.TestCase):
 
 
 _qapplication = None
-
-
-def labconfig(shot_storage, **runmanager_settings):
-    """A real labconfig storing shots here, with these [runmanager] settings.
-
-    Everything else it is asked for falls back to runmanager's default, as a
-    setting missing from a lab's own labconfig does.
-    """
-    path = os.path.join(shot_storage, 'labconfig.toml')
-    settings = {
-        'default': {'experiment_shot_storage': shot_storage},
-        'runmanager': runmanager_settings,
-    }
-    with open(path, 'wb') as f:
-        tomli_w.dump(settings, f)
-    return LabConfig(config_path=path)
 
 
 class AxesModel(object):

@@ -30,11 +30,15 @@ serve a real lyse and submit to it through a real ``AnalysisSubmission``.
 ``blacs/tests/test_plugins_compat.py`` is the worked example of this technique
 applied to a leaf module, loading it by path with its dependencies stubbed.
 """
+import os
 import sys
 import threading
 import time
 import types
 import warnings
+
+from labscript_utils.labconfig import LabConfig
+import tomli_w
 
 
 class Splash(object):
@@ -113,6 +117,7 @@ __all__ = [
     'RunmanagerServer',
     'Splash',
     'TreeView',
+    'labconfig',
     'main_module',
     'runviewer_main',
     'serve_lyse',
@@ -120,6 +125,22 @@ __all__ = [
     'submit_to_lyse',
     'wait_for',
 ]
+
+
+def labconfig(shot_storage, **runmanager_settings):
+    """A real labconfig storing shots here, with these [runmanager] settings.
+
+    Everything else it is asked for falls back to runmanager's default, as a
+    setting missing from a lab's own labconfig does.
+    """
+    path = os.path.join(shot_storage, 'labconfig.toml')
+    settings = {
+        'default': {'experiment_shot_storage': shot_storage},
+        'runmanager': runmanager_settings,
+    }
+    with open(path, 'wb') as f:
+        tomli_w.dump(settings, f)
+    return LabConfig(config_path=path)
 
 
 def wait_for(condition, timeout=10):
