@@ -24,10 +24,15 @@ Tests that need a ``QApplication`` build their own; ``test_queueing`` and
 ``test_blacs_status`` both already do. Nothing here creates one, and nothing
 here shows a widget.
 
+The tests that hand shots to lyse share the few functions at the end, which
+serve a real lyse and submit to it through a real ``AnalysisSubmission``.
+
 ``blacs/tests/test_plugins_compat.py`` is the worked example of this technique
 applied to a leaf module, loading it by path with its dependencies stubbed.
 """
 import sys
+import threading
+import time
 import types
 import warnings
 
@@ -91,6 +96,10 @@ with warnings.catch_warnings():
     # runviewer's application, whose server the runviewer tests serve, shows a
     # splash at import too:
     import runviewer.__main__ as runviewer_main  # noqa: E402
+    from lyse.client import LyseClient  # noqa: E402
+    from lyse.communication import LyseServer  # noqa: E402
+    from qtutils.qt.QtWidgets import QApplication  # noqa: E402
+    from runmanager.analysis_submission import AnalysisSubmission  # noqa: E402
 
 # The module itself, for the tests that patch names in its namespace rather
 # than borrow a method from it. Exported for the same reason the classes are:
@@ -106,4 +115,46 @@ __all__ = [
     'TreeView',
     'main_module',
     'runviewer_main',
+    'serve_lyse',
+    'stop_submission',
+    'submit_to_lyse',
+    'wait_for',
 ]
+
+
+def wait_for(condition, timeout=10):
+    """Process events until condition() is true, failing if it is not in time.
+
+    Work on other threads that hops to the main thread, as AnalysisSubmission's
+    loop and runmanager's server do, gets on only while this runs.
+    """
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            raise AssertionError('Timed out waiting for %s' % condition)
+        QApplication.processEvents()
+        time.sleep(0.01)
+
+
+def serve_lyse(testcase, lyse_app, port=None):
+    """A real LyseServer for lyse_app, a stand-in for the window lyse builds."""
+    server = LyseServer(lyse_app, port=port, bind_address='tcp://127.0.0.1')
+    testcase.addCleanup(server.shutdown)
+    return server
+
+
+def submit_to_lyse(testcase, port):
+    """A real AnalysisSubmission, sending shots to the lyse on this port."""
+    submission = AnalysisSubmission()
+    testcase.addCleanup(stop_submission, submission)
+    submission.lyse = LyseClient(host='127.0.0.1', port=port, timeout=1)
+    submission.send_to_server = True
+    return submission
+
+
+def stop_submission(submission):
+    # shutdown joins the submission thread, which may be waiting on the main
+    # thread, so it is joined from another while events are processed:
+    stopping = threading.Thread(target=submission.shutdown)
+    stopping.start()
+    wait_for(lambda: not stopping.is_alive())

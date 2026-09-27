@@ -19,17 +19,13 @@ because lyse's startup builds the whole window.
 import queue
 import socket
 import tempfile
-import threading
-import time
 import types
 import unittest
 from pathlib import Path
 
-from lyse.client import LyseClient
-from lyse.communication import LyseServer
 from qtutils.qt import QtWidgets
 
-from runmanager.analysis_submission import AnalysisSubmission
+from fixtures import serve_lyse, submit_to_lyse, wait_for
 
 
 class RefusingQueue:
@@ -56,52 +52,27 @@ class AnalysisSubmissionTests(unittest.TestCase):
 
     def serve(self, incoming_queue, port=None):
         self.lyse_app.filebox.incoming_queue = incoming_queue
-        server = LyseServer(self.lyse_app, port=port, bind_address='tcp://127.0.0.1')
-        self.addCleanup(server.shutdown)
-        return server
-
-    def submission(self, port):
-        submission = AnalysisSubmission()
-        self.addCleanup(self.stop, submission)
-        submission.lyse = LyseClient(host='127.0.0.1', port=port, timeout=1)
-        submission.send_to_server = True
-        return submission
-
-    def stop(self, submission):
-        # shutdown joins the submission thread, which may be waiting on the main
-        # thread, so it is joined from another while events are processed:
-        stopping = threading.Thread(target=submission.shutdown)
-        stopping.start()
-        self.wait_for(lambda: not stopping.is_alive())
-
-    def wait_for(self, condition):
-        # The submission thread sets its status in the main thread, so events
-        # are processed while waiting:
-        deadline = time.monotonic() + 10
-        while not condition():
-            self.assertLess(time.monotonic(), deadline)
-            QtWidgets.QApplication.processEvents()
-            time.sleep(0.01)
+        return serve_lyse(self, self.lyse_app, port)
 
     def test_a_submitted_shot_reaches_lyse_as_its_local_path(self):
         incoming = queue.Queue()
-        submission = self.submission(self.serve(incoming).port)
+        submission = submit_to_lyse(self, self.serve(incoming).port)
         submission.notify_shot_complete(self.path)
-        self.wait_for(lambda: not incoming.empty())
+        wait_for(lambda: not incoming.empty())
 
         self.assertEqual(incoming.get(), self.path)
 
     def test_a_shot_lyse_refuses_is_dropped_not_retried(self):
         refusing = RefusingQueue()
-        submission = self.submission(self.serve(refusing).port)
+        submission = submit_to_lyse(self, self.serve(refusing).port)
         submission.notify_shot_complete(self.path)
-        self.wait_for(lambda: refusing.offered)
+        wait_for(lambda: refusing.offered)
         # Once lyse takes shots again, one still waiting would be sent first:
         incoming = queue.Queue()
         self.lyse_app.filebox.incoming_queue = incoming
         later = str(Path(tempfile.gettempdir(), 'later.h5'))
         submission.notify_shot_complete(later)
-        self.wait_for(lambda: not incoming.empty())
+        wait_for(lambda: not incoming.empty())
 
         self.assertEqual(incoming.get(), later)
         self.assertEqual(refusing.offered, [self.path])
@@ -110,12 +81,12 @@ class AnalysisSubmissionTests(unittest.TestCase):
         with socket.socket() as probe:
             probe.bind(('127.0.0.1', 0))
             port = probe.getsockname()[1]
-        submission = self.submission(port)
+        submission = submit_to_lyse(self, port)
         submission.notify_shot_complete(self.path)
-        self.wait_for(lambda: submission.server_online == 'offline')
+        wait_for(lambda: submission.server_online == 'offline')
         incoming = queue.Queue()
         self.serve(incoming, port)
         submission.check_retry()
-        self.wait_for(lambda: not incoming.empty())
+        wait_for(lambda: not incoming.empty())
 
         self.assertEqual(incoming.get(), self.path)
