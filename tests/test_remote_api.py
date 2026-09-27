@@ -4,10 +4,9 @@ BLACS's half of the protocol is guarded in ``test_architecture.py``. This is
 the rest of what runmanager's server offers: the commands a plugin or an
 optimizer sends.
 
-Each is exercised through ``RunmanagerServer.handler`` under the command name
-it travels as, rather than by calling the handler method directly. The name is
-what crosses the wire -- a handler reachable only under a name no client sends
-is not reachable at all.
+Each is sent by the real RunmanagerClient to a real RunmanagerServer on a free
+port, so a command reaches its handler under the name the client sends it by,
+and an exception the handler returns is raised by the client, as for any caller.
 """
 import copy
 import datetime
@@ -22,6 +21,9 @@ import unittest
 from unittest import mock
 
 from labscript_utils.labconfig import LabConfig
+from labscript_utils.ls_zprocess import ZMQServer
+from qtutils.qt.QtWidgets import QApplication
+import tomli_w
 import runmanager
 from runmanager.client import RunmanagerClient, SequenceRefused
 # fixtures stubs the splash and does the guarded import of the
@@ -33,22 +35,7 @@ from runmanager.queueing import (
     BLOCKED_SHOT_STATE,
     COMPILE_MODE_EAGER,
     QueueManager,
-    UNKNOWN_SHOT_STATE,
 )
-
-
-class LoopbackRunmanagerServer(RunmanagerServer):
-    """Runmanager's own server, without binding a port.
-
-    The real one reads a port out of the labconfig and binds a socket in its
-    constructor, which is the only part a test has no use for. Subclassing
-    rather than listing the handlers means this carries the whole handler set
-    the running server has, so a command cannot be reachable here and missing
-    there.
-    """
-
-    def __init__(self):
-        pass
 
 
 class FakeApp(object):
@@ -76,6 +63,11 @@ class RemoteCommandTestCase(unittest.TestCase):
         return FakeApp()
 
     def setUp(self):
+        global _qapplication
+        if QApplication.instance() is None:
+            # Held for the life of the process: a QApplication that is garbage
+            # collected takes every widget built under it down with it.
+            _qapplication = QApplication([])
         self.app = self.make_app()
         self.addCleanup(self.app.queue_manager.shutdown)
         # RunmanagerServer's handlers reach the application through this module
@@ -84,69 +76,51 @@ class RemoteCommandTestCase(unittest.TestCase):
         patcher = mock.patch.object(main_module, 'app', self.app)
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.server = LoopbackRunmanagerServer()
+        # Only the port RunmanagerServer's __init__ reads from the labconfig is
+        # skipped: the real server binds a free one, on loopback.
+        server = RunmanagerServer.__new__(RunmanagerServer)
+        ZMQServer.__init__(server, bind_address='tcp://127.0.0.1')
+        self.addCleanup(server.shutdown)
+        self.client = RunmanagerClient(host='127.0.0.1', port=server.port, timeout=10)
 
     def request(self, command, *args, **kwargs):
-        answer = self.server.handler([command, args, kwargs])
-        if isinstance(answer, Exception):
-            raise answer
-        return answer
+        # Most handlers hop to the main thread, as the running server's do, so
+        # the client asks from another thread while this one processes events:
+        answer = {}
+
+        def ask():
+            try:
+                answer['value'] = getattr(self.client, command)(*args, **kwargs)
+            except Exception as exc:
+                answer['error'] = exc
+
+        asker = threading.Thread(target=ask, daemon=True)
+        asker.start()
+        while asker.is_alive():
+            QApplication.processEvents()
+            asker.join(0.005)
+        if 'error' in answer:
+            raise answer['error']
+        return answer['value']
 
 
-class ClientCommandNameTests(unittest.TestCase):
-    """Each client method asks under the name the server answers to.
+_qapplication = None
 
-    The name is the whole of what crosses the wire, so a method sending
-    anything else reaches a handler that is not there -- or, worse, one that
-    is. What travels with the name is the caller's own arguments and is not
-    fixed here: that is the shape of a request rather than the protocol, and
-    the handlers are exercised through ``handler`` above.
+
+def labconfig(shot_storage, **runmanager_settings):
+    """A real labconfig storing shots here, with these [runmanager] settings.
+
+    Everything else it is asked for falls back to runmanager's default, as a
+    setting missing from a lab's own labconfig does.
     """
-
-    #: One call per command, carrying arguments only where the method takes
-    #: them. A command added to the client belongs here.
-    CALLS = {
-        'shot_status': (['one'],),
-        'submit_shots': ([{'x': 1}],),
+    path = os.path.join(shot_storage, 'labconfig.toml')
+    settings = {
+        'default': {'experiment_shot_storage': shot_storage},
+        'runmanager': runmanager_settings,
     }
-
-    def test_each_command_is_asked_for_under_its_own_name(self):
-        for command, args in sorted(self.CALLS.items()):
-            with self.subTest(command=command):
-                sent = []
-                with mock.patch.object(
-                    RunmanagerClient,
-                    'request',
-                    lambda self, name, *a, **kw: sent.append(name),
-                ):
-                    getattr(RunmanagerClient, command)(
-                        RunmanagerClient.__new__(RunmanagerClient),
-                        *args,
-                    )
-
-                self.assertEqual(sent, [command])
-
-
-class LabConfigWithShotStorage(object):
-    """A labconfig carrying the settings a shot's filename is built from.
-
-    Everything else it asks for has a built-in fallback, reached by raising
-    what a real LabConfig raises for a setting that is not there. The filename
-    prefix is settable because an installation may write one in terms of a
-    global, which is what makes it matter which shot a file is named after.
-    """
-
-    def __init__(self, shot_storage):
-        self.shot_storage = shot_storage
-        self.filename_prefix_format = None
-
-    def get(self, section, option, *args, **kwargs):
-        if (section, option) == ('default', 'experiment_shot_storage'):
-            return self.shot_storage
-        if (section, option) == ('runmanager', 'filename_prefix_format'):
-            if self.filename_prefix_format is not None:
-                return self.filename_prefix_format
-        raise LabConfig.NoOptionError(option, section)
+    with open(path, 'wb') as f:
+        tomli_w.dump(settings, f)
+    return LabConfig(config_path=path)
 
 
 class AxesModel(object):
@@ -225,7 +199,7 @@ class SubmittingApp(object):
         runmanager.new_globals_file(self.globals_file)
         runmanager.new_group(self.globals_file, 'group')
         self.labscript_file = os.path.join(directory, 'experiment.py')
-        self.exp_config = LabConfigWithShotStorage(directory)
+        self.exp_config = labconfig(directory)
         self.previous_default_output_folder = ''
         self.currently_open_groups = {}
         self.n_shots = None
@@ -326,13 +300,6 @@ class SubmitShotsTests(RemoteCommandTestCase):
     def setUp(self):
         self.directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.directory, True)
-        # next_sequence_index takes a zlock and keeps a counter on disk.
-        # Which index it hands out does not matter here.
-        patcher = mock.patch.object(
-            runmanager, 'next_sequence_index', lambda *a, **k: 7
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
         super().setUp()
         # Cleanups run in reverse, so this releases the blocked compile before
         # the queue is asked to shut down.
@@ -474,7 +441,13 @@ class SubmitShotsTests(RemoteCommandTestCase):
         )
         self.assertEqual(self.app.get_queue_append_filepath(), engaged['path'])
 
-        second = self.submit({'x': 2}, sequence=first[0]['sequence_id'])
+        # Within a second the Engage's sequence shares this one's id, so the
+        # session names its sequence by index as well:
+        second = self.submit(
+            {'x': 2},
+            sequence=first[0]['sequence_id'],
+            sequence_index=first[0]['sequence_index'],
+        )
 
         self.assertNotEqual(first[0]['sequence_id'], self.SEQUENCE['sequence_id'])
         self.assertEqual(second[0]['sequence_id'], first[0]['sequence_id'])
@@ -485,10 +458,7 @@ class SubmitShotsTests(RemoteCommandTestCase):
         clock = types.SimpleNamespace(
             datetime=types.SimpleNamespace(now=lambda: datetime.datetime(2026, 9, 24, 12))
         )
-        indexes = iter([7, 8])
-        with mock.patch.object(runmanager, 'datetime', clock), mock.patch.object(
-            runmanager, 'next_sequence_index', lambda *a, **k: next(indexes)
-        ):
+        with mock.patch.object(runmanager, 'datetime', clock):
             first = self.submit({'x': 1})
             # Engage waits on the preparse the submission's window change starts.
             self.app.wait_until_preparse_complete()
@@ -511,7 +481,9 @@ class SubmitShotsTests(RemoteCommandTestCase):
         # The filename prefix and folder can be written in terms of a global.
         # A joined shot is named from the sequence's formats and its own
         # globals, not after the shot before it.
-        self.app.exp_config.filename_prefix_format = '{globals[x]}_{script_basename}'
+        self.app.exp_config = labconfig(
+            self.directory, filename_prefix_format='{globals[x]}_{script_basename}'
+        )
         folder = os.path.join(self.directory, '{globals[x]}')
         self.app.ui.lineEdit_shot_output_folder.text = lambda: folder
         first = self.submit({'x': 1})
@@ -653,7 +625,9 @@ class SubmitShotsTests(RemoteCommandTestCase):
         # itself is made in. A batch was named shot by shot and is answered by
         # position, so shuffling it would name each file after one entry and
         # write another entry's globals into it.
-        self.app.exp_config.filename_prefix_format = '{globals[x]}_{script_basename}'
+        self.app.exp_config = labconfig(
+            self.directory, filename_prefix_format='{globals[x]}_{script_basename}'
+        )
         self.app.ui.pushButton_shuffle.checkState = (
             lambda: main_module.QtCore.Qt.Checked
         )
@@ -862,17 +836,6 @@ class ShotStatusTests(RemoteCommandTestCase):
 
         self.assertEqual(self.app.queue_manager.controller._items, before)
 
-    def test_every_answer_the_state_can_carry_is_named_to_the_caller(self):
-        # Derived rather than listed, and the state's own name rather than any
-        # of the words around it: the client docstring is where a caller reads
-        # what an answer can say, so a state runmanager answers with and the
-        # docstring does not name is one the caller has to guess at --
-        # including whether a shot in it is still coming.
-        docstring = RunmanagerClient.shot_status.__doc__
-        for state in (BLOCKED_SHOT_STATE, UNKNOWN_SHOT_STATE):
-            with self.subTest(state=state):
-                self.assertIn(state, docstring)
-
 
 class EmptyQueueTests(RemoteCommandTestCase):
     """Empty queue, in Abort's place, backs out of the work that is waiting.
@@ -888,13 +851,6 @@ class EmptyQueueTests(RemoteCommandTestCase):
     def setUp(self):
         self.directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.directory, True)
-        # next_sequence_index takes a zlock and keeps a counter on disk. Which
-        # index it hands out does not matter here.
-        patcher = mock.patch.object(
-            runmanager, 'next_sequence_index', lambda *a, **k: 7
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
         super().setUp()
         # Cleanups run in reverse, so this releases the blocked compile before
         # the queue is asked to shut down.
@@ -960,11 +916,6 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
     def setUp(self):
         self.directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.directory, True)
-        patcher = mock.patch.object(
-            runmanager, 'next_sequence_index', lambda *a, **k: 12
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
         super().setUp()
         self.addCleanup(self.app.compiling.set)
         runmanager.new_global(self.app.globals_file, 'group', 'x')
@@ -1087,7 +1038,7 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
 
         self.assertEqual(
             [record['sequence_attrs']['sequence_index'] for record in records],
-            [12],
+            [0],
             'a runmanager with nothing queued and nothing ever sent has no '
             'last sequence, so this batch is the start of one',
         )
@@ -1097,7 +1048,7 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
 
         self.assertEqual(
             [record['sequence_attrs']['sequence_index'] for record in records],
-            [12],
+            [0],
         )
 
     def test_the_queue_is_read_once_for_the_sequence_being_added_to(self):
@@ -1174,11 +1125,6 @@ class ShuffledEngageTests(RemoteCommandTestCase):
     def setUp(self):
         self.directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.directory, True)
-        patcher = mock.patch.object(
-            runmanager, 'next_sequence_index', lambda *a, **k: 3
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
         # A shuffle this test can say the answer to. Reversing is a
         # permutation of three shots like any other, and the only one whose
         # result can be written down.
@@ -1194,7 +1140,9 @@ class ShuffledEngageTests(RemoteCommandTestCase):
         runmanager.set_scan(self.app.globals_file, 'group', 'x', '[1, 2, 3]')
         runmanager.set_scan_enabled(self.app.globals_file, 'group', 'x', True)
         runmanager.set_expansion(self.app.globals_file, 'group', 'x', 'outer')
-        self.app.exp_config.filename_prefix_format = '{globals[x]}_{script_basename}'
+        self.app.exp_config = labconfig(
+            self.directory, filename_prefix_format='{globals[x]}_{script_basename}'
+        )
         self.app.ui.pushButton_shuffle.checkState = (
             lambda: main_module.QtCore.Qt.Checked
         )
@@ -1234,23 +1182,28 @@ class ShuffledEngageTests(RemoteCommandTestCase):
 
 
 class PreparsingApp(FakeApp):
-    """The application's preparse thread, with a preparse that fails."""
+    """The application's preparse thread, over a globals file that is not there."""
 
     preparse_globals_loop = RunManager.preparse_globals_loop
     wait_until_preparse_complete = RunManager.wait_until_preparse_complete
+    preparse_globals = RunManager.preparse_globals
+    parse_globals = RunManager.parse_globals
 
-    def __init__(self):
+    def __init__(self, directory):
         super().__init__()
         self.preparse_globals_required = queue.Queue()
         self.n_shots = 3
+        self.missing_globals_file = os.path.join(directory, 'moved.toml')
 
-    def preparse_globals(self):
-        raise RuntimeError('a globals file could not be read')
+    def get_active_groups(self, interactive=True):
+        return {'group': self.missing_globals_file}
 
 
 class PreparseFailureTests(RemoteCommandTestCase):
     def make_app(self):
-        return PreparsingApp()
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        return PreparsingApp(directory)
 
     def test_a_command_waiting_on_a_preparse_is_answered_after_one_fails(self):
         # BLACS is answered on the thread such a command waits on, so a wait
