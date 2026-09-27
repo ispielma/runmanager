@@ -1,8 +1,8 @@
-"""What runmanager answers to a remote caller that is not BLACS.
+"""What runmanager's server answers a remote caller.
 
-BLACS's half of the protocol is guarded in ``test_architecture.py``. This is
-the rest of what runmanager's server offers: the commands a plugin or an
-optimizer sends.
+These are the commands a plugin or an optimizer sends, and the refusal of the
+BLACS commands that queue_exchange replaced. BLACS's side of the handover is
+tested in blacs.
 
 Each is sent by the real RunmanagerClient to a real RunmanagerServer on a free
 port, so a command reaches its handler under the name the client sends it by,
@@ -22,7 +22,7 @@ from unittest import mock
 
 from labscript_utils.labconfig import LabConfig
 from labscript_utils.ls_zprocess import ZMQServer
-from qtutils.qt.QtWidgets import QApplication
+from qtutils.qt.QtWidgets import QApplication, QCheckBox
 import tomli_w
 import runmanager
 from runmanager.client import RunmanagerClient, SequenceRefused
@@ -1179,6 +1179,46 @@ class ShuffledEngageTests(RemoteCommandTestCase):
             [('3', '3'), ('2', '2'), ('1', '1')],
             'each file is named for the globals that are compiled into it',
         )
+
+
+class DestinationTests(RemoteCommandTestCase):
+    """The BLACS destination checkbox, which a caller reads and sets remotely.
+
+    The commands keep the checkbox's old name, run_shots.
+    """
+
+    def make_app(self):
+        app = FakeApp()
+        app.ui = types.SimpleNamespace(checkBox_run_shots=QCheckBox())
+        return app
+
+    def test_a_caller_decides_whether_engaged_shots_go_to_blacs(self):
+        self.app.ui.checkBox_run_shots.setChecked(True)
+        self.request('set_run_shots', False)
+
+        self.assertFalse(self.app.ui.checkBox_run_shots.isChecked())
+        self.assertFalse(self.request('get_run_shots'))
+
+
+class SupersededCommandTests(RemoteCommandTestCase):
+    """The four commands queue_exchange replaced stay gone from the server.
+
+    One exchange applies an outcome before choosing the next shot, which is
+    what makes the offer, the reclaim and the retry sound; a handler for any
+    of these would be a second route around that ordering.
+    """
+
+    def test_each_superseded_command_is_refused(self):
+        for command in (
+            'queue_request_next',
+            'shot_accepted',
+            'shot_rejected',
+            'notify_shot_complete',
+        ):
+            # Sent under its own name, since the client has no method for it,
+            # and answered without the main thread, since no handler has it:
+            with self.subTest(command=command), self.assertRaises(AttributeError):
+                self.client.request(command)
 
 
 class PreparsingApp(FakeApp):

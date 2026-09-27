@@ -24,7 +24,6 @@ from qtutils.qt.QtWidgets import (
     QPushButton,
 )
 import runmanager
-import runmanager.client
 # FingerTabWidget is runmanager's own, defined in __main__ beside RunManager --
 # not the labscript_utils widget of the same name. Loading main.ui with the
 # wrong one gives a tab widget whose tab bar the queue tab cannot configure.
@@ -34,7 +33,6 @@ import runmanager.client
 from fixtures import (
     FingerTabWidget,
     RunManager,
-    RunmanagerServer,
     TreeView,
 )
 from runmanager.analysis_submission import art_dir
@@ -408,15 +406,6 @@ class DestinationControlTests(unittest.TestCase):
             (art_dir / 'blacs_22x22.png').is_file(),
             'the logo it sets into that label has to be there to set',
         )
-
-    def test_the_destination_control_keeps_the_name_other_programs_use(self):
-        # Only the label changed. What it means, what it is called, and the
-        # remote methods that read and set it are a public interface.
-        self.checkbox()
-        self.assertTrue(hasattr(runmanager.client.RunmanagerClient, 'get_run_shots'))
-        self.assertTrue(hasattr(runmanager.client.RunmanagerClient, 'set_run_shots'))
-        self.assertTrue(hasattr(RunmanagerServer, 'handle_get_run_shots'))
-        self.assertTrue(hasattr(RunmanagerServer, 'handle_set_run_shots'))
 
     def test_the_tooltip_says_what_the_checkbox_is_not(self):
         tooltip = self.checkbox().toolTip()
