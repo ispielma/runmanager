@@ -5688,7 +5688,7 @@ if __name__ == "__main__":
     qapplication.setAttribute(QtCore.Qt.AA_DontShowIconsInMenus, False)
     app = RunManager()
     splash.update_text('Starting remote server')
-    remote_server = RunmanagerServer()
+    runmanager_server = RunmanagerServer()
     splash.hide()
 
     # Let the interpreter run every 500ms so it sees Ctrl-C interrupts:
@@ -5699,4 +5699,4 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, lambda *args: qapplication.exit())
 
     qapplication.exec()
-    remote_server.shutdown()
+    runmanager_server.shutdown()
