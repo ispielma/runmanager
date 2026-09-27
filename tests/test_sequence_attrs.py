@@ -15,34 +15,13 @@ import types
 import unittest
 from unittest import mock
 
-from labscript_utils.labconfig import LabConfig
 # h5_lock must be imported before h5py is, by anything in the process, and it
 # is what runmanager imports h5py through. Naming it here rather than relying
 # on runmanager below, so that this file can be run on its own.
 import labscript_utils.h5_lock  # noqa: F401
 import h5py
 import runmanager
-from fixtures import RunManager
-
-
-class FakeConfig(object):
-    """A labconfig carrying only the setting new_sequence_details must have.
-
-    Everything else it asks for has a built-in fallback, reached by raising
-    what a real LabConfig raises for a setting that is not there.
-    """
-
-    def __init__(self, shot_storage, filename_prefix_format=None):
-        self.shot_storage = shot_storage
-        self.filename_prefix_format = filename_prefix_format
-
-    def get(self, section, option, *args, **kwargs):
-        if (section, option) == ('default', 'experiment_shot_storage'):
-            return self.shot_storage
-        if (section, option) == ('runmanager', 'filename_prefix_format'):
-            if self.filename_prefix_format is not None:
-                return self.filename_prefix_format
-        raise LabConfig.NoOptionError(option, section)
+from fixtures import RunManager, labconfig
 
 
 def sequence_attrs(**overrides):
@@ -62,14 +41,10 @@ class SequenceAttrsTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.directory, True)
 
     def test_a_new_sequence_is_described_by_exactly_the_named_attributes(self):
-        # next_sequence_index takes a zlock and keeps a counter on disk. Which
-        # index it hands out does not matter here; that it is one of the
-        # attributes describing the sequence does.
-        with mock.patch.object(runmanager, 'next_sequence_index', lambda *a, **k: 7):
-            attrs, _, _ = runmanager.new_sequence_details(
-                os.path.join(self.directory, 'experiment.py'),
-                config=FakeConfig(self.directory),
-            )
+        attrs, _, _ = runmanager.new_sequence_details(
+            os.path.join(self.directory, 'experiment.py'),
+            config=labconfig(self.directory),
+        )
 
         self.assertEqual(
             set(attrs),
@@ -121,14 +96,6 @@ class DefaultSequenceTests(unittest.TestCase):
         self.globals_file = os.path.join(self.directory, 'globals.toml')
         runmanager.new_globals_file(self.globals_file)
         runmanager.new_group(self.globals_file, 'group')
-        self.claims = []
-        patcher = mock.patch.object(
-            runmanager,
-            'next_sequence_index',
-            lambda *args, **kwargs: self.claims.append(args) or 7,
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
     def at(self, hour):
         """Runmanager's clock, reading this hour of 23 September 2026."""
@@ -142,16 +109,21 @@ class DefaultSequenceTests(unittest.TestCase):
     def test_every_default_shot_of_a_day_is_in_one_sequence(self):
         with self.at(8):
             morning, _, _ = runmanager.new_sequence_details(
-                self.labscript_file, config=FakeConfig(self.directory), default=True
+                self.labscript_file, config=labconfig(self.directory), default=True
             )
         with self.at(21):
             evening, _, _ = runmanager.new_sequence_details(
-                self.labscript_file, config=FakeConfig(self.directory), default=True
+                self.labscript_file, config=labconfig(self.directory), default=True
             )
 
         self.assertEqual(morning['sequence_id'], evening['sequence_id'])
         self.assertEqual(morning['sequence_index'], -1)
-        self.assertEqual(self.claims, [], 'and no sequence index was claimed')
+        next_index = runmanager.next_sequence_index(
+            os.path.join(self.directory, 'experiment'),
+            datetime.datetime(2026, 9, 23),
+            increment=False,
+        )
+        self.assertEqual(next_index, 0, 'and no sequence index was claimed')
 
     def default_shot(self, app, hour=8):
         """The queue row of one default shot this app produces at this hour."""
@@ -162,11 +134,11 @@ class DefaultSequenceTests(unittest.TestCase):
         self.assertIsNotNone(app._default_shot_ready, app.said)
         return app._default_shot_ready
 
-    def default_shot_app(self, filename_prefix_format=None):
+    def default_shot_app(self, **runmanager_settings):
         """A runmanager just started, over the globals file in the directory."""
         said = []
         return types.SimpleNamespace(
-            exp_config=FakeConfig(self.directory, filename_prefix_format),
+            exp_config=labconfig(self.directory, **runmanager_settings),
             sequences={},
             said=said,
             _default_shot_lock=threading.Lock(),
@@ -194,12 +166,13 @@ class DefaultSequenceTests(unittest.TestCase):
         # their number, and a restart forgets the count; the run number is
         # still the one sequence's, and the queue row carries it.
         runmanager.new_global(self.globals_file, 'group', 'x')
+        prefix = '{globals[x]}_{script_basename}'
         rows = []
-        app = self.default_shot_app('{globals[x]}_{script_basename}')
+        app = self.default_shot_app(filename_prefix_format=prefix)
         for x, restart in (('1', False), ('2', False), ('1', True)):
             runmanager.set_value(self.globals_file, 'group', 'x', x)
             if restart:
-                app = self.default_shot_app('{globals[x]}_{script_basename}')
+                app = self.default_shot_app(filename_prefix_format=prefix)
             rows.append(self.default_shot(app))
 
         self.assertEqual([row['run_no'] for row in rows], [0, 1, 2])
