@@ -308,53 +308,38 @@ class MonitorShutdownTests(unittest.TestCase):
         for status in queued_for_the_gui:
             app.update_blacs_status(status)
 
-        self.assertEqual(
-            app.ui.blacs_status_indicator.pixmaps,
-            [],
+        self.assertTrue(
+            app.ui.blacs_status_indicator.pixmap().isNull(),
             'setPixmap on a QLabel already being torn down raises, and the '
             'operator meets it as an error dialog on the way out',
         )
-        self.assertEqual(app.queue_blacs_activity_label.text, '')
+        self.assertEqual(app.queue_blacs_activity_label.text(), '')
 
 
-class FakeLabel(object):
-    def __init__(self):
-        self.tooltip = ''
-        self.text = ''
-        self.pixmaps = []
-
-    def setPixmap(self, pixmap):
-        self.pixmaps.append(pixmap)
-
-    def setText(self, text):
-        self.text = str(text)
-
-    def setToolTip(self, tooltip):
-        self.tooltip = str(tooltip)
+_qapplication = None
 
 
-class FakeCheckBox(object):
-    def __init__(self, checked):
-        self.checked = checked
-
-    def isChecked(self):
-        return self.checked
-
-
-class FakeUi(object):
-    def __init__(self, run_shots_checked):
-        self.blacs_status_indicator = FakeLabel()
-        self.checkBox_run_shots = FakeCheckBox(run_shots_checked)
+def hold_qapplication():
+    global _qapplication
+    if QApplication.instance() is None:
+        # Held for the life of the process: a QApplication that is garbage
+        # collected takes every widget built under it down with it.
+        _qapplication = QApplication([])
 
 
 class FakeRunManager(object):
-    """Runmanager's two status surfaces, over only what they use."""
+    """Runmanager's two status surfaces, on real widgets, without the window."""
 
     update_blacs_status = RunManager.update_blacs_status
 
     def __init__(self, run_shots_checked=True, host='localhost'):
-        self.ui = FakeUi(run_shots_checked)
-        self.queue_blacs_activity_label = FakeLabel()
+        hold_qapplication()
+        run_shots = QCheckBox()
+        run_shots.setChecked(run_shots_checked)
+        self.ui = types.SimpleNamespace(
+            blacs_status_indicator=QLabel(), checkBox_run_shots=run_shots
+        )
+        self.queue_blacs_activity_label = QLabel()
         # A real monitor, because the update asks it two things: who it is
         # talking to, and whether it has been stopped.
         self.blacs_status_monitor = BlacsStatusMonitor(
@@ -362,16 +347,9 @@ class FakeRunManager(object):
         )
 
 
-_qapplication = None
-
-
 def load_main_ui():
     """Load main.ui the way RunManager.__init__ does."""
-    global _qapplication
-    if QApplication.instance() is None:
-        # Held for the life of the process: a QApplication that is garbage
-        # collected takes every widget built under it down with it.
-        _qapplication = QApplication([])
+    hold_qapplication()
     loader = UiLoader()
     loader.registerCustomWidget(FingerTabWidget)
     loader.registerCustomWidget(TreeView)
@@ -485,12 +463,13 @@ class IndicatorUpdateTests(unittest.TestCase):
         for checked in [True, False]:
             app = FakeRunManager(run_shots_checked=checked)
             app.update_blacs_status(status)
-            self.assertTrue(
-                app.ui.blacs_status_indicator.pixmaps, 'the light is always set'
+            self.assertFalse(
+                app.ui.blacs_status_indicator.pixmap().isNull(),
+                'the light is always set',
             )
             shown[checked] = (
-                app.ui.blacs_status_indicator.tooltip,
-                app.queue_blacs_activity_label.text,
+                app.ui.blacs_status_indicator.toolTip(),
+                app.queue_blacs_activity_label.text(),
             )
 
         self.assertIn('shot_a.h5', shown[False][1])
@@ -505,15 +484,15 @@ class IndicatorUpdateTests(unittest.TestCase):
             answered(requesting_shots=False, error='Device(s) in error state')
         )
 
-        self.assertIn('responding', app.ui.blacs_status_indicator.tooltip)
-        self.assertNotIn('error state', app.ui.blacs_status_indicator.tooltip)
-        self.assertIn('Device(s) in error state', app.queue_blacs_activity_label.text)
+        self.assertIn('responding', app.ui.blacs_status_indicator.toolTip())
+        self.assertNotIn('error state', app.ui.blacs_status_indicator.toolTip())
+        self.assertIn('Device(s) in error state', app.queue_blacs_activity_label.text())
 
     def test_both_surfaces_say_they_are_checking_before_blacs_answers(self):
         app = FakeRunManager()
         app.update_blacs_status(None)
-        self.assertIn('Checking', app.ui.blacs_status_indicator.tooltip)
-        self.assertIn('checking', app.queue_blacs_activity_label.text)
+        self.assertIn('Checking', app.ui.blacs_status_indicator.toolTip())
+        self.assertIn('checking', app.queue_blacs_activity_label.text())
 
 
 class PauseQueueControlTests(unittest.TestCase):
