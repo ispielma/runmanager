@@ -81,7 +81,9 @@ with warnings.catch_warnings():
     warnings.simplefilter('ignore')
     import runmanager.__main__ as main_module  # noqa: E402
     from runmanager.__main__ import (  # noqa: E402
+        Editor,
         FingerTabWidget,
+        GroupTab,
         RemoteServer,
         RunManager,
         TreeView,
@@ -92,7 +94,9 @@ with warnings.catch_warnings():
 # so that no test file names runmanager.__main__ and inherits the ordering
 # constraint along with it.
 __all__ = [
+    'Editor',
     'FingerTabWidget',
+    'GroupTab',
     'RemoteServer',
     'RunManager',
     'Splash',
