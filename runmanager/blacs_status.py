@@ -41,8 +41,7 @@ from zprocess import raise_exception_in_thread
 POLL_INTERVAL = 2
 # Short, as the analysis submission widget's own liveness check is: BLACS
 # answers this off its GUI thread, so a BLACS that takes longer than this is
-# one runmanager cannot reach. It also keeps a poll shorter than the wait when
-# runmanager closes, so that shutting down does not have to abandon one.
+# one runmanager cannot reach.
 POLL_TIMEOUT = 1
 # The light beside the BLACS checkbox says one thing: whether BLACS answered.
 # It is the lyse light on the row below in every respect -- same three states,
