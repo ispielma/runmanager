@@ -154,7 +154,7 @@ def wait_for(condition, timeout=10):
         if time.monotonic() > deadline:
             raise AssertionError('Timed out waiting for %s' % condition)
         QApplication.processEvents()
-        time.sleep(0.01)
+        time.sleep(0.001)
 
 
 def serve_lyse(testcase, lyse_app, port=None):
