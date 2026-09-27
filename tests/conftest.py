@@ -24,9 +24,8 @@ A test of the dialog can also set `labscript_utils.excepthook.NO_ERROR_DIALOG`
 directly. The module reads that name where it uses it, so assigning to it works
 at any point, whereas the environment is still consulted only once.
 
-`QT_QPA_PLATFORM` is offscreen because the value-column tests show a group tab:
-Qt lays out only a shown widget, and a click lands only on laid-out geometry.
-Setting it yourself decides here too.
+`QT_QPA_PLATFORM` is offscreen for the same reason, since the value-column tests
+have to show a group tab to click on it. Setting it yourself decides here too.
 """
 import os
 

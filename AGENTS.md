@@ -27,7 +27,8 @@ need to `fixtures.py` rather than importing the application somewhere new.
 
 Tests needing a `QApplication` build their own. A test that genuinely renders —
 geometry or pixel assertions — must still call `.show()`, because Qt does not
-lay out or paint an unshown widget; run those under `QT_QPA_PLATFORM=offscreen`.
+lay out or paint an unshown widget. `tests/conftest.py` sets `QT_QPA_PLATFORM`
+to offscreen, so showing one puts nothing on the screen.
 `blacs/tests/test_plugins_compat.py` is the worked example of the other
 technique: loading a module by path with its dependencies stubbed, restoring
 them in a `finally`. Do not copy that restore into `fixtures.py`. It can restore
@@ -57,9 +58,6 @@ gives you the dialog back, as do `false`, `no`, `off`, the empty string and not
 setting it at all; anything else suppresses it. A test of the dialog itself can
 instead assign to `labscript_utils.excepthook.NO_ERROR_DIALOG`, which the module
 reads where it uses it.
-
-`tests/conftest.py` also sets `QT_QPA_PLATFORM` to offscreen, because the
-value-column tests show a group tab in order to click on it.
 
 ## The BLACS handover is a two-repo contract
 
