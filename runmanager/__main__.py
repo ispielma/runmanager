@@ -58,7 +58,7 @@ from qtutils.qt import QtCore, QtGui, QtWidgets
 from qtutils.qt.QtCore import pyqtSignal as Signal
 
 splash.update_text('importing labscript suite modules')
-from labscript_utils.ls_zprocess import zmq_get, ProcessTree, ZMQServer
+from labscript_utils.ls_zprocess import ProcessTree, ZMQServer
 from labscript_utils.labconfig import (
     LabConfig,
     LabscriptApplication,
@@ -70,6 +70,7 @@ from labscript_utils.lookup_format import format_lookup_string, unescape_braces
 from labscript_utils.setup_logging import setup_logging
 import labscript_utils.shared_drive as shared_drive
 from labscript_utils import dedent
+from runviewer.client import RunviewerClient
 from zprocess import raise_exception_in_thread
 import runmanager
 from runmanager.client import (
@@ -2138,6 +2139,7 @@ class RunManager(LabscriptApplication):
             output_redirection_port=self.output_box.port,
         )
 
+        self.runviewer = RunviewerClient(host='localhost', timeout=0.5)
         self.queue_manager = QueueManager(
             prepare_run_file=self.prepare_queue_shot,
             compile_run_file=self.compile_run_file,
@@ -4934,12 +4936,9 @@ class RunManager(LabscriptApplication):
         )
 
     def send_to_runviewer(self, run_file):
-        runviewer_port = int(self.exp_config.get('ports', 'runviewer'))
         agnostic_path = shared_drive.path_to_agnostic(run_file)
         try:
-            response = zmq_get(runviewer_port, 'localhost', data='hello', timeout=1)
-            if 'hello' not in response:
-                raise Exception(response)
+            self.runviewer.say_hello(timeout=1)
         except Exception as e:
             logger.info('runviewer not running, attempting to start...')
             # Runviewer not running, start it:
@@ -4969,16 +4968,13 @@ class RunManager(LabscriptApplication):
                     close_fds=True,
                 )
             try:
-                zmq_get(runviewer_port, 'localhost', data='hello', timeout=15)
+                self.runviewer.say_hello(timeout=15)
             except Exception as e:
                 self.output_box.output('Couldn\'t submit shot to runviewer: %s\n\n' % str(e), red=True)
 
         try:
-            response = zmq_get(runviewer_port, 'localhost', data=agnostic_path, timeout=0.5)
-            if 'ok' not in response:
-                raise Exception(response)
-            else:
-                self.output_box.output('Shot %s sent to runviewer.\n' % os.path.basename(run_file))
+            self.runviewer.add_shot(agnostic_path)
+            self.output_box.output('Shot %s sent to runviewer.\n' % os.path.basename(run_file))
         except Exception as e:
             self.output_box.output('Couldn\'t submit shot to runviewer: %s\n\n' % str(e), red=True)
 

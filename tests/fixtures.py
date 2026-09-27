@@ -63,10 +63,10 @@ def _stub_splash_module():
     """
     module = types.ModuleType('labscript_utils.splash')
     module.Splash = Splash
-    # runmanager's __main__ imports Splash and nothing else from here. BLACS's
-    # also imports get_qapplication, so a stub shared between the two repos
-    # would need that name as well; this one is deliberately only what
-    # runmanager asks for, so that it fails loudly if that changes.
+    # runmanager's and runviewer's __main__ import Splash and nothing else from
+    # here. BLACS's also imports get_qapplication, so a stub shared with blacs
+    # would need that name as well; this one is deliberately only what these two
+    # ask for, so that it fails loudly if that changes.
     sys.modules['labscript_utils.splash'] = module
 
 
@@ -88,6 +88,9 @@ with warnings.catch_warnings():
         RunmanagerServer,
         TreeView,
     )
+    # runviewer's application, whose server the runviewer tests serve, shows a
+    # splash at import too:
+    import runviewer.__main__ as runviewer_main  # noqa: E402
 
 # The module itself, for the tests that patch names in its namespace rather
 # than borrow a method from it. Exported for the same reason the classes are:
@@ -102,4 +105,5 @@ __all__ = [
     'Splash',
     'TreeView',
     'main_module',
+    'runviewer_main',
 ]
