@@ -61,7 +61,7 @@ class AnalysisSubmissionTests(unittest.TestCase):
         return server
 
     def submission(self, port):
-        submission = AnalysisSubmission(None)
+        submission = AnalysisSubmission()
         self.addCleanup(self.stop, submission)
         submission.lyse = LyseClient(host='127.0.0.1', port=port, timeout=1)
         submission.send_to_server = True

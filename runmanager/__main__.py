@@ -2146,7 +2146,7 @@ class RunManager(LabscriptApplication):
         )
         self.setup_queue_tab()
         run_view_layout = self.ui.findChild(QtWidgets.QLayout, 'verticalLayout_2')
-        self.analysis_submission = AnalysisSubmission(self, run_view_layout)
+        self.analysis_submission = AnalysisSubmission(run_view_layout)
         # Watching BLACS runs on its own thread, independently of the shot
         # exchange and of the destination checkbox it reports beside, so that
         # the indicator is live whether or not shots are being queued and a

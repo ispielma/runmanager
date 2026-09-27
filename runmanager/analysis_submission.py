@@ -47,9 +47,8 @@ def set_icon_label_pixmap(label, icon_path, size=16):
 
 
 class AnalysisSubmission(object):
-    def __init__(self, runmanager, parent_layout=None):
+    def __init__(self, parent_layout=None):
         self.inqueue = queue.Queue()
-        self.runmanager = runmanager
         self.lyse = LyseClient(timeout=1)
 
         self.widget = UiLoader().load(os.path.join(runmanager_dir, 'analysis_submission.ui'))
