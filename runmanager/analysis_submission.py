@@ -21,8 +21,8 @@ import time
 from pathlib import Path
 
 import labscript_utils.shared_drive
-from labscript_utils.ls_zprocess import zmq_get
 from labscript_utils.qtwidgets.elide_label import elide_label
+from lyse.client import LyseClient
 from qtutils import UiLoader, inmain_decorator
 from qtutils.qt import QtGui
 from qtutils.qt.QtCore import Qt, QSize
@@ -50,8 +50,7 @@ class AnalysisSubmission(object):
     def __init__(self, runmanager, parent_layout=None):
         self.inqueue = queue.Queue()
         self.runmanager = runmanager
-        self.port = self.runmanager.exp_config.getint('ports', 'lyse')
-        self.host = self.runmanager.exp_config.get('servers', 'lyse', fallback='localhost')
+        self.lyse = LyseClient(timeout=1)
 
         self.widget = UiLoader().load(os.path.join(runmanager_dir, 'analysis_submission.ui'))
         set_icon_label_pixmap(self.widget.send_to_server_icon, art_dir / 'lyse_22x22.png')
@@ -172,7 +171,7 @@ class AnalysisSubmission(object):
             self._server_online,
             'Invalid server status: %s' % self._server_online,
         )
-        tooltip += '\nHost: %s' % self.host
+        tooltip += '\nHost: %s' % self.lyse.host
         if self.failure_reason is not None:
             tooltip += '\n' + self.failure_reason
 
@@ -266,20 +265,18 @@ class AnalysisSubmission(object):
                 self._mainloop_logger.exception('Exception in mainloop, continuing')
 
     def check_connectivity(self):
-        host = self.host
+        host = self.lyse.host
         send_to_server = self.send_to_server
         if host and send_to_server:
             self.server_online = 'checking'
             try:
-                response = zmq_get(self.port, host, 'hello', timeout=1)
+                self.lyse.say_hello()
                 self.failure_reason = None
             except (TimeoutError, OSError, AuthenticationFailure) as e:
                 success = False
                 self.failure_reason = str(e)
             else:
-                success = response == 'hello'
-                if not success:
-                    self.failure_reason = 'unexpected response: %s' % str(response)
+                success = True
 
             self.server_online = 'online' if success else 'offline'
         else:
@@ -292,24 +289,23 @@ class AnalysisSubmission(object):
         while self._waiting_for_submission and success:
             path = self._waiting_for_submission[0]
             self._mainloop_logger.debug('Submitting run file %s.\n' % os.path.basename(path))
-            data = {'filepath': labscript_utils.shared_drive.path_to_agnostic(path)}
             self.server_online = 'checking'
             try:
-                response = zmq_get(self.port, self.host, data, timeout=1)
+                self.lyse.add_shot(labscript_utils.shared_drive.path_to_agnostic(path))
                 self.failure_reason = None
             except (TimeoutError, OSError, AuthenticationFailure) as e:
                 success = False
                 self.failure_reason = str(e)
-            else:
-                success = response == 'added successfully'
-                if not success:
-                    self.failure_reason = 'unexpected response: %s' % str(response)
-                try:
-                    self._waiting_for_submission.pop(0)
-                except IndexError:
-                    pass
+            except Exception as e:
+                # lyse answered and refused the shot, which a retry would not change:
+                self._mainloop_logger.exception('lyse refused %s', path)
+                self.failure_reason = str(e)
             if not success:
                 break
+            try:
+                self._waiting_for_submission.pop(0)
+            except IndexError:
+                pass
 
         self.server_online = 'online' if success else 'offline'
         self.time_of_last_connectivity_check = time.time()

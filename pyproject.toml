@@ -31,6 +31,7 @@ dependencies = [
     "desktop-app>=0.1.2",
     "labscript>=3.0.0",
     "labscript_utils>=3.3.0",
+    "lyse",
     "pandas>=0.13",
     "qtutils>=4.1.3",
     "matplotlib",
