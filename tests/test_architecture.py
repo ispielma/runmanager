@@ -1,30 +1,24 @@
 """Runmanager's half of the guard on the runmanager/BLACS boundary.
 
-Two rules are enforced here, and only these two. They are about what the two
-applications may say to each other, not about how either is put together
-inside: a helper may be renamed, a class split, a module moved, and none of
-that should fail a test in this file.
+One rule is enforced here. It is about what the two applications may say to
+each other, not about how either is put together inside: a helper may be
+renamed, a class split, a module moved, and none of that should fail a test in
+this file.
 
-  1. The superseded request/accept/reject/report RPC surface stays gone. One
-     exchange carries all of it, and there is deliberately no compatibility
-     shim, so a method quietly reappearing would be a second protocol rather
-     than an addition to this one.
+The superseded request/accept/reject/report RPC surface stays gone. One
+exchange carries all of it, and there is deliberately no compatibility shim, so
+a method quietly reappearing would be a second protocol rather than an addition
+to this one.
 
-  2. Runmanager may ask BLACS what it is doing and nothing else. Whether BLACS
-     requests shots, the error that stopped it, restarting a device and Abort
-     belong to the operator standing at the apparatus, and no message
-     runmanager can send may reach any of them.
-
-BLACS's half -- what BLACS actually calls, and what its own server offers --
-is in ``blacs/tests/test_architecture.py``, because only a test in blacs can
-import both. Each repository's guard has to fail on its own repository's
-regression, so neither half can stand in for the other.
+BLACS's half -- what BLACS actually calls, and that its own server offers
+runmanager nothing that changes it -- is in ``blacs/tests/test_architecture.py``.
+Each repository's guard has to fail on its own repository's regression, so
+neither half can stand in for the other.
 """
 import ast
 import os
 import unittest
 
-import runmanager.blacs_status
 import runmanager.client
 # fixtures stubs the splash and does the guarded import of the
 # application, once, for every test module. Importing
@@ -112,32 +106,6 @@ class SupersededProtocolTests(unittest.TestCase):
         # against the command surfaces precisely so that it cannot be
         # satisfied by deleting this.
         self.assertTrue(hasattr(AnalysisSubmission, 'notify_shot_complete'))
-
-
-class StatusIsReadOnlyTests(unittest.TestCase):
-    """Runmanager may ask BLACS a question. It may not tell it anything."""
-
-    def test_runmanager_can_ask_blacs_for_nothing_but_its_status(self):
-        asked = requested_commands(runmanager.blacs_status)
-        allowed = {'hello', 'get_status'}
-        extra = sorted(asked - allowed)
-        if extra:
-            fail(
-                'runmanager can now send BLACS the command(s) %s.'
-                % ', '.join(extra),
-                'The status surface is monitoring only. Enabling Request '
-                'shots, clearing the error that stopped it, restarting a '
-                'device and aborting a shot are the operator\'s, at the '
-                'apparatus; a runmanager that could do any of them from a '
-                'distance would take back the ownership boundary this branch '
-                'drew. Polling BLACS for what it is doing stays allowed -- '
-                'that is what get_status is.',
-            )
-        self.assertEqual(
-            asked,
-            allowed,
-            'runmanager must still be able to reach BLACS and read its status',
-        )
 
 
 if __name__ == '__main__':

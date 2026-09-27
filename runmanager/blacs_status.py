@@ -12,33 +12,29 @@
 #####################################################################
 """What runmanager knows about the BLACS it offers shots to.
 
-Runmanager asks; BLACS never pushes. This holds the small client that asks,
-the poller that keeps asking, and the two rules that turn an answer into what
-the interface shows: whether the link to BLACS is up, beside the BLACS
-destination checkbox, and what BLACS is doing with the queue, beside Pause
-queue. They are separate because they are separate questions -- a BLACS that
-is up and deliberately not running shots is a healthy link and a stopped
-queue, and one glyph cannot say that.
+Runmanager asks; BLACS never pushes. This holds the poller that keeps asking,
+and the two rules that turn an answer into what the interface shows: whether
+the link to BLACS is up, beside the BLACS destination checkbox, and what BLACS
+is doing with the queue, beside Pause queue. They are separate because they
+are separate questions -- a BLACS that is up and deliberately not running
+shots is a healthy link and a stopped queue, and one glyph cannot say that.
 
 It is monitoring only, and deliberately so: whether BLACS requests shots, the
 error that stopped it, and Abort belong to the operator standing at the
 apparatus. Nothing here sends BLACS anything but a question.
 
-runmanager does not depend on the blacs package -- the dependency runs the
-other way -- so the client is runmanager's own, built on the same ZMQClient
-runmanager.client is. The wire shape is the contract between them.
+The client that asks is BLACS's own, blacs.client.BlacsClient, so the wire
+shape lives with the server that answers it.
 """
 
 import os
 import sys
 import threading
 
+from blacs.client import BlacsClient
 import labscript_utils.shared_drive as shared_drive
-from labscript_utils.labconfig import LabConfig
-from labscript_utils.ls_zprocess import ZMQClient
 from zprocess import raise_exception_in_thread
 
-DEFAULT_PORT = 42517
 # A status light, not a data feed: often enough to follow the shot BLACS is
 # running, seldom enough to cost nothing. The analysis submission widget polls
 # lyse on much the same footing.
@@ -61,40 +57,6 @@ LINK_ICONS = {
 }
 
 
-class Client(ZMQClient):
-    """A ZMQClient for asking BLACS what it is doing.
-
-    Only questions: BLACS's server offers this runmanager nothing that would
-    change it, and this offers no way to ask for anything else."""
-
-    def __init__(self, host=None, port=None, timeout=POLL_TIMEOUT):
-        ZMQClient.__init__(self)
-        if host is None:
-            host = LabConfig().get('servers', 'blacs', fallback='localhost')
-        if port is None:
-            port = LabConfig().getint('ports', 'blacs', fallback=DEFAULT_PORT)
-        self.host = host
-        self.port = port
-        self.timeout = timeout
-
-    def request(self, command, *args, **kwargs):
-        return self.get(
-            self.port, self.host, data=[command, args, kwargs], timeout=self.timeout
-        )
-
-    def say_hello(self):
-        """Ping the BLACS server for a response"""
-        return self.request('hello')
-
-    def get_status(self):
-        """Return what BLACS is doing.
-
-        A dict saying whether BLACS is requesting shots, what it is doing, the
-        stable id and path of the runmanager shot it is running if there is
-        one, and why it stopped requesting shots if it has."""
-        return self.request('get_status')
-
-
 class BlacsStatusMonitor(object):
     """Keep asking BLACS what it is doing, and report every answer.
 
@@ -109,7 +71,7 @@ class BlacsStatusMonitor(object):
 
     def __init__(self, on_status, client=None, interval=POLL_INTERVAL):
         self.on_status = on_status
-        self.client = Client() if client is None else client
+        self.client = BlacsClient(timeout=POLL_TIMEOUT) if client is None else client
         self.interval = interval
         self.stopped = threading.Event()
         self.thread = threading.Thread(target=self.mainloop)
@@ -144,9 +106,8 @@ class BlacsStatusMonitor(object):
             if isinstance(status, dict):
                 status = dict(status, reachable=True)
             else:
-                # A BLACS that answered with something other than a status:
-                # an exception its server handed back, or a version that does
-                # not know the question. Reached, but nothing to show.
+                # A BLACS old enough not to know the question answers it with a
+                # string. Reached, but nothing to show.
                 status = {'reachable': False, 'reason': str(status)}
         if self.stopped.is_set():
             # Runmanager is closing: no sense paying for a hop to a GUI thread

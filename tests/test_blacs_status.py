@@ -2,14 +2,17 @@
 
 The indicator state and its tooltip are worked out from the status BLACS sent,
 so they are tested against snapshots rather than against a running apparatus or
-a constructed RunManager.
+a constructed RunManager. The poller runs here with a real BlacsClient and no
+BLACS behind it; BLACS's own tests run it against a real BlacsServer.
 """
 import os
+import socket
 import threading
 import time
 import types
 import unittest
 
+from blacs.client import BlacsClient
 from qtutils import UiLoader
 from qtutils.qt.QtCore import QSize
 from qtutils.qt.QtGui import QIcon
@@ -37,7 +40,6 @@ from fixtures import (
 from runmanager.analysis_submission import art_dir
 from runmanager.blacs_status import (
     BlacsStatusMonitor,
-    Client,
     blacs_activity_display,
     blacs_link_display,
 )
@@ -185,97 +187,22 @@ class ActivityLineTests(unittest.TestCase):
         self.assertEqual(text, 'BLACS: not responding')
 
 
-class FakeBlacs(object):
-    """A BLACS server that answers whatever it has been told to answer."""
-
-    def __init__(self, *answers, host='localhost'):
-        self.answers = list(answers)
-        self.requests = []
-        # The real client knows which machine it is asking, and the status
-        # light says so in its tooltip.
-        self.host = host
-
-    def request(self, command, *args, **kwargs):
-        self.requests.append(command)
-        answer = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
-        if isinstance(answer, Exception):
-            raise answer
-        return answer
-
-    def get_status(self):
-        return self.request('get_status')
+def absent_blacs(host='localhost'):
+    """A real BlacsClient for a BLACS that is not there: nothing is on its port."""
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0))
+        port = probe.getsockname()[1]
+    return BlacsClient(host=host, port=port, timeout=0.05)
 
 
 class PollingTests(unittest.TestCase):
-    def poll_all(self, *answers):
-        """Poll a BLACS giving each answer in turn, and collect the states."""
-        blacs = FakeBlacs(*answers)
-        reported = []
-        monitor = BlacsStatusMonitor(on_status=reported.append, client=blacs)
-        for _ in answers:
-            monitor.poll()
-        return blacs, [blacs_activity_display(status)[0] for status in reported]
-
-    def test_a_blacs_that_comes_back_is_shown_as_back(self):
-        # Losing BLACS is not final: polling goes on, and the indicator
-        # follows it back without anything being restarted or reconnected.
-        _, states = self.poll_all(
-            TimeoutError('BLACS did not answer'),
-            snapshot(requesting_shots=True),
-        )
-        self.assertEqual(
-            states, ['BLACS: not responding', 'BLACS: requesting shots']
-        )
-
-    def test_the_indicator_follows_a_shot_from_running_to_failed(self):
-        _, states = self.poll_all(
-            snapshot(requesting_shots=True),
-            snapshot(
-                requesting_shots=True,
-                status='Running (program time: 0.100s)...',
-                shot_id='shot-1',
-                shot_path='/data/shot_a.h5',
-            ),
-            snapshot(
-                requesting_shots=False,
-                status='Device(s) in error state\nRequests stopped',
-                error='Device(s) in error state',
-            ),
-        )
-        self.assertEqual(
-            states,
-            [
-                'BLACS: requesting shots',
-                'BLACS: running shot_a.h5',
-                'BLACS: stopped - Device(s) in error state',
-            ],
-        )
-
-    def test_polling_asks_blacs_for_nothing_but_its_status(self):
-        # Monitoring only: recovering the apparatus stays with the operator
-        # standing at it, so runmanager never sends BLACS anything else.
-        blacs, _ = self.poll_all(snapshot(), snapshot(requesting_shots=True))
-        self.assertEqual(set(blacs.requests), {'get_status'})
-
-    def test_an_answer_that_is_not_a_status_is_not_shown_as_one(self):
-        # A BLACS old enough not to know the question answers its old direct
-        # submission refusal instead, and a server that failed hands back the
-        # exception. Neither says anything about the apparatus.
-        _, states = self.poll_all(
-            'Error: BLACS no longer accepts direct shot submissions\n'
-        )
-        self.assertEqual(states, ['BLACS: not responding'])
-        _, states = self.poll_all(RuntimeError('BLACS server returned an exception'))
-        self.assertEqual(states, ['BLACS: not responding'])
-
     def test_an_answer_arriving_after_shutdown_is_not_reported(self):
         # An answer whose poll finishes after the close has begun is not worth
         # a hop to a GUI thread that is taking the window down, so poll() does
         # not make one. The cheap half only: a poll that got past this check
         # first is caught by the update instead (MonitorShutdownTests).
-        blacs = FakeBlacs(snapshot(requesting_shots=True))
         reported = []
-        monitor = BlacsStatusMonitor(on_status=reported.append, client=blacs)
+        monitor = BlacsStatusMonitor(on_status=reported.append, client=absent_blacs())
 
         monitor.shutdown()
         monitor.poll()
@@ -283,10 +210,9 @@ class PollingTests(unittest.TestCase):
         self.assertEqual(reported, [])
 
     def test_polling_goes_on_until_it_is_shut_down(self):
-        blacs = FakeBlacs(snapshot(requesting_shots=True))
         reported = []
         monitor = BlacsStatusMonitor(
-            on_status=reported.append, client=blacs, interval=0
+            on_status=reported.append, client=absent_blacs(), interval=0
         )
         self.addCleanup(monitor.shutdown)
 
@@ -303,36 +229,13 @@ class PollingTests(unittest.TestCase):
         # that answer is the update's business, and the update drops it
         # (MonitorShutdownTests); the question here is only whether the loop
         # stopped asking, so let the last one land before counting.
-        time.sleep(0.05)
+        time.sleep(0.2)
         polls_after_stopping = len(reported)
-        time.sleep(0.05)
+        time.sleep(0.2)
 
         self.assertGreater(polls_while_running, 2, 'the loop keeps asking')
         self.assertEqual(
             len(reported), polls_after_stopping, 'and stops when told to'
-        )
-
-
-class ClientTests(unittest.TestCase):
-    def test_the_client_asks_the_configured_blacs_in_the_shape_it_answers(self):
-        # BLACS dispatches a [command, args, kwargs] request the same way
-        # runmanager's own server does. That shape, and the configured host
-        # and port, are the whole contract between the two.
-        client = Client(host='blacs-pc', port=4242, timeout=3)
-        sent = []
-        client.get = lambda port, host, data=None, timeout=None: sent.append(
-            (port, host, data, timeout)
-        )
-
-        client.get_status()
-        client.say_hello()
-
-        self.assertEqual(
-            sent,
-            [
-                (4242, 'blacs-pc', ['get_status', (), {}], 3),
-                (4242, 'blacs-pc', ['hello', (), {}], 3),
-            ],
         )
 
 
@@ -365,7 +268,7 @@ class MonitorShutdownTests(unittest.TestCase):
 
         monitor = BlacsStatusMonitor(
             on_status=on_status,
-            client=FakeBlacs({'requesting_shots': True}),
+            client=absent_blacs(),
             interval=0.01,
         )
         monitor.start()
@@ -455,7 +358,7 @@ class FakeRunManager(object):
         # A real monitor, because the update asks it two things: who it is
         # talking to, and whether it has been stopped.
         self.blacs_status_monitor = BlacsStatusMonitor(
-            on_status=self.update_blacs_status, client=FakeBlacs(snapshot(), host=host)
+            on_status=self.update_blacs_status, client=absent_blacs(host)
         )
 
 
