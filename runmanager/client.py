@@ -1,0 +1,258 @@
+DEFAULT_PORT = 42523
+
+from labscript_utils.ls_zprocess import ZMQClient
+
+# What an exchange tells BLACS about this runmanager: it offered a shot, its
+# queue is paused, or it has nothing to offer right now. Paused is told apart
+# from having nothing so that BLACS can show an operator why no queued work is
+# arriving; neither is a reason for BLACS to stop:
+PROVIDER_SHOT = 'shot'
+PROVIDER_PAUSED = 'paused'
+PROVIDER_NONE = 'none'
+# How BLACS may say a shot it was offered turned out. Every one but 'completed'
+# leaves the row at the head of the queue in red; see shot_finished() in
+# queueing.py:
+SHOT_OUTCOME_STATUSES = ('completed', 'aborted', 'failed', 'rejected')
+# What a row the queue would hand over is answered with while a row it will
+# not hand over sits in front of it. Only the head is ever offered, so such a
+# row is not going anywhere either, and the empty state it is in would read as
+# work about to be done.
+BLOCKED_SHOT_STATE = 'blocked'
+# What a shot id with no row in the queue is answered with. Not the empty
+# state, which a row waiting its turn has.
+UNKNOWN_SHOT_STATE = 'unknown'
+
+
+class SequenceRefused(ValueError):
+    """Runmanager will not add shots to the sequence asked for."""
+
+
+class RunmanagerClient(ZMQClient):
+    """A ZMQClient for communication with runmanager"""
+
+    server = 'runmanager'
+    default_port = DEFAULT_PORT
+
+    def get_version(self):
+        """Return the version of runmanager the server is running in"""
+        return self.request('get_version')
+
+    def get_default_globals(self, raw=False):
+        """Return all active globals' Default values.
+
+        If raw=True, return the stored Default expression strings. Otherwise return
+        the evaluated Python values."""
+        return self.request('get_default_globals', raw=raw)
+
+    def get_globals(self, raw=False):
+        """Return all active globals' effective values.
+
+        If raw=True, return the stored effective expression strings. Otherwise return
+        the evaluated Python values."""
+        return self.request('get_globals', raw=raw)
+
+    def set_default_globals(self, globals, raw=False):
+        """Set Default expressions for active globals."""
+        return self.request('set_default_globals', globals, raw=raw)
+
+    def set_globals(self, globals, raw=False):
+        """Alias for set_default_globals()."""
+        return self.set_default_globals(globals, raw=raw)
+
+    def get_scan_globals(self, raw=False):
+        """Return all active globals' Scan values.
+
+        If raw=True, return the stored Scan expression strings. Otherwise return the
+        evaluated Python values."""
+        return self.request('get_scan_globals', raw=raw)
+
+    def set_scan_globals(self, globals, raw=False):
+        """Set Scan expressions for active globals."""
+        return self.request('set_scan_globals', globals, raw=raw)
+
+    def get_scan_enabled(self):
+        """Return all active globals' Scan? state."""
+        return self.request('get_scan_enabled')
+
+    def set_scan_enabled(self, globals):
+        """Set Scan? state for active globals."""
+        return self.request('set_scan_enabled', globals)
+
+    def get_jit_enabled(self):
+        """Return all active globals' JIT? state."""
+        return self.request('get_jit_enabled')
+
+    def set_jit_enabled(self, globals):
+        """Set JIT? state for active globals."""
+        return self.request('set_jit_enabled', globals)
+
+    def engage(self):
+        """Trigger shot compilation/submission"""
+        return self.request('engage')
+
+    def abort(self):
+        """Empty runmanager's queue, as its Empty queue button does.
+
+        A shot BLACS has is kept."""
+        return self.request('abort')
+
+    def get_run_shots(self):
+        """Get boolean state of the 'BLACS' checkbox.
+
+        Whether shots compiled by Engage are put into the runmanager queue for
+        BLACS to run. The method name is from when that checkbox was labelled
+        'Run shot(s)'; only the label changed."""
+        return self.request('get_run_shots')
+
+    def set_run_shots(self, value):
+        """Set boolean state of the 'BLACS' checkbox.
+
+        This decides only where newly engaged shots go. It is not the queue's
+        pause, and it is not BLACS's own gate on running anything."""
+        return self.request('set_run_shots', value)
+
+    def get_view_shots(self):
+        """Get boolean state of 'View shot(s)' checkbox"""
+        return self.request('get_view_shots')
+
+    def set_view_shots(self, value):
+        """Set boolean state of 'View shot(s)' checkbox"""
+        return self.request('set_view_shots', value)
+
+    def get_shuffle(self):
+        """Get boolean state of 'Shuffle' checkbox"""
+        return self.request('get_shuffle')
+
+    def set_shuffle(self, value):
+        """Set boolean state of 'Shuffle' checkbox"""
+        return self.request('set_shuffle', value)
+
+    def n_shots(self):
+        """Get the number of prospective shots from pressing 'Engage'"""
+        return self.request('n_shots')
+
+    def get_labscript_file(self):
+        """Get the path of the current experiment script"""
+        return self.request('get_labscript_file')
+
+    def set_labscript_file(self, value):
+        """Set the current experiment script"""
+        return self.request('set_labscript_file', value)
+
+    def get_shot_output_folder(self):
+        """Get the current shot output folder"""
+        return self.request('get_shot_output_folder')
+
+    def set_shot_output_folder(self, value):
+        """Set the shot output folder"""
+        return self.request('set_shot_output_folder', value)
+
+    def error_in_globals(self):
+        """True if any tab of an active group contains error(s)"""
+        return self.request('error_in_globals')
+
+    def is_output_folder_default(self):
+        """True if shot output folder is not the default path"""
+        return self.request('is_output_folder_default')
+
+    def reset_shot_output_folder(self):
+        """Reset the shot output folder to the default path"""
+        return self.request('reset_shot_output_folder')
+
+    def submit_shots(self, entries, sequence=None, sequence_index=None):
+        """Submit one shot per entry, each with the globals that entry names.
+
+        ``entries`` is a list of ``{global_name: value}`` dicts; one entry is
+        one shot, and every entry names the same globals. runmanager's window
+        is set to the last entry and left so, so that whoever is watching sees
+        what is running; globals no entry names are untouched.
+
+        Returns one descriptor per entry, in the order submitted:
+        ``{'shot_id', 'sequence_id', 'sequence_index', 'run_number', 'path'}``.
+        The queue is never cleared.
+
+        A remote session is one sequence. With no ``sequence`` the shots start
+        a sequence of their own. Pass a ``sequence_id`` from an earlier
+        submission as ``sequence`` to add to that sequence instead, numbered
+        after every shot of it runmanager has made, whatever ran in between.
+        Pass its ``sequence_index`` too: two sequences started in the same
+        second share an id, and runmanager refuses to guess between them.
+        Runmanager remembers its sequences only until it restarts, so a
+        sequence it has no record of is refused.
+
+        Each submitted shot is written with its ``shot_id`` as a root
+        attribute of its h5 file, which is where the id handed back here
+        reappears: it is how a result produced from that file is matched to
+        the entry that asked for it. A shot file carrying no such attribute is
+        one nobody submitted -- runmanager writes the shots it makes itself,
+        to keep the apparatus busy between submissions, without one.
+
+        Raises, having submitted nothing at all, whatever it is that goes
+        wrong. The whole batch is made and handed over in one go, so until
+        that succeeds there is nothing queued to take back and no shot running
+        under an identifier the caller was never given. A reply that times
+        out is the exception: runmanager may still queue the batch, under ids
+        the caller never received. A submission is answered in milliseconds,
+        so a timeout means runmanager is not answering at all.
+
+        An entry that would produce anything other than exactly one shot is
+        refused this way, as a scan left on a global can make it do. So are a
+        labscript file or output folder that is not set, globals that cannot
+        be evaluated, entries that do not all name the same globals, a name no
+        active group has, and a ``sequence`` runmanager has no record of, of
+        another labscript file, or sharing its id with another when no
+        ``sequence_index`` is given. A batch refused while its entries are
+        evaluated sets no global, and one refused as it is queued is left at
+        its last entry; either way nothing is queued and nothing runs.
+
+        The Scan? and JIT? boxes of the globals an entry names are the
+        caller's to manage, through get_scan_enabled, set_scan_enabled,
+        get_jit_enabled and set_jit_enabled."""
+        return self.request(
+            'submit_shots',
+            list(entries),
+            sequence=sequence,
+            sequence_index=sequence_index,
+        )
+
+    def shot_status(self, shot_ids):
+        """Whether each of these shots can still produce a result.
+
+        Answers ``{shot_id: {'pending': bool, 'state': str}}``, one entry per
+        id asked about. ``pending`` is false once nothing further will happen
+        to that shot -- it completed and left the queue, or it is held waiting
+        on an operator. A shot cancelled while BLACS has it is pending until
+        BLACS is done with it, as it can still complete.
+
+        ``state`` is the queue row's own state, for a human reading a log,
+        plus one answer no row is ever in: ``'blocked'`` is a row runmanager
+        would hand over sitting behind one it will not, which is not pending
+        until an operator moves what is in front of it. An id runmanager
+        knows nothing of at all is reported as ``'unknown'``.
+
+        Reads only: nothing is consumed by asking, so the same ids can be asked
+        about as often as wanted."""
+        return self.request('shot_status', list(shot_ids))
+
+    def queue_exchange(self, outcome=None, request_shot=True):
+        """Report how a shot turned out, and ask for the next one.
+
+        ``outcome`` is None, or a dict describing the shot runmanager last
+        offered: its ``shot_id``, its ``status`` (``'completed'``,
+        ``'aborted'``, ``'failed'`` or ``'rejected'``), a human-readable
+        ``message``, and the ``path`` actually run if that is not the path
+        offered. Runmanager applies the outcome before choosing what to offer,
+        so one exchange can finish one shot and take the next.
+
+        Repeating an exchange is safe: an outcome for a row that has gone, or
+        one already carrying that same failure, changes nothing. An outcome
+        runmanager cannot read at all, and a failure on runmanager's side while
+        it chooses what to offer, are both reported in runmanager's output
+        rather than raised, and the exchange still answers normally. A caller
+        that gets an answer has been heard, and must move on rather than
+        sending the same outcome again.
+
+        Returns a dict: ``state`` is ``'shot'``, ``'paused'`` or ``'none'``,
+        and ``shot_id`` and ``path`` name the offered shot when there is
+        one."""
+        return self.request('queue_exchange', outcome, request_shot)

@@ -1,6 +1,9 @@
-"""Starting runviewer when it is not already running.
+"""Sending shots to runviewer, and starting it when it is not already running.
 
-Ticking *View shot(s)* with no runviewer up starts one.
+Ticking *View shot(s)* sends each shot to runviewer, and with no runviewer up
+starts one. The shot goes through the real RunviewerClient to a real
+RunviewerServer; only runviewer's startup is faked, by serving that server where
+the started runviewer would.
 
 What is pinned here is that the child is started detached and without a fork,
 because a child that is not detached dies with runmanager and a fork in this
@@ -11,14 +14,19 @@ deadlocks before starting anything, saying nothing about it.
 """
 import logging
 import os
+import queue
+import socket
 import subprocess
 import types
 import unittest
+from unittest import mock
 
-# fixtures stubs the splash and does the guarded import of the
-# application, once, for every test module. Importing
-# runmanager.__main__ here instead would show the startup banner.
-from fixtures import RunManager, main_module
+from runviewer.client import RunviewerClient
+
+# fixtures stubs the splash and does the guarded imports of runmanager's and
+# runviewer's applications, once, for every test module. Importing either
+# __main__ here instead would show a startup banner.
+from fixtures import RunManager, main_module, runviewer_main
 
 
 class FakeOutputBox(object):
@@ -32,18 +40,17 @@ class FakeOutputBox(object):
         return [l for l in self.lines if all(word in l for word in words)]
 
 
-class NoRunviewerListening(Exception):
-    """What zmq_get raises when nothing is on runviewer's port."""
+class RefusingQueue:
+    def put(self, path):
+        raise RuntimeError('runviewer cannot take shots')
 
 
 class SendToRunviewerTests(unittest.TestCase):
-    """The launch, over its two boundaries: the port and the process."""
+    """The send and the launch, with only the process start faked."""
 
     def setUp(self):
         self.main_module = main_module
         self.saved = {
-            'zmq_get': main_module.zmq_get,
-            'Popen': main_module.subprocess.Popen,
             # Absent on Windows, which is where BLACS usually runs and what
             # the creationflags branch of the launch exists for. Reading it
             # unconditionally made the one test that is not skipped there error
@@ -55,24 +62,38 @@ class SendToRunviewerTests(unittest.TestCase):
         # exist when the module is merely imported:
         main_module.logger = logging.getLogger('test_send_to_runviewer')
         self.launched = []
-        self.probes = []
-        # Nothing is listening, so every probe fails and the launch is reached.
-        main_module.zmq_get = self.zmq_get
-        main_module.subprocess.Popen = self.popen
+        # runmanager's own name for the module, so that the launch reaches the
+        # fake and nothing else in the process, such as a real server, does:
+        patcher = mock.patch.object(
+            main_module,
+            'subprocess',
+            types.SimpleNamespace(Popen=self.popen, DEVNULL=subprocess.DEVNULL),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
         # A fork here is the bug. Fail loudly rather than actually forking the
         # test runner, which is what made this hard to see in the first place.
         if self.saved['fork'] is not None:
             os.fork = self.forbidden_fork
         self.addCleanup(self.restore)
 
+        # runviewer's server puts shots on this, which its application makes
+        # only when it starts:
+        self.shots = queue.Queue()
+        patcher = mock.patch.object(
+            runviewer_main, 'shots_to_process_queue', self.shots, create=True
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        with socket.socket() as probe:
+            probe.bind(('127.0.0.1', 0))
+            self.port = probe.getsockname()[1]
         self.app = types.SimpleNamespace(
-            exp_config=types.SimpleNamespace(get=lambda section, option: '42521'),
+            runviewer=RunviewerClient(host='127.0.0.1', port=self.port, timeout=0.5),
             output_box=FakeOutputBox(),
         )
 
     def restore(self):
-        self.main_module.zmq_get = self.saved['zmq_get']
-        self.main_module.subprocess.Popen = self.saved['Popen']
         if self.saved['fork'] is not None:
             os.fork = self.saved['fork']
         if self.saved['logger'] is None:
@@ -80,12 +101,16 @@ class SendToRunviewerTests(unittest.TestCase):
         else:
             self.main_module.logger = self.saved['logger']
 
-    def zmq_get(self, port, host, data=None, timeout=None):
-        self.probes.append(data)
-        raise NoRunviewerListening('nothing on port %s' % port)
+    def serve(self):
+        server = runviewer_main.RunviewerServer(
+            port=self.port, bind_address='tcp://127.0.0.1'
+        )
+        self.addCleanup(server.shutdown)
 
     def popen(self, command, **kwargs):
         self.launched.append((list(command), kwargs))
+        # What the started runviewer does first:
+        self.serve()
         return types.SimpleNamespace(pid=1234)
 
     def forbidden_fork(self):
@@ -98,6 +123,13 @@ class SendToRunviewerTests(unittest.TestCase):
     def send(self):
         RunManager.send_to_runviewer(self.app, '/tmp/a_shot.h5')
 
+    def test_a_shot_reaches_a_running_runviewer_as_its_local_path(self):
+        self.serve()
+        self.send()
+
+        self.assertEqual(self.launched, [], 'no second runviewer is started')
+        self.assertEqual(self.shots.get_nowait(), '/tmp/a_shot.h5')
+
     @unittest.skipIf(os.name == 'nt', 'the POSIX launch path')
     def test_runviewer_is_started_when_nothing_is_listening(self):
         self.send()
@@ -105,6 +137,7 @@ class SendToRunviewerTests(unittest.TestCase):
         self.assertEqual(len(self.launched), 1, 'exactly one runviewer started')
         command, kwargs = self.launched[0]
         self.assertIn('runviewer', command, 'and it is runviewer that is started')
+        self.assertEqual(self.shots.get_nowait(), '/tmp/a_shot.h5', 'and it has the shot')
 
     @unittest.skipIf(os.name == 'nt', 'the POSIX launch path')
     def test_it_is_started_detached_so_it_outlives_runmanager(self):
@@ -124,12 +157,13 @@ class SendToRunviewerTests(unittest.TestCase):
         for stream in ('stdin', 'stdout', 'stderr'):
             self.assertEqual(kwargs.get(stream), subprocess.DEVNULL, stream)
 
-    def test_the_operator_is_told_when_it_could_not_be_reached(self):
-        # Started or not, runviewer never answers here, and that has to be said
-        # rather than swallowed.
+    def test_the_operator_is_told_when_runviewer_cannot_take_the_shot(self):
+        runviewer_main.shots_to_process_queue = RefusingQueue()
+        self.serve()
         self.send()
 
-        self.assertTrue(self.app.output_box.said("Couldn't submit shot"))
+        said = self.app.output_box.said("Couldn't submit shot", 'cannot take shots')
+        self.assertTrue(said, "in runviewer's own words")
 
 
 if __name__ == '__main__':

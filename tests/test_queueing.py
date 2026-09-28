@@ -4,15 +4,15 @@ These exercise QueueController and the queue widget directly, and the exchange
 protocol in runmanager.__main__ through its methods, called against a stand-in
 for the application rather than a running one.
 """
+import datetime
 import os
+import queue
 import shutil
 import tempfile
 import threading
 import time
 import types
 import unittest
-
-from unittest import mock
 
 # h5_lock must be imported before h5py is, by anything in the process, and
 # it is what runmanager imports h5py through. Naming it here rather than
@@ -30,7 +30,14 @@ from labscript_utils.labconfig import load_appconfig, save_appconfig
 # fixtures stubs the splash and does the guarded import of the
 # application, once, for every test module. Importing
 # runmanager.__main__ here instead would show the startup banner.
-from fixtures import RunManager, main_module
+from fixtures import (
+    RunManager,
+    labconfig,
+    main_module,
+    serve_lyse,
+    submit_to_lyse,
+    wait_for,
+)
 from runmanager.queueing import (
     COMPILE_MODE_EAGER,
     COMPILE_MODE_LAZY,
@@ -466,14 +473,6 @@ class RejectedShotTests(unittest.TestCase):
         )
 
 
-class FakeAnalysisSubmission(object):
-    def __init__(self):
-        self.submitted = []
-
-    def notify_shot_complete(self, path):
-        self.submitted.append(path)
-
-
 class FakeOutputBox(object):
     """What runmanager shows its user, which is where protocol trouble shows."""
 
@@ -487,6 +486,9 @@ class FakeOutputBox(object):
         return [line for line in self.lines if all(word in line for word in words)]
 
 
+ANALYSED_MARKER = '/runmanager-tests/marker.h5'
+
+
 class FakeRunManager(object):
     """Runmanager's own exchange, over only the surface of it that it uses.
 
@@ -494,9 +496,9 @@ class FakeRunManager(object):
     a unit test, so this holds the few things the exchange reaches for. The
     methods below are RunManager's own and the queue underneath is a real
     QueueManager, so these exercise the rules runmanager applies rather than a
-    description of them. Only the two boundaries are stood in for: producing a
-    default shot, which evaluates globals and compiles a labscript file, and
-    submitting to lyse.
+    description of them. Only producing a default shot, which evaluates globals
+    and compiles a labscript file, is stood in for. A completed shot goes to a
+    real lyse through a real AnalysisSubmission.
     """
 
     queue_exchange = RunManager.queue_exchange
@@ -521,7 +523,8 @@ class FakeRunManager(object):
     def check_output_folder_update(self):
         pass
 
-    def __init__(self, default_shot_file=None, compiles=True):
+    def __init__(self, testcase, default_shot_file=None, compiles=True):
+        hold_qapplication()
         self.output_box = FakeOutputBox()
         # What the compiler does: True as though the shot compiled, False as it
         # reports a bad labscript file, or an exception for a failure to get
@@ -534,7 +537,12 @@ class FakeRunManager(object):
             lambda path: None,
             self.output_box.output,
         )
-        self.analysis_submission = FakeAnalysisSubmission()
+        self.analysed = queue.Queue()
+        lyse_app = types.SimpleNamespace(
+            filebox=types.SimpleNamespace(incoming_queue=self.analysed)
+        )
+        lyse = serve_lyse(testcase, lyse_app)
+        self.analysis_submission = submit_to_lyse(testcase, lyse.port)
         self.default_shot_file = default_shot_file
         self.default_shots_taken = 0
         # Read only when a compile actually starts, and read on this thread
@@ -550,6 +558,23 @@ class FakeRunManager(object):
         if isinstance(self.compiles, Exception):
             raise self.compiles
         return self.compiles
+
+    def analysed_paths(self):
+        """The paths lyse has received, once all handed over so far have gone."""
+        # Handed over last, so it reaches lyse after everything before it:
+        self.analysis_submission.notify_shot_complete(ANALYSED_MARKER)
+        paths = []
+
+        def marker_arrived():
+            while not self.analysed.empty():
+                path = self.analysed.get()
+                if path == ANALYSED_MARKER:
+                    return True
+                paths.append(path)
+            return False
+
+        wait_for(marker_arrived)
+        return paths
 
     def take_default_shot(self, labscript_file):
         self.default_shots_taken += 1
@@ -580,7 +605,7 @@ class DefaultShotTests(unittest.TestCase):
         shutil.rmtree(self.directory, ignore_errors=True)
 
     def make_runmanager(self, default_shot_file=None):
-        app = FakeRunManager(default_shot_file=default_shot_file)
+        app = FakeRunManager(self, default_shot_file=default_shot_file)
         self.addCleanup(app.queue_manager.shutdown)
         app.queue_manager.set_empty_queue_policy(EMPTY_QUEUE_DEFAULT_LABSCRIPT)
         app.queue_manager.set_default_labscript_file(self.labscript_file)
@@ -621,7 +646,7 @@ class DefaultShotTests(unittest.TestCase):
         self.assertEqual(response['state'], PROVIDER_NONE)
         self.assertEqual(self.rows(app), [], 'finished work leaves the queue')
         self.assertEqual(
-            app.analysis_submission.submitted,
+            app.analysed_paths(),
             [offered['path']],
             'work runmanager ran on its own behalf is still analysed',
         )
@@ -643,7 +668,7 @@ class DefaultShotTests(unittest.TestCase):
         self.assertEqual([row['path'] for row in rows], [self.default_shot])
         self.assertEqual(rows[0]['state'], 'failed')
         self.assertEqual(
-            app.analysis_submission.submitted, [], 'a shot that did not run is not analysed'
+            app.analysed_paths(), [], 'a shot that did not run is not analysed'
         )
 
         taken_before = app.default_shots_taken
@@ -741,7 +766,7 @@ class DefaultShotTests(unittest.TestCase):
         )
 
         self.assertEqual(self.rows(app), [])
-        self.assertEqual(app.analysis_submission.submitted, [offered['path']])
+        self.assertEqual(app.analysed_paths(), [offered['path']])
 
     def test_no_default_shot_is_produced_while_the_queue_holds_work(self):
         # The empty-queue policy is for a queue that is empty. A queue whose
@@ -802,7 +827,7 @@ class LazyCompileFailureTests(unittest.TestCase):
     def make_runmanager(self, compiles):
         self.directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.directory, True)
-        app = FakeRunManager(compiles=compiles)
+        app = FakeRunManager(self, compiles=compiles)
         self.addCleanup(app.queue_manager.shutdown)
         app.queue_manager.enqueue(
             [
@@ -991,7 +1016,7 @@ class KeptRowReasonTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.directory, True)
 
     def app_with(self, *names):
-        app = FakeRunManager()
+        app = FakeRunManager(self)
         self.addCleanup(app.queue_manager.shutdown)
         app.queue_manager.enqueue(
             [queued_shot(os.path.join(self.directory, name)) for name in names]
@@ -1064,7 +1089,7 @@ class CompiledFlagOwnershipTests(unittest.TestCase):
     """
 
     def lazy_queue(self):
-        app = FakeRunManager()
+        app = FakeRunManager(self)
         self.addCleanup(app.queue_manager.shutdown)
         app.queue_manager.enqueue(
             [
@@ -1229,7 +1254,7 @@ class ContinuingSequenceAnchorTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.directory, True)
-        self.app = FakeRunManager()
+        self.app = FakeRunManager(self)
         self.addCleanup(self.app.queue_manager.shutdown)
 
     def enqueue(self, name):
@@ -1259,10 +1284,8 @@ class ContinuingSequenceAnchorTests(unittest.TestCase):
 
     def test_an_empty_queue_carries_on_from_the_shot_blacs_was_sent(self):
         sent = self.enqueue('experiment_00.h5')
-        self.app.offer_shot()
-        self.app.queue_manager.shot_finished(
-            self.app.queue_manager.controller._items[0]['shot_id'], 'completed'
-        )
+        offered = self.app.offer_shot()
+        self.app.queue_manager.shot_finished(offered['shot_id'], 'completed')
 
         self.assertEqual(
             self.app.queue_manager.get_queue_paths(), [], 'the queue is empty'
@@ -1317,7 +1340,7 @@ class ContinuingSequenceAnchorTests(unittest.TestCase):
         open(labscript_file, 'w').close()
         default_shot = os.path.join(self.directory, 'default_shot_0.h5')
         open(default_shot, 'w').close()
-        app = FakeRunManager(default_shot_file=default_shot)
+        app = FakeRunManager(self, default_shot_file=default_shot)
         self.addCleanup(app.queue_manager.shutdown)
         app.queue_manager.set_empty_queue_policy(EMPTY_QUEUE_DEFAULT_LABSCRIPT)
         app.queue_manager.set_default_labscript_file(labscript_file)
@@ -1348,7 +1371,7 @@ class ContinuingSequenceAnchorTests(unittest.TestCase):
         submitted = os.path.join(self.directory, 'experiment_00.h5')
         for policy in (EMPTY_QUEUE_NOTHING, EMPTY_QUEUE_DEFAULT_LABSCRIPT):
             with self.subTest(policy=policy):
-                app = FakeRunManager()
+                app = FakeRunManager(self)
                 self.addCleanup(app.queue_manager.shutdown)
                 app.queue_manager.set_empty_queue_policy(policy)
 
@@ -1375,7 +1398,7 @@ class ShotIdBeforeCompileTests(unittest.TestCase):
     """
 
     def test_a_record_is_compiled_with_the_id_its_row_will_have(self):
-        app = FakeRunManager()
+        app = FakeRunManager(self)
         self.addCleanup(app.queue_manager.shutdown)
         prepared = []
         app.queue_manager.prepare_run_file_callback = lambda item: prepared.append(
@@ -1407,7 +1430,7 @@ class ShotIdBeforeCompileTests(unittest.TestCase):
         )
         self.assertEqual(
             prepared[0]['shot_id'],
-            app.queue_manager.controller._items[0]['shot_id'],
+            app.queue_manager.controller.get_queue_display_items()[0]['shot_id'],
             'the id written into the file is the id of the row in the queue',
         )
 
@@ -1417,12 +1440,15 @@ class ShotIdBeforeCompileTests(unittest.TestCase):
         # shot that was submitted.
         directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, directory, True)
-        app = FakeRunManager()
+        app = FakeRunManager(self)
         self.addCleanup(app.queue_manager.shutdown)
         path = os.path.join(directory, 'experiment_00.h5')
+        globals_file = os.path.join(directory, 'globals.toml')
+        runmanager.new_globals_file(globals_file)
+        runmanager.new_group(globals_file, 'group')
         item = {
             'path': path,
-            'active_groups': {'group': os.path.join(directory, 'globals.h5')},
+            'active_groups': {'group': globals_file},
             'frozen_globals': {},
             'sequence_attrs': {
                 'script_basename': 'experiment',
@@ -1435,12 +1461,7 @@ class ShotIdBeforeCompileTests(unittest.TestCase):
             'shot_id': 'the-id',
         }
 
-        # Evaluating globals is a globals file on disk and a compiler
-        # subprocess, and is not what writing the id turns on.
-        with mock.patch.object(
-            runmanager, 'get_queue_compile_globals', lambda groups, frozen: ({}, {})
-        ):
-            app.prepare_queue_shot(item)
+        app.prepare_queue_shot(item)
 
         with h5py.File(path, 'r') as f:
             self.assertEqual(f.attrs['shot_id'], 'the-id')
@@ -1460,7 +1481,7 @@ class ShotIdBeforeCompileTests(unittest.TestCase):
             self.assertNotIn('shot_id', f.attrs)
 
     def test_an_id_a_record_arrives_with_is_the_one_it_keeps(self):
-        app = FakeRunManager()
+        app = FakeRunManager(self)
         self.addCleanup(app.queue_manager.shutdown)
 
         queued = app.queue_manager.compile_shots(
@@ -1498,7 +1519,7 @@ class QueueEditingTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.directory, True)
-        self.app = FakeRunManager()
+        self.app = FakeRunManager(self)
         self.addCleanup(self.app.queue_manager.shutdown)
 
     def enqueue(self, name):
@@ -1720,7 +1741,7 @@ class ReplayTests(unittest.TestCase):
     """
 
     def setUp(self):
-        self.app = FakeRunManager()
+        self.app = FakeRunManager(self)
         self.addCleanup(self.app.queue_manager.shutdown)
         self.directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.directory, True)
@@ -1780,7 +1801,7 @@ class ReplayTests(unittest.TestCase):
 
         self.assertEqual(self.rows(), [], 'the shot is finished with, once')
         self.assertEqual(
-            self.app.analysis_submission.submitted,
+            self.app.analysed_paths(),
             [offered['path'], offered['path']],
             'reported twice, because it completed twice as far as this side '
             'can tell, and reporting it is what this side does',
@@ -1810,7 +1831,7 @@ class ReplayTests(unittest.TestCase):
             rows[0]['state'], 'running', 'the shot BLACS is running is untouched'
         )
         self.assertEqual(
-            self.app.analysis_submission.submitted,
+            self.app.analysed_paths(),
             [first['path'], first['path']],
             'the resend reports the file that ran a second time; what must '
             'not happen is the second row being retired on the strength of the '
@@ -1904,7 +1925,7 @@ class OutcomeAppliedOnceTests(unittest.TestCase):
     """
 
     def app_with_shot(self):
-        app = FakeRunManager()
+        app = FakeRunManager(self)
         self.addCleanup(app.queue_manager.shutdown)
         app.queue_manager.enqueue([queued_shot('/tmp/shot_a.h5')])
         offered = app.queue_manager.offer_next()
@@ -1924,6 +1945,7 @@ class OutcomeAppliedOnceTests(unittest.TestCase):
     def test_a_submission_that_falls_over_leaves_the_shot_to_be_run_again(self):
         app, shot_id = self.app_with_shot()
 
+        # An injected fault: the real hand-off only queues the path.
         def explode(path):
             raise RuntimeError('lyse submission fell over')
 
@@ -1956,14 +1978,15 @@ class OutcomeAppliedOnceTests(unittest.TestCase):
         app.queue_exchange(outcome, False)
 
         self.assertEqual(
-            app.analysis_submission.submitted,
-            [shared_drive.path_to_agnostic(os.path.abspath('/tmp/shot_a.h5'))],
+            app.analysed_paths(),
+            [os.path.abspath('/tmp/shot_a.h5')],
         )
         self.assertEqual(self.rows(app), [], 'and the row is retired as usual')
 
     def test_a_failure_while_applying_an_outcome_is_answered_not_raised(self):
         app, shot_id = self.app_with_shot()
 
+        # An injected fault: the real hand-off only queues the path.
         def explode(path):
             raise RuntimeError('lyse submission fell over')
 
@@ -2018,7 +2041,7 @@ class CancelledShotTests(unittest.TestCase):
     def queue_with_a_shot_at_blacs(self):
         directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, directory, True)
-        app = FakeRunManager()
+        app = FakeRunManager(self)
         self.addCleanup(app.queue_manager.shutdown)
         app.queue_manager.enqueue(
             [
@@ -2100,7 +2123,7 @@ class CancelledShotTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            app.analysis_submission.submitted,
+            app.analysed_paths(),
             ['/tmp/X.h5'],
             'the cancel is about the queue, not about physics that already '
             'happened',
@@ -2159,7 +2182,7 @@ class OutcomeWithNoRowTests(unittest.TestCase):
     """
 
     def app(self):
-        app = FakeRunManager()
+        app = FakeRunManager(self)
         self.addCleanup(app.queue_manager.shutdown)
         return app
 
@@ -2177,7 +2200,7 @@ class OutcomeWithNoRowTests(unittest.TestCase):
         app.apply_shot_outcome(self.outcome())
 
         self.assertEqual(
-            app.analysis_submission.submitted,
+            app.analysed_paths(),
             ['/tmp/gone.h5'],
             'the shot ran and wrote data, and reporting that is this side\'s '
             'part whether or not a row is left to tick off',
@@ -2206,7 +2229,7 @@ class OutcomeWithNoRowTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            app.analysis_submission.submitted, [], 'it did not run to the end'
+            app.analysed_paths(), [], 'it did not run to the end'
         )
 
     def test_nothing_is_submitted_when_blacs_named_no_file(self):
@@ -2214,7 +2237,7 @@ class OutcomeWithNoRowTests(unittest.TestCase):
 
         app.apply_shot_outcome(dict(self.outcome(), path=None))
 
-        self.assertEqual(app.analysis_submission.submitted, [])
+        self.assertEqual(app.analysed_paths(), [])
 
 
 class QueueBookkeepingUnderSubmissionTests(unittest.TestCase):
@@ -2235,7 +2258,7 @@ class QueueBookkeepingUnderSubmissionTests(unittest.TestCase):
     """
 
     def app_with(self, *items):
-        app = FakeRunManager()
+        app = FakeRunManager(self)
         self.addCleanup(app.queue_manager.shutdown)
         app.queue_manager.enqueue(list(items))
         return app
@@ -2317,7 +2340,7 @@ class MalformedOutcomeTests(unittest.TestCase):
     """
 
     def make_runmanager(self):
-        app = FakeRunManager()
+        app = FakeRunManager(self)
         self.addCleanup(app.queue_manager.shutdown)
         app.queue_manager.enqueue([queued_shot('/tmp/shot_a.h5')])
         return app
@@ -2360,12 +2383,16 @@ class MalformedOutcomeTests(unittest.TestCase):
 _qapplication = None
 
 
-def make_queue_widget():
+def hold_qapplication():
     global _qapplication
     if QApplication.instance() is None:
         # Held for the life of the process: a QApplication that is garbage
         # collected takes every widget built under it down with it.
         _qapplication = QApplication([])
+
+
+def make_queue_widget():
+    hold_qapplication()
     return RunmanagerQueueWidget()
 
 
@@ -2615,7 +2642,7 @@ class ExchangeFailureTests(unittest.TestCase):
     """
 
     def make_runmanager(self):
-        app = FakeRunManager()
+        app = FakeRunManager(self)
         self.addCleanup(app.queue_manager.shutdown)
         return app
 
@@ -2624,6 +2651,7 @@ class ExchangeFailureTests(unittest.TestCase):
         app.queue_manager.enqueue([queued_shot('/tmp/shot_a.h5')])
         offered = app.queue_exchange(request_shot=True)
 
+        # An injected fault: no input makes choosing a shot raise.
         def raise_instead(*args, **kwargs):
             raise RuntimeError('the default labscript file has moved')
 
@@ -2660,7 +2688,7 @@ class LostRowTests(unittest.TestCase):
     """
 
     def test_a_completed_shot_with_no_row_is_reported_and_still_analysed(self):
-        app = FakeRunManager()
+        app = FakeRunManager(self)
         self.addCleanup(app.queue_manager.shutdown)
         app.queue_manager.enqueue([queued_shot('/tmp/shot_a.h5')])
         offered = app.queue_exchange(request_shot=True)
@@ -2679,7 +2707,7 @@ class LostRowTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            app.analysis_submission.submitted,
+            app.analysed_paths(),
             ['/tmp/shot_a.h5'],
             'the queue lost the row, but the shot ran and wrote data, and a '
             'completion withheld here is one nothing downstream can ask for',
@@ -2689,7 +2717,7 @@ class LostRowTests(unittest.TestCase):
         )
 
     def test_a_path_runmanager_cannot_use_does_not_reach_analysis_as_it_came(self):
-        app = FakeRunManager()
+        app = FakeRunManager(self)
         self.addCleanup(app.queue_manager.shutdown)
         app.queue_manager.enqueue([queued_shot('/tmp/shot_a.h5')])
         offered = app.queue_exchange(request_shot=True)
@@ -2703,8 +2731,9 @@ class LostRowTests(unittest.TestCase):
             request_shot=False,
         )
 
-        self.assertTrue(
-            all(isinstance(path, str) for path in app.analysis_submission.submitted),
+        self.assertEqual(
+            len(app.analysed_paths()),
+            1,
             'lyse is given a path, whatever shape BLACS sent',
         )
 
@@ -2725,7 +2754,8 @@ class SequenceContinuityTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.directory, True)
-        self.app = FakeRunManager()
+        self.app = FakeRunManager(self)
+        self.app.exp_config = labconfig(self.directory)
         self.addCleanup(self.app.queue_manager.shutdown)
         self.existing = {
             'script_basename': 'experiment',
@@ -2733,29 +2763,14 @@ class SequenceContinuityTests(unittest.TestCase):
             'sequence_index': 11,
             'sequence_id': '20260918T101112_experiment',
         }
-        # What new_sequence_details would answer if asked for a new sequence.
-        # Minting one is a labconfig read, a timestamp and a counter file under
-        # a zlock; what is under test is what runmanager does with the answer,
-        # and -- for a batch being added to a sequence -- whether it asks at
-        # all.
-        self.fresh = {
-            'script_basename': 'experiment',
-            'sequence_date': '2026-09-18',
-            'sequence_index': 12,
-            'sequence_id': '20260918T120000_experiment',
-        }
-        self.claimed_a_sequence_index = []
-        patcher = mock.patch.object(
-            runmanager, 'new_sequence_details', self.fake_new_sequence_details
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
-    def fake_new_sequence_details(
-        self, script_path, config=None, increment_sequence_index=True, **kwargs
-    ):
-        self.claimed_a_sequence_index.append(increment_sequence_index)
-        return dict(self.fresh), self.directory, 'experiment'
+    def next_free_index(self):
+        """The index a new sequence of experiment.py would be given today."""
+        return runmanager.next_sequence_index(
+            os.path.join(self.directory, 'experiment'),
+            datetime.datetime.now(),
+            increment=False,
+        )
 
     def path(self, name):
         return os.path.join(self.directory, name)
@@ -2869,8 +2884,8 @@ class SequenceContinuityTests(unittest.TestCase):
         self.add_shots(2, anchor)
 
         self.assertEqual(
-            self.claimed_a_sequence_index,
-            [],
+            self.next_free_index(),
+            0,
             'a sequence index claimed for a sequence that was never started '
             'is one no sequence will ever carry, and minting one to throw it '
             'away costs a lock on shot storage that every submission waits in',
@@ -2886,7 +2901,7 @@ class SequenceContinuityTests(unittest.TestCase):
             with_metadata=True,
         )
 
-        self.assertEqual(self.claimed_a_sequence_index, [True])
+        self.assertEqual(self.next_free_index(), 1)
 
     def test_the_newer_row_answers_for_a_path_two_rows_hold(self):
         # Nothing sets out to queue one path twice, so which row answers is a
@@ -3010,7 +3025,7 @@ class DeletedAnchorTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.directory, True)
-        self.app = FakeRunManager()
+        self.app = FakeRunManager(self)
         self.addCleanup(self.app.queue_manager.shutdown)
 
     def enqueue(self, app, name):
@@ -3041,7 +3056,9 @@ class DeletedAnchorTests(unittest.TestCase):
         sent = self.enqueue(self.app, 'experiment_00.h5')
         self.enqueue(self.app, 'experiment_01.h5')
         self.app.offer_shot()
-        waiting_id = self.app.queue_manager.controller._items[1]['shot_id']
+        waiting_id = self.app.queue_manager.controller.get_queue_display_items()[1][
+            'shot_id'
+        ]
 
         self.app.queue_manager.delete_rows([waiting_id])
 
@@ -3063,7 +3080,7 @@ class DeletedAnchorTests(unittest.TestCase):
         open(labscript_file, 'w').close()
         default_shot = os.path.join(self.directory, 'default_shot_0.h5')
         open(default_shot, 'w').close()
-        app = FakeRunManager(default_shot_file=default_shot)
+        app = FakeRunManager(self, default_shot_file=default_shot)
         self.addCleanup(app.queue_manager.shutdown)
         app.queue_manager.set_empty_queue_policy(EMPTY_QUEUE_DEFAULT_LABSCRIPT)
         app.queue_manager.set_default_labscript_file(labscript_file)
@@ -3127,7 +3144,7 @@ class AlternateSubmissionMenuTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.directory, True)
-        self.app = FakeRunManager()
+        self.app = FakeRunManager(self)
         self.addCleanup(self.app.queue_manager.shutdown)
 
     def path(self, name):
@@ -3227,7 +3244,7 @@ class MissingSequenceReportTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.directory, True)
-        self.app = FakeRunManager()
+        self.app = FakeRunManager(self)
         self.addCleanup(self.app.queue_manager.shutdown)
         self.path = os.path.join(self.directory, 'experiment_00.h5')
 
@@ -3302,7 +3319,7 @@ class CallerChosenShotIdTests(unittest.TestCase):
         )
         self.assertEqual(
             self.written,
-            [self.manager.controller._items[0]['shot_id']],
+            [self.manager.controller.get_queue_display_items()[0]['shot_id']],
             'and the id written into the shot file is the one its row has',
         )
 
@@ -3311,7 +3328,7 @@ class QueuedShotFileTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.directory, True)
-        self.app = FakeRunManager()
+        self.app = FakeRunManager(self)
         self.addCleanup(self.app.queue_manager.shutdown)
         self.globals_file = os.path.join(self.directory, 'globals.toml')
         runmanager.new_globals_file(self.globals_file)

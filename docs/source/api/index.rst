@@ -10,6 +10,7 @@ API Reference
     runmanager
     runmanager.functions
     runmanager.remote
+    runmanager.client
     runmanager.batch_compiler
     runmanager.globals_diff
     runmanager.__main__
