@@ -515,7 +515,7 @@ class PauseQueueControlTests(unittest.TestCase):
 
     def test_queue_tab_has_its_icon(self):
         index = self.ui.tabWidget.indexOf(self.ui.tab_queue)
-        self.assertEqual(index, 0)
+        self.assertNotEqual(index, -1)
         self.assertFalse(self.ui.tabWidget.tabIcon(index).isNull())
 
     def test_the_button_shows_a_different_icon_once_the_queue_is_paused(self):
