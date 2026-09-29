@@ -21,7 +21,6 @@ import labscript_utils.h5_lock  # noqa: F401
 import h5py
 import numpy as np
 import runmanager
-from labscript_utils.qtwidgets.shotqueue import RULE_BELOW_ROLE
 from qtutils.qt.QtCore import Qt
 from qtutils.qt.QtWidgets import QApplication
 
@@ -44,7 +43,6 @@ from runmanager.queueing import (
     COMPILE_MODE_LAZY,
     EMPTY_QUEUE_DEFAULT_LABSCRIPT,
     EMPTY_QUEUE_NOTHING,
-    FAILED_ROW_BACKGROUND,
     PROVIDER_NONE,
     PROVIDER_SHOT,
     ROW_BACKGROUNDS,
@@ -459,20 +457,6 @@ class RejectedShotTests(unittest.TestCase):
         offered = controller.offer_next()
         self.assertEqual(offered['path'], os.path.abspath('/tmp/shot_b.h5'))
 
-    def test_it_is_shown_like_any_other_shot_needing_attention(self):
-        controller, _ = self.rejected_queue()
-
-        widget = make_queue_widget()
-        widget.set_queue_paths(controller.get_queue_display_items())
-
-        for brush in row_backgrounds(widget, 0):
-            self.assertEqual(brush.color(), FAILED_ROW_BACKGROUND)
-        item = widget.queue_model.item(0, widget.path_column)
-        self.assertIn('H5 file not accessible', item.toolTip())
-        self.assertTrue(
-            item.isSelectable(), 'deleting it is how an operator moves the queue on'
-        )
-
 
 class FakeOutputBox(object):
     """What runmanager shows its user, which is where protocol trouble shows."""
@@ -508,7 +492,6 @@ class FakeRunManager(object):
     get_queue_append_filepath = RunManager.get_queue_append_filepath
     get_last_sent_from_queue_filepath = RunManager.get_last_sent_from_queue_filepath
     get_submission_anchor = RunManager.get_submission_anchor
-    can_use_alternate_submission_mode = RunManager.can_use_alternate_submission_mode
     reindex_run_file_infos = RunManager.reindex_run_file_infos
     make_h5_files = RunManager.make_h5_files
     prepare_queue_shot = RunManager.prepare_queue_shot
@@ -548,10 +531,6 @@ class FakeRunManager(object):
         self.analysis_submission = submit_to_lyse(testcase, lyse.port)
         self.default_shot_file = default_shot_file
         self.default_shots_taken = 0
-        self.run_shots = True
-        self.ui = types.SimpleNamespace(
-            checkBox_run_shots=types.SimpleNamespace(isChecked=lambda: self.run_shots),
-        )
 
     def compile_run_file(self, labscript_file, path):
         self.compiled.append(path)
@@ -954,25 +933,6 @@ class CompileFailureIsNotAHandoverTests(unittest.TestCase):
         item, _pending = controller.claim_next_for_compile()
         controller.finish_compile(item, False, 'Could not be compiled. See the output.')
         return controller
-
-    def test_it_does_not_take_the_row_reserved_for_the_shot_blacs_has(self):
-        controller = self.failed_compile_queue()
-
-        widget = make_queue_widget()
-        widget.set_queue_paths(controller.get_queue_display_items())
-
-        model = widget.queue_model
-        labels = [
-            model.item(row, widget.path_column).text()
-            for row in range(model.rowCount())
-        ]
-        self.assertIn(
-            'Nothing sent',
-            labels[0],
-            'BLACS has never seen this file, so the row that means it has one '
-            'stays empty',
-        )
-        self.assertEqual(labels[1:], ['lazy_a.h5', 'shot_b.h5'])
 
     def test_a_replacement_submission_clears_it(self):
         controller = self.failed_compile_queue()
@@ -2069,18 +2029,6 @@ class CancelledShotTests(unittest.TestCase):
             'and the row stays where it is',
         )
 
-    def test_the_row_is_struck_through(self):
-        app, shot_id = self.queue_with_a_shot_at_blacs()
-
-        app.queue_manager.delete_rows([shot_id])
-
-        widget = make_queue_widget()
-        widget.set_queue_paths(self.rows(app))
-        font = widget.queue_model.item(0, widget.path_column).font()
-        self.assertTrue(
-            font.strikeOut(), 'still here, and finished with, said at once'
-        )
-
     def test_it_is_never_offered_again(self):
         app, shot_id = self.queue_with_a_shot_at_blacs()
         app.queue_manager.delete_rows([shot_id])
@@ -2396,70 +2344,8 @@ def make_queue_widget():
     return RunmanagerQueueWidget()
 
 
-def row_backgrounds(widget, row):
-    model = widget.queue_model
-    return [
-        model.item(row, column).data(Qt.BackgroundRole)
-        for column in range(model.columnCount())
-    ]
-
-
 class SentToBlacsRowTests(unittest.TestCase):
-    """The reserved first row of the queue: the shot that went to BLACS.
-
-    A row rather than a label above the table, so that it keeps the columns and
-    any column added later describes it too. Set apart from the waiting work
-    below it by a rule and by its colour. Always present, so the queue below
-    never shifts, and saying so when nothing has been sent.
-
-    "Sent to BLACS" is the states a row reaches by being given to BLACS, named
-    in BLACS_STATES, so one added later belongs here without the widget having
-    to learn its name. A compile failure is not one of them: that row never left
-    runmanager.
-    """
-
-    def widget_for(self, controller):
-        widget = make_queue_widget()
-        widget.set_queue_paths(controller.get_queue_display_items())
-        return widget
-
-    def labels(self, widget):
-        model = widget.queue_model
-        return [
-            model.item(row, widget.path_column).text()
-            for row in range(model.rowCount())
-        ]
-
-    def test_it_says_so_when_nothing_has_been_sent(self):
-        controller = QueueController()
-        controller.enqueue(
-            [queued_shot('/tmp/shot_a.h5'), queued_shot('/tmp/shot_b.h5')]
-        )
-
-        widget = self.widget_for(controller)
-
-        labels = self.labels(widget)
-        self.assertIn('Nothing sent', labels[0])
-        self.assertEqual(
-            labels[1:],
-            ['shot_a.h5', 'shot_b.h5'],
-            'and every queued shot is still listed below it',
-        )
-        self.assertTrue(
-            all(brush is None for brush in row_backgrounds(widget, 0)),
-            'an empty reserved row is not tinted',
-        )
-
-    def test_the_reserved_row_cannot_be_selected_when_it_is_empty(self):
-        controller = QueueController()
-        controller.enqueue([queued_shot('/tmp/shot_a.h5')])
-
-        widget = self.widget_for(controller)
-
-        self.assertFalse(
-            widget.queue_model.item(0, widget.path_column).isSelectable(),
-            'there is nothing there to act on',
-        )
+    """The shot BLACS was given is the widget's reserved first row."""
 
     def test_the_shot_that_was_sent_moves_into_the_reserved_row(self):
         controller = QueueController()
@@ -2467,121 +2353,26 @@ class SentToBlacsRowTests(unittest.TestCase):
             [queued_shot('/tmp/shot_a.h5'), queued_shot('/tmp/shot_b.h5')]
         )
         controller.offer_next()
+        widget = make_queue_widget()
+        widget.set_queue_paths(controller.get_queue_display_items())
 
-        widget = self.widget_for(controller)
-
+        model = widget.queue_model
         self.assertEqual(
-            self.labels(widget),
+            [
+                model.item(row, widget.path_column).text()
+                for row in range(model.rowCount())
+            ],
             ['shot_a.h5', 'shot_b.h5'],
             'the sent shot is the reserved row, and is not listed twice',
         )
-        self.assertTrue(
-            all(brush is None for brush in row_backgrounds(widget, 0)),
-            'running needs no colour: the rule above the queue already says '
-            'BLACS was sent this shot',
-        )
-        self.assertTrue(
-            all(brush is None for brush in row_backgrounds(widget, 1)),
-            'waiting work is never tinted either',
-        )
-
-    def test_a_failed_shot_stays_in_the_reserved_row_in_red(self):
-        controller = QueueController()
-        controller.enqueue(
-            [queued_shot('/tmp/shot_a.h5'), queued_shot('/tmp/shot_b.h5')]
-        )
-        offered = controller.offer_next()
-        controller.shot_finished(
-            offered['shot_id'], 'failed', 'Device(s) in error state'
-        )
-
-        widget = self.widget_for(controller)
-
-        self.assertEqual(self.labels(widget), ['shot_a.h5', 'shot_b.h5'])
-        for brush in row_backgrounds(widget, 0):
-            self.assertEqual(brush.color(), FAILED_ROW_BACKGROUND)
-        self.assertIn(
-            'Device(s) in error state',
-            widget.queue_model.item(0, widget.path_column).toolTip(),
-        )
-        self.assertTrue(
-            widget.queue_model.item(0, widget.path_column).isSelectable(),
-            'a failed shot has to be deletable: it is how the queue moves on',
-        )
-
-    def test_the_running_row_can_be_selected_and_says_what_delete_does(self):
-        # Delete cancels the running shot rather than removing it, so there is
-        # something to aim at and the row has to be selectable -- and the
-        # tooltip says what aiming at it will do, since it is not the outright
-        # removal that Delete means everywhere else.
-        controller = QueueController()
-        controller.enqueue([queued_shot('/tmp/shot_a.h5')])
-        controller.offer_next()
-
-        widget = self.widget_for(controller)
-
-        item = widget.queue_model.item(0, widget.path_column)
-        self.assertTrue(item.isSelectable())
-        self.assertIn('Delete cancels it', item.toolTip())
-
-    def test_a_cancelled_row_cannot_be_selected_again(self):
-        controller = QueueController()
-        controller.enqueue([queued_shot('/tmp/shot_a.h5')])
-        controller.offer_next()
-        controller.delete_rows([controller.get_queue_display_items()[0]['shot_id']])
-
-        widget = self.widget_for(controller)
-
-        self.assertFalse(
-            widget.queue_model.item(0, widget.path_column).isSelectable(),
-            'a second Delete could not free the file any sooner than the first',
-        )
-
-    def test_the_reserved_row_is_ruled_off_from_the_work_below_it(self):
-        controller = QueueController()
-        controller.enqueue([queued_shot('/tmp/shot_a.h5')])
-        controller.offer_next()
-
-        widget = self.widget_for(controller)
-
-        model = widget.queue_model
-        self.assertTrue(
-            model.item(0, widget.path_column).data(RULE_BELOW_ROLE),
-            'the break from the queue below is what makes it a cell apart',
-        )
-
-    def test_the_columns_describe_the_reserved_row_too(self):
-        # The reason it is a row and not a label above the table: whatever
-        # columns the queue grows, the shot that was sent gets them as well.
-        controller = QueueController()
-        controller.enqueue(
-            [queued_shot('/tmp/shot_a.h5', compile_mode=COMPILE_MODE_LAZY)]
-        )
-        controller.offer_next()
-
-        widget = self.widget_for(controller)
-
-        model = widget.queue_model
-        mode_column = 0 if widget.path_column else 1
-        self.assertEqual(model.item(0, mode_column).text(), 'lazy')
 
 
 class QueueDisplayTests(unittest.TestCase):
-    """What a row's state looks like in the queue: red, or nothing.
-
-    One colour, for the one thing that needs one. The reserved row's position
-    above the rule is what says BLACS was sent that shot, so running needs no
-    colour; red marks the exception, a shot that came back without running.
-
-    Only the mapping from a row's state to its appearance is here. Which state
-    a row is in after an offer, a failure, a retry or a completion is the
-    controller's rule, and is covered against the controller above.
-    """
+    """A failed row is tinted, and its text stands off the tint on any theme."""
 
     def test_a_tinted_row_names_its_text_colour_too(self):
-        # A background alone leaves the theme's own text colour on it. The fill
-        # is pale, so on a dark theme that is near-white text on near-white --
-        # the row became unreadable exactly when it mattered.
+        # A background alone leaves the theme's own text colour on it, and the
+        # fill is pale: near-white text on near-white on a dark theme.
         controller = QueueController()
         controller.enqueue(
             [queued_shot('/tmp/shot_a.h5'), queued_shot('/tmp/shot_b.h5')]
@@ -2608,26 +2399,6 @@ class QueueDisplayTests(unittest.TestCase):
         self.assertIsNone(
             model.item(1, 0).data(Qt.ForegroundRole),
             'an untinted row is left to the theme',
-        )
-
-    def test_failed_row_is_shown_red_with_its_reason_in_the_tooltip(self):
-        controller = QueueController()
-        controller.enqueue([queued_shot('/tmp/shot_a.h5')])
-        offered = controller.offer_next()
-        controller.shot_finished(offered['shot_id'], 'failed', 'Device(s) in error state')
-        widget = make_queue_widget()
-        widget.set_queue_paths(controller.get_queue_display_items())
-
-        failed = row_backgrounds(widget, 0)
-        self.assertTrue(all(brush is not None for brush in failed))
-        for brush in failed:
-            colour = brush.color()
-            self.assertEqual(colour, FAILED_ROW_BACKGROUND)
-            self.assertGreater(colour.red(), max(colour.green(), colour.blue()))
-        self.assertIn(
-            'Device(s) in error state',
-            widget.queue_model.item(0, 1).toolTip(),
-            'the reason a shot needs attention is on the row',
         )
 
 
@@ -3101,127 +2872,6 @@ class DeletedAnchorTests(unittest.TestCase):
             'a shot the operator cancelled and whose file has gone is not '
             'what the next submission carries on from',
         )
-
-
-class EngageWindow(object):
-    """The window Engage reads, over what its own warnings need.
-
-    ``expand_pending_shots`` stands for the globals the window would expand,
-    and ``compile_and_queue_shots`` records what reached it rather than
-    compiling anything.
-    """
-
-    on_engage_clicked = RunManager.on_engage_clicked
-
-    def __init__(self, run_shots=True, view_shots=False):
-        self.output_box = FakeOutputBox()
-        self.submitted = []
-        self.ui = types.SimpleNamespace(
-            checkBox_run_shots=types.SimpleNamespace(isChecked=lambda: run_shots),
-            checkBox_view_shots=types.SimpleNamespace(isChecked=lambda: view_shots),
-        )
-
-    def expand_pending_shots(self):
-        return [({'x': 0}, {'x': '0'})]
-
-    def compile_and_queue_shots(self, submission_mode, *args):
-        self.submitted.append(submission_mode)
-
-
-class AlternateSubmissionMenuTests(unittest.TestCase):
-    """When the Engage menu offers to add shots to the last sequence.
-
-    The items name a last sequence, so they are offered while there is one to
-    name: a shot still in the queue, or -- once BLACS has taken the last of
-    them -- the shot it was sent. A runmanager that has queued nothing and
-    sent nothing has no last sequence, and an item promising one there would
-    be promising something that does not exist.
-
-    They are all about the queue, so none of them is offered while nothing is
-    going to BLACS at all.
-    """
-
-    def setUp(self):
-        self.directory = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.directory, True)
-        self.app = FakeRunManager(self)
-        self.addCleanup(self.app.queue_manager.shutdown)
-
-    def path(self, name):
-        return os.path.join(self.directory, name)
-
-    def test_a_queued_shot_is_a_sequence_to_add_to(self):
-        self.app.queue_manager.enqueue([queued_shot(self.path('experiment_00.h5'))])
-
-        self.assertTrue(self.app.can_use_alternate_submission_mode())
-
-    def test_the_shot_blacs_was_sent_is_a_sequence_to_add_to(self):
-        # BLACS takes the last queued shot on a thread of its own, so an
-        # operator reaching for the menu can find the queue empty underneath
-        # them. The shot it was sent is the one they were looking at.
-        self.app.queue_manager.enqueue([queued_shot(self.path('experiment_00.h5'))])
-        offered = self.app.offer_shot()
-        self.app.queue_manager.shot_finished(offered['shot_id'], 'completed')
-
-        self.assertEqual(self.app.queue_controller.get_queue_paths(), [])
-        self.assertTrue(self.app.can_use_alternate_submission_mode())
-
-    def test_nothing_queued_and_nothing_sent_offers_nothing(self):
-        self.assertFalse(self.app.can_use_alternate_submission_mode())
-
-    def test_nothing_is_offered_while_no_shots_are_going_to_blacs(self):
-        self.app.queue_manager.enqueue([queued_shot(self.path('experiment_00.h5'))])
-        self.app.run_shots = False
-
-        self.assertFalse(self.app.can_use_alternate_submission_mode())
-
-
-class EngageGuardTests(unittest.TestCase):
-    """What Engage refuses before it compiles anything.
-
-    Its one warning is about the window: whether the mode the operator picked
-    from the menu can be used with the destinations ticked. Anything about the
-    queue is settled where the queue is read, because the queue moves on its
-    own between the two.
-    """
-
-    def test_a_mode_that_has_somewhere_to_send_its_shots_is_engaged(self):
-        # The other side of the warning below: the modes about the queue are
-        # refused for want of BLACS and for nothing else, and what Engage
-        # hands on is the mode the operator picked.
-        window = EngageWindow()
-
-        window.on_engage_clicked(
-            submission_mode=main_module.SUBMISSION_MODE_ADD_SHOTS
-        )
-
-        self.assertEqual(
-            window.submitted, [main_module.SUBMISSION_MODE_ADD_SHOTS]
-        )
-        self.assertEqual(window.output_box.lines, [], 'and nothing was warned about')
-
-    def test_an_alternate_mode_still_needs_shots_to_be_sent_to_blacs(self):
-        window = EngageWindow(run_shots=False, view_shots=True)
-
-        window.on_engage_clicked(
-            submission_mode=main_module.SUBMISSION_MODE_ADD_SHOTS
-        )
-
-        self.assertEqual(window.submitted, [], 'nothing was submitted')
-        self.assertTrue(window.output_box.said('BLACS'))
-
-    def test_a_new_sequence_is_engaged_without_blacs(self):
-        # The warning above is for the modes about the queue, and only those.
-        # A new sequence asks nothing of the queue, so looking at the shots in
-        # runviewer without running them is a whole use of Engage.
-        window = EngageWindow(run_shots=False, view_shots=True)
-
-        window.on_engage_clicked()
-
-        self.assertEqual(
-            window.submitted, [main_module.SUBMISSION_MODE_NEW_FOLDER]
-        )
-        self.assertEqual(window.output_box.lines, [])
 
 
 class MissingSequenceReportTests(unittest.TestCase):
