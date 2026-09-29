@@ -5246,18 +5246,23 @@ class RunmanagerServer(ZMQServer):
         port = app.exp_config.getint('ports', 'runmanager', fallback=DEFAULT_PORT)
         ZMQServer.__init__(self, port=port)
 
-    def _get_active_global_locations(self):
+    def _get_active_global_locations(self, names=None):
         active_groups = inmain(app.get_active_groups, interactive=False)
         sequence_globals = runmanager.get_globals(active_groups)
         locations = {}
+        groups_of = {}
         for group_name, group_globals in sequence_globals.items():
-            globals_file = active_groups[group_name]
             for global_name in group_globals:
-                if global_name in locations:
-                    other_file, other_group = locations[global_name]
-                    msg = """Global %s is defined in multiple active groups: %s and %s"""
-                    raise RuntimeError(msg % (global_name, other_group, group_name))
-                locations[global_name] = (globals_file, group_name)
+                groups_of.setdefault(global_name, []).append(group_name)
+                locations.setdefault(global_name, (active_groups[group_name], group_name))
+        # Only the globals the caller reads or writes must be defined once. A
+        # getter of all of them reads every one.
+        for global_name in (locations if names is None else names):
+            if len(groups_of.get(global_name, ())) > 1:
+                raise RuntimeError(
+                    'Global %s is defined in multiple active groups: %s'
+                    % (global_name, ' and '.join(groups_of[global_name]))
+                )
         return active_groups, sequence_globals, locations
 
     def _get_global_field_values(self, getter):
@@ -5308,7 +5313,7 @@ class RunmanagerServer(ZMQServer):
 
     @inmain_decorator()
     def _set_expression_field_values(self, getter, setter, changer_name, globals, raw=False):
-        _, _, locations = self._get_active_global_locations()
+        _, _, locations = self._get_active_global_locations(globals)
         try:
             for global_name, new_value in globals.items():
                 if not raw:
@@ -5338,7 +5343,7 @@ class RunmanagerServer(ZMQServer):
 
     @inmain_decorator()
     def _set_boolean_field_values(self, getter, setter, changer_name, globals):
-        _, _, locations = self._get_active_global_locations()
+        _, _, locations = self._get_active_global_locations(globals)
         try:
             for global_name, new_value in globals.items():
                 new_value = self._coerce_remote_boolean(
