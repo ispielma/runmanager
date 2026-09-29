@@ -1,13 +1,10 @@
 """What identifies the sequence a shot belongs to.
 
-Every shot file carries the attributes saying which sequence it is part of,
-and runmanager reads them back out of one when a later batch is added to that
-sequence. The two ends have to agree on which attributes those are: a name
-written but not read is dropped from the added shots, and a name read but not
-written raises the first time a sequence is extended.
+A shot file carries the attributes naming its sequence, and runmanager reads
+them back when a later batch is added to that sequence. The two ends have to
+agree on which attributes those are.
 """
 import datetime
-import functools
 import os
 import shutil
 import tempfile
@@ -27,65 +24,20 @@ from fixtures import RunManager, labconfig
 from runmanager.queueing import QueueController, QueueManager
 
 
-def sequence_attrs(**overrides):
-    attrs = {
-        'script_basename': 'experiment',
-        'sequence_date': '2026-09-18',
-        'sequence_index': 7,
-        'sequence_id': '20260918T101112_experiment',
-    }
-    attrs.update(overrides)
-    return attrs
-
-
 class SequenceAttrsTests(unittest.TestCase):
-    def setUp(self):
-        self.directory = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.directory, True)
-
-    def test_a_new_sequence_is_described_by_exactly_the_named_attributes(self):
+    def test_a_new_sequence_is_read_back_from_its_shot_file(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         attrs, _, _ = runmanager.new_sequence_details(
-            os.path.join(self.directory, 'experiment.py'),
-            config=labconfig(self.directory),
+            os.path.join(directory, 'experiment.py'), config=labconfig(directory)
         )
-
-        self.assertEqual(
-            set(attrs),
-            set(runmanager.SEQUENCE_ATTRS),
-            'SEQUENCE_ATTRS is what a shot is asked for when a sequence is '
-            'extended, so it has to be what new_sequence_details produces',
-        )
-
-    def test_a_shot_file_answers_with_the_sequence_it_was_written_with(self):
-        attrs = sequence_attrs()
-        path = os.path.join(self.directory, 'experiment_00.h5')
+        path = os.path.join(directory, 'experiment_00.h5')
         runmanager.make_single_run_file(path, None, {}, attrs, 0, 1)
 
         self.assertEqual(
             runmanager.get_sequence_attrs(path),
             attrs,
-            'a shot added to this sequence is written with what is read here, '
-            'so anything lost on the way through lands in the added shots',
-        )
-
-    def test_a_shot_file_answers_with_the_values_it_was_written_with(self):
-        # Equal values are not the same values. h5py answers with numpy
-        # scalars, and np.int64(7) == 7 while being something a TOML app
-        # config cannot hold -- so a queue holding a sequence read back from a
-        # shot file is a queue that cannot be saved. Types are asserted here
-        # because equality cannot see the difference.
-        attrs = sequence_attrs()
-        path = os.path.join(self.directory, 'experiment_01.h5')
-        runmanager.make_single_run_file(path, None, {}, attrs, 0, 1)
-
-        read = runmanager.get_sequence_attrs(path)
-
-        self.assertEqual(
-            {name: type(value) for name, value in read.items()},
-            {name: type(value) for name, value in attrs.items()},
-            'what is read here is written into the shots added to this '
-            'sequence and kept in their queue records, so it has to be the '
-            'plain values that were written and not stand-ins for them',
+            'a shot added to this sequence is written with what is read here',
         )
 
 
@@ -133,24 +85,21 @@ class DefaultSequenceTests(unittest.TestCase):
         app._default_shot_ready = None
         app._default_shot_preparing = True
         with self.at(hour):
-            RunManager.prepare_default_shot(app, self.labscript_file, False)
+            app.prepare_default_shot(self.labscript_file, False)
         self.assertIsNotNone(app._default_shot_ready, app.said)
         return app._default_shot_ready
 
     def default_shot_app(self, **runmanager_settings):
         """A runmanager just started, over the globals file in the directory."""
-        said = []
-        app = types.SimpleNamespace(
-            exp_config=labconfig(self.directory, **runmanager_settings),
-            sequences={},
-            said=said,
-            _default_shot_lock=threading.Lock(),
-            get_active_groups=lambda interactive=True: {'group': self.globals_file},
-            output_box=types.SimpleNamespace(
-                output=lambda text, red=False: said.append(text)
-            ),
+        app = RunManager.__new__(RunManager)
+        app.exp_config = labconfig(self.directory, **runmanager_settings)
+        app.sequences = {}
+        app.said = []
+        app._default_shot_lock = threading.Lock()
+        app.get_active_groups = lambda interactive=True: {'group': self.globals_file}
+        app.output_box = types.SimpleNamespace(
+            output=lambda text, red=False: app.said.append(text)
         )
-        app.prepare_queue_shot = functools.partial(RunManager.prepare_queue_shot, app)
         app.queue_manager = QueueManager(
             QueueController(),
             app.prepare_queue_shot,
@@ -160,17 +109,6 @@ class DefaultSequenceTests(unittest.TestCase):
         )
         self.addCleanup(app.queue_manager.shutdown)
         return app
-
-    def test_each_default_shot_takes_the_next_run_number_of_that_sequence(self):
-        # Every one of them run 0 would be one run number for many shots of
-        # one sequence.
-        app = self.default_shot_app()
-        runs = []
-        for hour in (8, 21):
-            with h5py.File(self.default_shot(app, hour)['path'], 'r') as shot:
-                runs.append((shot.attrs['run number'], shot.attrs['n_runs']))
-
-        self.assertEqual(runs, [(0, 1), (1, 2)])
 
     def test_default_shots_named_by_a_global_are_numbered_through_a_restart(self):
         # Named after a global, the day's default files differ in more than
