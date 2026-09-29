@@ -7,12 +7,11 @@ _default_client = RunmanagerClient()
 
 say_hello = _default_client.say_hello
 get_version = _default_client.get_version
-get_default_globals = _default_client.get_default_globals
+get_values = _default_client.get_values
 get_globals = _default_client.get_globals
-set_default_globals = _default_client.set_default_globals
-set_globals = _default_client.set_globals
-get_scan_globals = _default_client.get_scan_globals
-set_scan_globals = _default_client.set_scan_globals
+set_values = _default_client.set_values
+get_scans = _default_client.get_scans
+set_scans = _default_client.set_scans
 get_scan_enabled = _default_client.get_scan_enabled
 set_scan_enabled = _default_client.set_scan_enabled
 get_jit_enabled = _default_client.get_jit_enabled
@@ -41,8 +40,8 @@ if __name__ == '__main__':
     # Test
     import time
 
-    current = get_default_globals()
+    current = get_values()
     print("get globals:", current)
-    print("set globals", set_default_globals({'test': current['test']}, raw=True))
-    assert get_default_globals()['test'] == current['test']
+    print("set globals", set_values({'test': current['test']}, raw=True))
+    assert get_values()['test'] == current['test']
     engage()

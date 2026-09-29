@@ -59,7 +59,7 @@ def _blank_record():
 
 
 def _normalise_record(record):
-    normalised = _blank_record()
+    normalised = dict(record)
     normalised.update(
         {
             "default": _ensure_str(record.get("default", "")),
@@ -73,9 +73,9 @@ def _normalise_record(record):
     if normalised["scan_enabled"] and normalised["jit_enabled"]:
         normalised["jit_enabled"] = False
     # The stored expansion is retained while a scan is disabled, so that a
-    # zip group survives a scan off/on cycle. get_globals() reports an empty
-    # expansion for globals that are not being scanned, so retaining it here
-    # does not affect how the global is expanded.
+    # zip group survives a scan off/on cycle. runmanager.get_globals()
+    # reports an empty expansion for globals that are not being scanned, so
+    # retaining it here does not affect how the global is expanded.
     if normalised["scan_enabled"] and not normalised["expansion"]:
         normalised["expansion"] = "outer"
     return normalised
@@ -90,14 +90,15 @@ def _new_document():
 
 
 def _normalise_document(data):
-    document = _new_document()
+    # Keys not recognised here are data, and are kept at every level.
+    document = {**data, "groups": {}}
     document["format"] = _ensure_str(data.get("format", CANONICAL_FORMAT))
     document["version"] = int(data.get("version", CURRENT_VERSION))
     groups = data.get("groups", {})
     for group_name, group_data in groups.items():
-        globals_data = group_data.get("globals", {}) if isinstance(group_data, dict) else {}
-        document["groups"][_ensure_str(group_name)] = {"globals": {}}
-        for global_name, record in globals_data.items():
+        group_data = group_data if isinstance(group_data, dict) else {}
+        document["groups"][_ensure_str(group_name)] = {**group_data, "globals": {}}
+        for global_name, record in group_data.get("globals", {}).items():
             document["groups"][_ensure_str(group_name)]["globals"][_ensure_str(global_name)] = (
                 _normalise_record(record)
             )
@@ -226,22 +227,6 @@ def get_globals_details(groups):
                 global_name: copy.deepcopy(record) for global_name, record in group.items()
             }
     return details
-
-
-def get_globals(groups):
-    details = get_globals_details(groups)
-    sequence_globals = {}
-    for group_name, globals_data in details.items():
-        sequence_globals[group_name] = {}
-        for global_name, record in globals_data.items():
-            expression = record["scan"] if record["scan_enabled"] else record["default"]
-            expansion = record["expansion"] if record["scan_enabled"] else ""
-            sequence_globals[group_name][global_name] = (
-                expression,
-                record["units"],
-                expansion,
-            )
-    return sequence_globals
 
 
 def _require_editable(filename):

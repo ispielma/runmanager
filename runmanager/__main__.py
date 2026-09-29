@@ -44,6 +44,7 @@ import ast
 import pprint
 import signal
 import unicodedata
+import importlib.resources
 from pathlib import Path
 
 splash.update_text('importing matplotlib')
@@ -77,13 +78,13 @@ from runmanager.client import (
     DEFAULT_PORT,
     PROVIDER_NONE,
     PROVIDER_PAUSED,
+    PROVIDER_PENDING,
     PROVIDER_SHOT,
     SHOT_OUTCOME_STATUSES,
     SequenceRefused,
 )
 from runmanager.analysis_submission import (
     AnalysisSubmission,
-    art_dir,
     set_icon_label_pixmap,
 )
 from runmanager.blacs_status import (
@@ -1111,7 +1112,7 @@ class GroupTab(object):
             self.tabWidget.setTabIcon(index, icon)
 
     def populate_model(self):
-        globals_details = runmanager.get_globals_details(
+        globals_details = runmanager.globals_file.get_globals_details(
             {self.group_name: self.globals_file}
         )[self.group_name]
         for name, details in globals_details.items():
@@ -1654,7 +1655,7 @@ class GroupTab(object):
             )
             self.ui.treeView_globals.setCurrentIndex(default_item.index())
             self.ui.treeView_globals.edit(default_item.index())
-            self.globals_changed()
+            app.globals_changed()
         finally:
             item.setText(self.GLOBALS_DUMMY_ROW_TEXT)
 
@@ -1682,7 +1683,7 @@ class GroupTab(object):
             item.setData(new_global_name, self.GLOBALS_ROLE_SORT_DATA)
             self.do_model_sort()
             item.setToolTip(new_global_name)
-            self.globals_changed()
+            app.globals_changed()
             default_item = self.get_global_expression_item(new_global_name, 'default')
             if (
                 not default_item.text()
@@ -1730,7 +1731,9 @@ class GroupTab(object):
     ):
         try:
             self.ensure_editable_globals_file()
-            runmanager.set_value(self.globals_file, self.group_name, global_name, new_default)
+            runmanager.globals_file.set_field(
+                self.globals_file, self.group_name, global_name, 'default', new_default
+            )
         except Exception as e:
             if interactive:
                 error_dialog(str(e))
@@ -1746,7 +1749,7 @@ class GroupTab(object):
             self.do_model_sort()
             self.update_expression_item_metadata(item, 'Evaluating...')
             self._update_boolean_state(global_name)
-            self.globals_changed()
+            app.globals_changed()
             if not interactive:
                 return
             units_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_UNITS)
@@ -1771,7 +1774,9 @@ class GroupTab(object):
         item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_UNITS)
         try:
             self.ensure_editable_globals_file()
-            runmanager.set_units(self.globals_file, self.group_name, global_name, new_units)
+            runmanager.globals_file.set_field(
+                self.globals_file, self.group_name, global_name, 'units', new_units
+            )
         except Exception as e:
             error_dialog(str(e))
             item.setText(previous_units)
@@ -1794,8 +1799,8 @@ class GroupTab(object):
         jit_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_JIT_ENABLED)
         try:
             self.ensure_editable_globals_file()
-            runmanager.set_scan_enabled(
-                self.globals_file, self.group_name, global_name, new_state
+            runmanager.globals_file.set_field(
+                self.globals_file, self.group_name, global_name, 'scan_enabled', new_state
             )
         except Exception as e:
             if interactive:
@@ -1818,9 +1823,12 @@ class GroupTab(object):
                     jit_item.setData(False, self.GLOBALS_ROLE_SORT_DATA)
                 expansion_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_EXPANSION)
                 if not expansion_item.text():
-                    expansion_item.setText('outer')
-                    expansion_item.setData('outer', self.GLOBALS_ROLE_PREVIOUS_TEXT)
-                    expansion_item.setData('outer', self.GLOBALS_ROLE_SORT_DATA)
+                    expansion = runmanager.globals_file.get_field(
+                        self.globals_file, self.group_name, global_name, 'expansion'
+                    )
+                    expansion_item.setText(expansion)
+                    expansion_item.setData(expansion, self.GLOBALS_ROLE_PREVIOUS_TEXT)
+                    expansion_item.setData(expansion, self.GLOBALS_ROLE_SORT_DATA)
             self.update_scan_controls(global_name)
             self._update_boolean_state(global_name)
             if new_state:
@@ -1828,7 +1836,7 @@ class GroupTab(object):
                     self.get_global_item_by_name(global_name, self.GLOBALS_COL_EXPANSION)
                 )
             self.do_model_sort()
-            self.globals_changed()
+            app.globals_changed()
             if not interactive:
                 return
             active_item = self.get_active_value_item(global_name)
@@ -1855,8 +1863,8 @@ class GroupTab(object):
         scan_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_SCAN_ENABLED)
         try:
             self.ensure_editable_globals_file()
-            runmanager.set_jit_enabled(
-                self.globals_file, self.group_name, global_name, new_state
+            runmanager.globals_file.set_field(
+                self.globals_file, self.group_name, global_name, 'jit_enabled', new_state
             )
         except Exception as e:
             if interactive:
@@ -1879,7 +1887,7 @@ class GroupTab(object):
                     scan_item.setData(False, self.GLOBALS_ROLE_SORT_DATA)
             self.update_scan_controls(global_name)
             self.do_model_sort()
-            self.globals_changed()
+            app.globals_changed()
             if not interactive:
                 return
             scroll_view_to_row_if_current(self.ui.treeView_globals, item)
@@ -1899,7 +1907,9 @@ class GroupTab(object):
                 item.setText(new_scan)
         try:
             self.ensure_editable_globals_file()
-            runmanager.set_scan(self.globals_file, self.group_name, global_name, new_scan)
+            runmanager.globals_file.set_field(
+                self.globals_file, self.group_name, global_name, 'scan', new_scan
+            )
         except Exception as e:
             if interactive:
                 error_dialog(str(e))
@@ -1913,7 +1923,7 @@ class GroupTab(object):
             self.do_model_sort()
             self.update_expression_item_metadata(item, 'Evaluating...')
             self._update_boolean_state(global_name)
-            self.globals_changed()
+            app.globals_changed()
             if not interactive:
                 return
             scroll_view_to_row_if_current(self.ui.treeView_globals, item)
@@ -1930,8 +1940,8 @@ class GroupTab(object):
         item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_EXPANSION)
         try:
             self.ensure_editable_globals_file()
-            runmanager.set_expansion(
-                self.globals_file, self.group_name, global_name, new_expansion
+            runmanager.globals_file.set_field(
+                self.globals_file, self.group_name, global_name, 'expansion', new_expansion
             )
         except Exception as e:
             error_dialog(str(e))
@@ -1940,22 +1950,19 @@ class GroupTab(object):
             item.setData(new_expansion, self.GLOBALS_ROLE_PREVIOUS_TEXT)
             item.setData(new_expansion, self.GLOBALS_ROLE_SORT_DATA)
             self.do_model_sort()
-            self.globals_changed()
+            app.globals_changed()
             scroll_view_to_row_if_current(self.ui.treeView_globals, item)
-
-    def globals_changed(self):
-        app.globals_changed()
 
     def delete_global(self, global_name, confirm=True):
         logger.info('%s:%s - delete global: %s', self.globals_file, self.group_name, global_name)
         if confirm and not question_dialog("Delete the global '%s'?" % global_name):
             return
         self.ensure_editable_globals_file()
-        runmanager.delete_global(self.globals_file, self.group_name, global_name)
+        runmanager.globals_file.delete_global(self.globals_file, self.group_name, global_name)
         self.globals_model.removeRow(
             self.get_global_item_by_name(global_name, self.GLOBALS_COL_NAME).row()
         )
-        self.globals_changed()
+        app.globals_changed()
 
     def update_parse_indication(self, active_groups, sequence_globals, evaled_globals):
         if self.group_name in active_groups and active_groups[self.group_name] == self.globals_file:
@@ -2113,6 +2120,10 @@ class RunManager(LabscriptApplication):
         self._default_shot_lock = threading.Lock()
         self._default_shot_preparing = False
         self._default_shot_ready = None
+        # How many times the globals have changed, and how many there had been
+        # when the default shot now being made or waiting was started:
+        self.globals_changes = 0
+        self._default_shot_globals_changes = 0
 
         splash.update_text('starting compiler subprocess')
         # Start the compiler subprocess:
@@ -2131,17 +2142,17 @@ class RunManager(LabscriptApplication):
         self.setup_queue_tab()
         run_view_layout = self.ui.findChild(QtWidgets.QLayout, 'verticalLayout_2')
         self.analysis_submission = AnalysisSubmission(run_view_layout)
-        # Watching BLACS runs on its own thread, independently of the shot
-        # exchange and of the destination checkbox it reports beside, so that
-        # the indicator is live whether or not shots are being queued and a
-        # BLACS that has stopped answering cannot hold up this GUI:
         # The destination control wears the BLACS logo for the same reason the
         # one below it wears lyse's: three checkboxes in a column that name
         # three different applications are told apart by their logos faster
         # than by reading them.
         set_icon_label_pixmap(
-            self.ui.checkBox_run_shots_icon, art_dir / 'blacs_22x22.png'
+            self.ui.checkBox_run_shots_icon, importlib.resources.files('blacs') / 'blacs.svg'
         )
+        # Watching BLACS runs on its own thread, independently of the shot
+        # exchange and of the destination checkbox it reports beside, so that
+        # the indicator is live whether or not shots are being queued and a
+        # BLACS that has stopped answering cannot hold up this GUI:
         self.blacs_status_monitor = BlacsStatusMonitor(
             on_status=self.update_blacs_status
         )
@@ -2211,7 +2222,7 @@ class RunManager(LabscriptApplication):
 
             def load_the_config_file():
                 try:
-                    self.load_configuration(autoload_config_file)
+                    self.load_configuration(autoload_config_file, at_startup=True)
                     self.output_box.output('done.\n')
                 except Exception as e:
                     self.output_box.output('\nCould not load config file: %s: %s\n\n' %
@@ -2437,8 +2448,8 @@ class RunManager(LabscriptApplication):
         self.queue_empty_policy_combo.currentIndexChanged.connect(
             self.on_queue_empty_policy_changed
         )
-        self.queue_pause_button.toggled.connect(self.on_queue_paused_changed)
-        self.queue_widget.deleteRowsRequested.connect(self.on_queue_delete_rows_requested)
+        self.queue_pause_button.toggled.connect(self.queue_manager.set_paused)
+        self.queue_widget.deleteRowsRequested.connect(self.queue_manager.delete_rows)
         
         # Keyboard shortcuts:
         engage_shortcut = QtWidgets.QShortcut('F5', self.ui,
@@ -2478,9 +2489,6 @@ class RunManager(LabscriptApplication):
         new_index = (current_index + change) % n_tabs
         self.ui.tabWidget.setCurrentIndex(new_index)
 
-    def on_queue_delete_rows_requested(self, shot_ids):
-        self.queue_manager.delete_rows(shot_ids)
-
     def on_queue_empty_policy_changed(self, index):
         empty_queue_policy = self.queue_empty_policy_combo.itemData(index)
         if empty_queue_policy is None:
@@ -2492,9 +2500,6 @@ class RunManager(LabscriptApplication):
         if compile_mode is None:
             return
         self.queue_manager.set_compile_mode(compile_mode)
-
-    def on_queue_paused_changed(self, checked):
-        self.queue_manager.set_paused(checked)
 
     @inmain_decorator()
     def update_blacs_status(self, status):
@@ -2783,9 +2788,10 @@ class RunManager(LabscriptApplication):
         """Name and number a batch after the shot it is being added to.
 
         ``indexed_path_base`` is the shot whose sequence this batch is joining.
-        With ``name_format``, that sequence's ``(folder, prefix)`` with any
-        globals unresolved, each shot is named from it and its own globals, as
-        make_run_files names them; otherwise after ``indexed_path_base``."""
+        With ``name_format``, that sequence's ``(folder, prefix)``, the prefix
+        with any globals unresolved, each shot is named from it and its own
+        globals, as make_run_files names them; otherwise after
+        ``indexed_path_base``."""
         if not run_file_infos:
             return run_file_infos
         candidate_stem = os.path.splitext(os.path.basename(indexed_path_base))[0]
@@ -2811,10 +2817,9 @@ class RunManager(LabscriptApplication):
                         start=next_index + 1,
                     )
             else:
+                folder, prefix = name_format
                 shot_globals = {'globals': run_file_info['shot_globals']}
-                basename = os.path.join(
-                    *(format_lookup_string(part, shot_globals) for part in name_format)
-                )
+                basename = os.path.join(folder, format_lookup_string(prefix, shot_globals))
                 run_file = '%s_%0*d.h5' % (basename, width, next_index)
                 while os.path.exists(run_file) or os.path.abspath(run_file) in compiling:
                     next_index += 1
@@ -2846,12 +2851,6 @@ class RunManager(LabscriptApplication):
         try:
             send_to_BLACS = self.ui.checkBox_run_shots.isChecked()
             send_to_runviewer = self.ui.checkBox_view_shots.isChecked()
-            if not send_to_BLACS and not send_to_runviewer:
-                self.output_box.output(
-                    "Warning: neither 'BLACS' nor 'View shot(s)' is selected.\n\n",
-                    red=True,
-                )
-                return
             mode = SUBMISSION_MODES[submission_mode]
             if (mode.anchor_sources or mode.clears_queue) and not send_to_BLACS:
                 # A mode that reads the queue for a sequence to join, or
@@ -2901,7 +2900,7 @@ class RunManager(LabscriptApplication):
             )
         except Exception as e:
             raise Exception('Error parsing globals:\n%s\nCompilation aborted.' % str(e))
-        globals_details = runmanager.get_globals_details(active_groups)
+        globals_details = runmanager.globals_file.get_globals_details(active_groups)
         pending = [
             (
                 shot_globals,
@@ -3406,7 +3405,7 @@ class RunManager(LabscriptApplication):
         # Save the containing folder for use next time we open the dialog box:
         self.last_opened_globals_folder = os.path.dirname(globals_file)
         # Create the new file and open it:
-        runmanager.new_globals_file(globals_file)
+        runmanager.globals_file.new_globals_file(globals_file)
         self.open_globals_file(globals_file)
 
     def on_diff_globals_file_clicked(self):
@@ -3723,6 +3722,7 @@ class RunManager(LabscriptApplication):
         """Called from either self, a GroupTab, or the RunmanagerServer to inform
         runmanager that something about globals has changed, and that they need
         parsing again."""
+        self.globals_changes += 1
         self.ui.pushButton_engage.setEnabled(False)
         self.preparse_globals_required.put(None)
 
@@ -3969,9 +3969,9 @@ class RunManager(LabscriptApplication):
         return new_path
 
     def ensure_editable_globals_file(self, globals_file, parent=None):
-        if not runmanager.globals_file_requires_conversion(globals_file):
+        if not runmanager.globals_file.is_legacy_hdf5(globals_file):
             return globals_file
-        suggested_path = runmanager.default_toml_globals_file(globals_file)
+        suggested_path = runmanager.globals_file.default_toml_path(globals_file)
         destination = QtWidgets.QFileDialog.getSaveFileName(
             parent or self.ui,
             'Convert globals file to TOML for editing',
@@ -3987,7 +3987,7 @@ class RunManager(LabscriptApplication):
         destination = os.path.abspath(destination)
         if destination != globals_file and self.groups_model.findItems(destination, column=self.GROUPS_COL_NAME):
             raise RuntimeError("A globals file named %s is already open." % destination)
-        runmanager.convert_globals_file(globals_file, destination)
+        runmanager.globals_file.convert_to_toml(globals_file, destination)
         self.last_opened_globals_folder = os.path.dirname(destination)
         return self.replace_globals_file_path(globals_file, destination)
 
@@ -4000,7 +4000,7 @@ class RunManager(LabscriptApplication):
         # selector. Conversion to TOML is deferred until the user attempts an
         # edit operation.
         # Get the groups:
-        groups = runmanager.get_grouplist(globals_file)
+        groups = runmanager.globals_file.get_group_names(globals_file)
         # Add the parent row:
         file_name_item = QtGui.QStandardItem(globals_file)
         file_name_item.setEditable(False)
@@ -4139,7 +4139,9 @@ class RunManager(LabscriptApplication):
             dest_globals_file = self.ensure_editable_globals_file(dest_globals_file)
             if source_globals_file == dest_globals_file and delete_source_group:
                 source_globals_file = dest_globals_file
-            dest_group_name = runmanager.copy_group(source_globals_file, source_group_name, dest_globals_file, delete_source_group)
+            dest_group_name = runmanager.globals_file.copy_group(
+                source_globals_file, source_group_name, dest_globals_file, delete_source_group
+            )
         except Exception as e:
             error_dialog(str(e))
         else:
@@ -4255,7 +4257,7 @@ class RunManager(LabscriptApplication):
         if group_tab is not None:
             self.close_group(globals_file, group_name)
         globals_file = self.ensure_editable_globals_file(globals_file)
-        runmanager.delete_group(globals_file, group_name)
+        runmanager.globals_file.delete_group(globals_file, group_name)
         # Find the entry for this group in self.groups_model and remove it:
         name_item = self.get_group_item_by_name(globals_file, group_name, self.GROUPS_COL_NAME)
         name_item.parent().removeRow(name_item.row())
@@ -4404,7 +4406,7 @@ class RunManager(LabscriptApplication):
         file = os.path.abspath(file)
         self.load_configuration(file)
 
-    def load_configuration(self, filename):
+    def load_configuration(self, filename, at_startup=False):
         # Close all files:
         save_data = self.get_save_data()
         for globals_file in save_data['h5_files_open']:
@@ -4501,8 +4503,16 @@ class RunManager(LabscriptApplication):
 
         queue_state = runmanager_config.get('queue_state')
         if isinstance(queue_state, dict):
-            self.queue_manager.restore_state(queue_state)
+            # The queue's shots come back only when runmanager starts. A load
+            # during a session applies the queue's settings and leaves its shots:
+            self.queue_manager.restore_state(queue_state, restore_rows=at_startup)
             restored_queue_state = self.queue_manager.get_queue_state()
+            if at_startup and restored_queue_state['n_items']:
+                # Restored rows that were not compiled yet are compiled ahead,
+                # as they would have been after an Engage:
+                self.queue_manager.command_queue.put(
+                    ('compile_ahead', (self.ui.checkBox_view_shots.isChecked(),))
+                )
             self.ui.lineEdit_default_labscript_file.setText(
                 restored_queue_state['default_labscript_file']
             )
@@ -4625,9 +4635,11 @@ class RunManager(LabscriptApplication):
                     filename = active_groups[group_name]
                     # A legacy HDF5 globals file is read-only until the user
                     # converts it, so no guess is stored in one:
-                    if runmanager.globals_file_requires_conversion(filename):
+                    if runmanager.globals_file.is_legacy_hdf5(filename):
                         continue
-                    runmanager.set_expansion(filename, group_name, global_name, new_guess)
+                    runmanager.globals_file.set_field(
+                        filename, group_name, global_name, 'expansion', new_guess
+                    )
                     expansions[global_name] = new_guess
                     expansion_types_changed = True
 
@@ -4704,10 +4716,11 @@ class RunManager(LabscriptApplication):
         for global_name, guesses in expansion_types.items():
             if guesses['new_guess'] != guesses['previous_guess']:
                 filename = active_groups[guesses['group_name']]
-                if runmanager.globals_file_requires_conversion(filename):
+                if runmanager.globals_file.is_legacy_hdf5(filename):
                     continue
-                runmanager.set_expansion(
-                    filename, str(guesses['group_name']), str(global_name), str(guesses['new_guess']))
+                runmanager.globals_file.set_field(
+                    filename, str(guesses['group_name']), str(global_name), 'expansion',
+                    str(guesses['new_guess']))
                 expansions[global_name] = guesses['new_guess']
                 expansion_types_changed = True
 
@@ -4720,7 +4733,9 @@ class RunManager(LabscriptApplication):
                         iter(evaled_globals[group_name][global_name])
                     except Exception:
                         filename = active_groups[group_name]
-                        runmanager.set_expansion(filename, group_name, global_name, '')
+                        runmanager.globals_file.set_field(
+                            filename, group_name, global_name, 'expansion', ''
+                        )
                         expansion_types_changed = True
 
         self.previous_evaled_globals = evaled_globals
@@ -4822,14 +4837,18 @@ class RunManager(LabscriptApplication):
                     )
                 run_files = [run_file_info['path'] for run_file_info in run_files]
         else:
+            using_default = output_folder == self.previous_default_output_folder
+            # A folder the user chose is used as it is. Only the default one has
+            # a subdirectory that is a template, so that is the one it separates.
             sequence_attrs, default_output_dir, filename_prefix = (
                 runmanager.new_sequence_details(
                     labscript_file,
                     config=self.exp_config,
                     increment_sequence_index=True,
+                    subdirectory_in_prefix=using_default,
                 )
             )
-            if output_folder == self.previous_default_output_folder:
+            if using_default:
                 # The user is using the default output folder. Just in case the
                 # sequence index has been updated or the date has changed, use the
                 # default_output dir obtained from new_sequence_details, as it is
@@ -4924,7 +4943,8 @@ class RunManager(LabscriptApplication):
 
         Its globals were read when it was produced, so it must not be handed to
         BLACS later as though they were current. This happens when the queue
-        has taken over, or the empty-queue policy no longer calls for one."""
+        has taken over, the empty-queue policy no longer calls for one, or the
+        globals have changed since."""
         with self._default_shot_lock:
             row = self._default_shot_ready
             self._default_shot_ready = None
@@ -4940,6 +4960,11 @@ class RunManager(LabscriptApplication):
 
         At most one is produced at a time, however often BLACS asks. The shot
         is collected by a later request once it is ready."""
+        # A default shot started before the latest change to the globals read
+        # the old ones. Drop it now if it is ready; one still compiling is
+        # dropped by the request that finds it ready:
+        if self._default_shot_globals_changes != self.globals_changes:
+            self.discard_default_shot()
         with self._default_shot_lock:
             row = self._default_shot_ready
             if row is not None:
@@ -4948,6 +4973,7 @@ class RunManager(LabscriptApplication):
             if self._default_shot_preparing:
                 return None
             self._default_shot_preparing = True
+            self._default_shot_globals_changes = self.globals_changes
         send_to_runviewer = inmain(self.ui.checkBox_view_shots.isChecked)
         thread = threading.Thread(
             target=self.prepare_default_shot,
@@ -4960,6 +4986,7 @@ class RunManager(LabscriptApplication):
     def prepare_default_shot(self, labscript_file, send_to_runviewer):
         """Write and compile one default shot, and leave it ready to hand over."""
         row = None
+        run_file = None
         try:
             active_groups = inmain(self.get_active_groups, interactive=False)
             sequence_globals, runglobals = runmanager.get_default_shot_globals(
@@ -4970,20 +4997,23 @@ class RunManager(LabscriptApplication):
                     labscript_file,
                     config=self.exp_config,
                     default=True,
-                    format_globals=runglobals,
+                    subdirectory_in_prefix=True,
                 )
             )
+            # The prefix is a template, as make_run_files receives it. Formatting
+            # it with the shot's globals is the pass that undoes its brace escaping.
             run_file_base = os.path.join(
                 output_folder,
-                '{}.h5'.format(filename_prefix),
+                format_lookup_string(filename_prefix, {'globals': runglobals}) + '.h5',
             )
+            run_file_folder = os.path.dirname(run_file_base)
             key = (sequence_attrs['sequence_id'], sequence_attrs['sequence_index'])
             if key in self.sequences:
                 start = self.sequences[key][2]
             else:
                 # After a restart the day's files are counted from one listing
                 # of the folder, not a stat per number.
-                names = os.listdir(output_folder) if os.path.isdir(output_folder) else []
+                names = os.listdir(run_file_folder) if os.path.isdir(run_file_folder) else []
                 ends = [os.path.splitext(n)[0].rpartition('_')[2] for n in names]
                 start = 1 + max((int(end) for end in ends if end.isdigit()), default=-1)
             run_file, default_index = next_available_indexed_filepath(
@@ -5025,6 +5055,11 @@ class RunManager(LabscriptApplication):
             self.output_box.output(
                 'Could not produce a default shot: %s\n' % str(e), red=True
             )
+            if run_file is not None:
+                try:
+                    os.remove(run_file)
+                except OSError:
+                    pass
         finally:
             with self._default_shot_lock:
                 self._default_shot_ready = row
@@ -5120,10 +5155,10 @@ class RunManager(LabscriptApplication):
         record = self.queue_manager.shot_finished(shot_id, status, message)
         if record is None:
             # A completed shot that matched no row. The row can be gone for
-            # ordinary reasons -- the operator loaded a queue configuration, or
-            # restarted runmanager, while BLACS was running the shot it had
-            # been given -- and it can also be a lost reply being sent again
-            # for a row already retired. The two are indistinguishable here.
+            # ordinary reasons -- the operator restarted runmanager while BLACS
+            # was running the shot it had been given -- and it can also be a
+            # lost reply being sent again for a row already retired. The two
+            # are indistinguishable here.
             #
             # There is nothing to do to the queue either way, and nothing
             # here needs to know which case it was. The shot ran and wrote
@@ -5167,7 +5202,9 @@ class RunManager(LabscriptApplication):
             if self.queue_manager.compile_next_in_background(
                 lambda: inmain(self.ui.checkBox_view_shots.isChecked)
             ):
-                return no_shot
+                # Pending rather than none, so that BLACS can wait for this shot
+                # instead of running its local override in the gap:
+                return dict(no_shot, state=PROVIDER_PENDING)
             queue_state = self.queue_manager.get_queue_state()
             labscript_file = queue_state['default_labscript_file']
             # No default shot is called for: the policy does not ask for one,
@@ -5242,47 +5279,48 @@ class RunmanagerServer(ZMQServer):
         port = app.exp_config.getint('ports', 'runmanager', fallback=DEFAULT_PORT)
         ZMQServer.__init__(self, port=port)
 
-    def _get_active_global_locations(self):
+    def _get_active_global_locations(self, names=None):
         active_groups = inmain(app.get_active_groups, interactive=False)
-        sequence_globals = runmanager.get_globals(active_groups)
+        globals_details = runmanager.globals_file.get_globals_details(active_groups)
         locations = {}
-        for group_name, group_globals in sequence_globals.items():
-            globals_file = active_groups[group_name]
+        groups_of = {}
+        for group_name, group_globals in globals_details.items():
             for global_name in group_globals:
-                if global_name in locations:
-                    other_file, other_group = locations[global_name]
-                    msg = """Global %s is defined in multiple active groups: %s and %s"""
-                    raise RuntimeError(msg % (global_name, other_group, group_name))
-                locations[global_name] = (globals_file, group_name)
-        return active_groups, sequence_globals, locations
+                groups_of.setdefault(global_name, []).append(group_name)
+                locations.setdefault(global_name, (active_groups[group_name], group_name))
+        # Only the globals the caller reads or writes must be defined once. A
+        # getter of all of them reads every one.
+        for global_name in (locations if names is None else names):
+            if len(groups_of.get(global_name, ())) > 1:
+                raise RuntimeError(
+                    'Global %s is defined in multiple active groups: %s'
+                    % (global_name, ' and '.join(groups_of[global_name]))
+                )
+        return active_groups, globals_details, locations
 
-    def _get_global_field_values(self, getter):
-        _, _, locations = self._get_active_global_locations()
+    def _get_global_field_values(self, field):
+        _, globals_details, locations = self._get_active_global_locations()
         values = {}
-        for global_name, (globals_file, group_name) in locations.items():
-            values[global_name] = getter(globals_file, group_name, global_name)
+        for global_name, (_, group_name) in locations.items():
+            values[global_name] = globals_details[group_name][global_name][field]
         return values
 
-    def _get_expression_field_values(self, getter, raw=False):
-        active_groups, _, locations = self._get_active_global_locations()
+    def _get_expression_field_values(self, field, raw=False):
+        active_groups, globals_details, locations = self._get_active_global_locations()
         sequence_globals = {group_name: {} for group_name in active_groups}
-        for global_name, (globals_file, group_name) in locations.items():
-            expression = getter(globals_file, group_name, global_name)
+        for global_name, (_, group_name) in locations.items():
+            expression = globals_details[group_name][global_name][field]
             sequence_globals[group_name][global_name] = (expression, '', '')
+        return self._merge_groups(sequence_globals, raw)
+
+    @staticmethod
+    def _merge_groups(sequence_globals, raw):
         if raw:
-            values = {}
-            for group_globals in sequence_globals.values():
-                values.update(
-                    {name: expression for name, (expression, _, _) in group_globals.items()}
-                )
-            return values
+            return runmanager.flatten_globals(sequence_globals)
         evaled_globals, _, _ = runmanager.evaluate_globals(
             sequence_globals, raise_exceptions=False
         )
-        values = {}
-        for group_globals in evaled_globals.values():
-            values.update(group_globals)
-        return values
+        return runmanager.flatten_globals(evaled_globals, evaluated=True)
 
     @staticmethod
     def _coerce_remote_boolean(value, name):
@@ -5302,29 +5340,44 @@ class RunmanagerServer(ZMQServer):
                 expression += previous[comment_start:comment_end]
         return expression
 
+    @staticmethod
+    def _check_before_writing(locations, globals, raw=False):
+        # Refused before any write: a batch must not be half applied, and the
+        # Convert dialog would stop the server answering.
+        for global_name, new_value in globals.items():
+            if raw and not isinstance(new_value, (str, bytes)):
+                msg = "global %s must be a string if raw=True, not %s"
+                raise TypeError(msg % (global_name, new_value.__class__.__name__))
+            if global_name not in locations:
+                raise ValueError(
+                    "Global %s not found in any active group" % global_name
+                )
+        for path in {locations[global_name][0] for global_name in globals}:
+            if runmanager.globals_file.is_legacy_hdf5(path):
+                raise ValueError(
+                    f'{path} is a legacy HDF5 globals file. Convert it to TOML in '
+                    'runmanager first.'
+                )
+
     @inmain_decorator()
-    def _set_expression_field_values(self, getter, setter, changer_name, globals, raw=False):
-        _, _, locations = self._get_active_global_locations()
+    def _set_expression_field_values(self, field, changer_name, globals, raw=False):
+        _, _, locations = self._get_active_global_locations(globals)
+        self._check_before_writing(locations, globals, raw)
         try:
             for global_name, new_value in globals.items():
                 if not raw:
                     new_value = repr(new_value)
-                elif not isinstance(new_value, (str, bytes)):
-                    msg = "global %s must be a string if raw=True, not %s"
-                    raise TypeError(msg % (global_name, new_value.__class__.__name__))
-                try:
-                    globals_file, group_name = locations[global_name]
-                except KeyError:
-                    raise ValueError(
-                        "Global %s not found in any active group" % global_name
-                    )
-                previous_value = getter(globals_file, group_name, global_name)
+                globals_file, group_name = locations[global_name]
+                previous_value = runmanager.globals_file.get_field(
+                    globals_file, group_name, global_name, field
+                )
                 new_value = self._with_trailing_comment(new_value, previous_value)
                 try:
                     group_tab = app.currently_open_groups[globals_file, group_name]
                 except KeyError:
-                    globals_file = app.ensure_editable_globals_file(globals_file)
-                    setter(globals_file, group_name, global_name, new_value)
+                    runmanager.globals_file.set_field(
+                        globals_file, group_name, global_name, field, new_value
+                    )
                 else:
                     getattr(group_tab, changer_name)(
                         global_name, previous_value, new_value, interactive=False
@@ -5333,25 +5386,25 @@ class RunmanagerServer(ZMQServer):
             app.globals_changed()
 
     @inmain_decorator()
-    def _set_boolean_field_values(self, getter, setter, changer_name, globals):
-        _, _, locations = self._get_active_global_locations()
+    def _set_boolean_field_values(self, field, changer_name, globals):
+        globals = {
+            name: self._coerce_remote_boolean(value, 'global %s' % name)
+            for name, value in globals.items()
+        }
+        _, _, locations = self._get_active_global_locations(globals)
+        self._check_before_writing(locations, globals)
         try:
             for global_name, new_value in globals.items():
-                new_value = self._coerce_remote_boolean(
-                    new_value, 'global %s' % global_name
+                globals_file, group_name = locations[global_name]
+                previous_value = runmanager.globals_file.get_field(
+                    globals_file, group_name, global_name, field
                 )
-                try:
-                    globals_file, group_name = locations[global_name]
-                except KeyError:
-                    raise ValueError(
-                        "Global %s not found in any active group" % global_name
-                    )
-                previous_value = getter(globals_file, group_name, global_name)
                 try:
                     group_tab = app.currently_open_groups[globals_file, group_name]
                 except KeyError:
-                    globals_file = app.ensure_editable_globals_file(globals_file)
-                    setter(globals_file, group_name, global_name, new_value)
+                    runmanager.globals_file.set_field(
+                        globals_file, group_name, global_name, field, new_value
+                    )
                 else:
                     getattr(group_tab, changer_name)(
                         global_name, previous_value, new_value, interactive=False
@@ -5359,71 +5412,40 @@ class RunmanagerServer(ZMQServer):
         finally:
             app.globals_changed()
 
-    def handle_get_default_globals(self, raw=False):
-        return self._get_expression_field_values(runmanager.get_value, raw=raw)
+    def handle_get_values(self, raw=False):
+        return self._get_expression_field_values('default', raw=raw)
 
     def handle_get_globals(self, raw=False):
         active_groups = inmain(app.get_active_groups, interactive=False)
-        sequence_globals = runmanager.get_globals(active_groups)
-        if raw:
-            values = {}
-            for group_globals in sequence_globals.values():
-                values.update(
-                    {name: expression for name, (expression, _, _) in group_globals.items()}
-                )
-            return values
-        evaled_globals, _, _ = runmanager.evaluate_globals(
-            sequence_globals, raise_exceptions=False
-        )
-        values = {}
-        for group_globals in evaled_globals.values():
-            values.update(group_globals)
-        return values
+        return self._merge_groups(runmanager.get_globals(active_groups), raw)
 
-    def handle_get_scan_globals(self, raw=False):
-        return self._get_expression_field_values(runmanager.get_scan, raw=raw)
+    def handle_get_scans(self, raw=False):
+        return self._get_expression_field_values('scan', raw=raw)
 
     def handle_get_scan_enabled(self):
-        return self._get_global_field_values(runmanager.get_scan_enabled)
+        return self._get_global_field_values('scan_enabled')
 
     def handle_get_jit_enabled(self):
-        return self._get_global_field_values(runmanager.get_jit_enabled)
+        return self._get_global_field_values('jit_enabled')
 
-    def handle_set_default_globals(self, globals, raw=False):
+    def handle_set_values(self, globals, raw=False):
         return self._set_expression_field_values(
-            runmanager.get_value,
-            runmanager.set_value,
-            'change_global_default',
-            globals,
-            raw=raw,
+            'default', 'change_global_default', globals, raw=raw
         )
 
-    def handle_set_globals(self, globals, raw=False):
-        return self.handle_set_default_globals(globals, raw=raw)
-
-    def handle_set_scan_globals(self, globals, raw=False):
+    def handle_set_scans(self, globals, raw=False):
         return self._set_expression_field_values(
-            runmanager.get_scan,
-            runmanager.set_scan,
-            'change_global_scan',
-            globals,
-            raw=raw,
+            'scan', 'change_global_scan', globals, raw=raw
         )
 
     def handle_set_scan_enabled(self, globals):
         return self._set_boolean_field_values(
-            runmanager.get_scan_enabled,
-            runmanager.set_scan_enabled,
-            'change_global_scan_enabled',
-            globals,
+            'scan_enabled', 'change_global_scan_enabled', globals
         )
 
     def handle_set_jit_enabled(self, globals):
         return self._set_boolean_field_values(
-            runmanager.get_jit_enabled,
-            runmanager.set_jit_enabled,
-            'change_global_jit_enabled',
-            globals,
+            'jit_enabled', 'change_global_jit_enabled', globals
         )
 
     def handle_engage(self):
@@ -5553,7 +5575,7 @@ class RunmanagerServer(ZMQServer):
         # read once it has finished, as an Engage reads them.
         app.wait_until_preparse_complete()
         active_groups = inmain(app.get_active_groups, interactive=False)
-        globals_details = runmanager.get_globals_details(active_groups)
+        globals_details = runmanager.globals_file.get_globals_details(active_groups)
         group_of = {
             name: group for group, records in globals_details.items() for name in records
         }
@@ -5581,7 +5603,7 @@ class RunmanagerServer(ZMQServer):
                     % (entry, len(shots), ', '.join(expanding) or 'none')
                 )
             batch.append((shots[0], runmanager.get_frozen_globals(details, shots[0])))
-        self.handle_set_globals(entries[-1])
+        self.handle_set_values(entries[-1])
         # Joined by id, not by the queue's last shot, which is whoever
         # submitted last: an operator's Engage in between would otherwise take
         # the session's later shots into the operator's sequence.

@@ -38,6 +38,7 @@ from fixtures import (
     submit_to_lyse,
     wait_for,
 )
+from runmanager.client import PROVIDER_PENDING
 from runmanager.queueing import (
     COMPILE_MODE_EAGER,
     COMPILE_MODE_LAZY,
@@ -897,8 +898,9 @@ class LazyCompileFailureTests(unittest.TestCase):
 
         self.assertEqual(
             [response['state'] for response in responses],
-            [PROVIDER_NONE] * 3,
-            'the shot behind it waits rather than overtaking it',
+            [PROVIDER_PENDING, PROVIDER_NONE, PROVIDER_NONE],
+            'pending while it compiles, then nothing: the shot behind it waits '
+            'rather than overtaking it',
         )
 
     def test_deleting_it_lets_the_queue_go_on(self):
@@ -1444,7 +1446,7 @@ class ShotIdBeforeCompileTests(unittest.TestCase):
         self.addCleanup(app.queue_manager.shutdown)
         path = os.path.join(directory, 'experiment_00.h5')
         globals_file = os.path.join(directory, 'globals.toml')
-        runmanager.new_globals_file(globals_file)
+        runmanager.globals_file.new_globals_file(globals_file)
         runmanager.new_group(globals_file, 'group')
         item = {
             'path': path,
@@ -1783,11 +1785,11 @@ class ReplayTests(unittest.TestCase):
         #
         # The completion is passed on both times, and that is deliberate.
         # Runmanager cannot tell a resend from a shot whose row went while
-        # BLACS was running it -- an operator loading a configuration, or
-        # restarting -- and it does not need to. Reporting that a shot
-        # completed is its part; what the far end makes of a file it has
-        # already seen belongs to the far end, and withholding a real
-        # completion to spare it the trouble is the assumption to avoid.
+        # BLACS was running it -- an operator restarting runmanager -- and it
+        # does not need to. Reporting that a shot completed is its part; what
+        # the far end makes of a file it has already seen belongs to the far
+        # end, and withholding a real completion to spare it the trouble is
+        # the assumption to avoid.
         self.enqueue('shot_a.h5')
         offered = self.app.queue_exchange(request_shot=True)
         outcome = {
@@ -2563,7 +2565,7 @@ class SentToBlacsRowTests(unittest.TestCase):
 
         model = widget.queue_model
         mode_column = 0 if widget.path_column else 1
-        self.assertEqual(model.item(0, mode_column).text(), 'JIT')
+        self.assertEqual(model.item(0, mode_column).text(), 'lazy')
 
 
 class QueueDisplayTests(unittest.TestCase):
@@ -2692,9 +2694,9 @@ class LostRowTests(unittest.TestCase):
         self.addCleanup(app.queue_manager.shutdown)
         app.queue_manager.enqueue([queued_shot('/tmp/shot_a.h5')])
         offered = app.queue_exchange(request_shot=True)
-        # Neither Delete nor Clear can take the running row now, but loading a
-        # configuration replaces the whole queue, and the shot BLACS is running
-        # can still go that way.
+        # Neither Delete nor Clear can take the running row now. Only restoring
+        # the queue at startup replaces the whole of it, and the shot BLACS is
+        # running can still go that way.
         app.queue_manager.restore_state({})
 
         app.queue_exchange(
@@ -3179,10 +3181,10 @@ class AlternateSubmissionMenuTests(unittest.TestCase):
 class EngageGuardTests(unittest.TestCase):
     """What Engage refuses before it compiles anything.
 
-    Its warnings are about the window: which destinations are ticked, and
-    whether the mode the operator picked from the menu can be used with them.
-    Anything about the queue is settled where the queue is read, because the
-    queue moves on its own between the two.
+    Its one warning is about the window: whether the mode the operator picked
+    from the menu can be used with the destinations ticked. Anything about the
+    queue is settled where the queue is read, because the queue moves on its
+    own between the two.
     """
 
     def test_a_mode_that_has_somewhere_to_send_its_shots_is_engaged(self):
@@ -3210,7 +3212,7 @@ class EngageGuardTests(unittest.TestCase):
         self.assertEqual(window.submitted, [], 'nothing was submitted')
         self.assertTrue(window.output_box.said('BLACS'))
 
-    def test_a_new_sequence_needs_only_somewhere_to_send_its_shots(self):
+    def test_a_new_sequence_is_engaged_without_blacs(self):
         # The warning above is for the modes about the queue, and only those.
         # A new sequence asks nothing of the queue, so looking at the shots in
         # runviewer without running them is a whole use of Engage.
@@ -3222,14 +3224,6 @@ class EngageGuardTests(unittest.TestCase):
             window.submitted, [main_module.SUBMISSION_MODE_NEW_FOLDER]
         )
         self.assertEqual(window.output_box.lines, [])
-
-    def test_engaging_with_nowhere_to_send_the_shots_is_refused(self):
-        window = EngageWindow(run_shots=False, view_shots=False)
-
-        window.on_engage_clicked()
-
-        self.assertEqual(window.submitted, [])
-        self.assertTrue(window.output_box.said('neither'))
 
 
 class MissingSequenceReportTests(unittest.TestCase):
@@ -3331,7 +3325,7 @@ class QueuedShotFileTests(unittest.TestCase):
         self.app = FakeRunManager(self)
         self.addCleanup(self.app.queue_manager.shutdown)
         self.globals_file = os.path.join(self.directory, 'globals.toml')
-        runmanager.new_globals_file(self.globals_file)
+        runmanager.globals_file.new_globals_file(self.globals_file)
         runmanager.new_group(self.globals_file, 'group')
 
     def test_a_shot_with_no_id_is_written_without_the_attribute(self):

@@ -21,6 +21,7 @@ from unittest import mock
 import labscript_utils.h5_lock  # noqa: F401
 import h5py
 import runmanager
+import runmanager.globals_file as globals_file
 from fixtures import RunManager, labconfig
 
 
@@ -94,7 +95,7 @@ class DefaultSequenceTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.directory, True)
         self.labscript_file = os.path.join(self.directory, 'experiment.py')
         self.globals_file = os.path.join(self.directory, 'globals.toml')
-        runmanager.new_globals_file(self.globals_file)
+        globals_file.new_globals_file(self.globals_file)
         runmanager.new_group(self.globals_file, 'group')
 
     def at(self, hour):
@@ -170,7 +171,7 @@ class DefaultSequenceTests(unittest.TestCase):
         rows = []
         app = self.default_shot_app(filename_prefix_format=prefix)
         for x, restart in (('1', False), ('2', False), ('1', True)):
-            runmanager.set_value(self.globals_file, 'group', 'x', x)
+            globals_file.set_field(self.globals_file, 'group', 'x', 'default', x)
             if restart:
                 app = self.default_shot_app(filename_prefix_format=prefix)
             rows.append(self.default_shot(app))

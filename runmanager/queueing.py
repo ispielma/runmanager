@@ -1,11 +1,12 @@
 #####################################################################
 #                                                                   #
-# queueing.py                                                       #
+# /runmanager/queueing.py                                           #
 #                                                                   #
-# Copyright 2026, Monash University                                 #
+# Copyright 2026, JQI                                               #
+# Author: Ian Spielman                                              #
 #                                                                   #
-# This file is part of the program runmanager, in the labscript     #
-# suite (see http://labscriptsuite.org), and is licensed under the  #
+# This file is part of runmanager, in the labscript suite           #
+# (see http://labscriptsuite.org), and is licensed under the        #
 # Simplified BSD License. See the license.txt file in the root of   #
 # the project for the full license.                                 #
 #                                                                   #
@@ -501,7 +502,7 @@ class QueueController(object):
             items = []
             for item in self._items:
                 compile_mode = item.get('compile_mode', COMPILE_MODE_EAGER)
-                mode_label = 'JIT' if compile_mode == COMPILE_MODE_LAZY else 'compiled'
+                mode_label = 'lazy' if compile_mode == COMPILE_MODE_LAZY else 'compiled'
                 path = item['path']
                 # A failed row says why in its tooltip rather than in a column
                 # that would be empty on every other row:
@@ -598,7 +599,7 @@ class QueueController(object):
                 ],
             }
 
-    def restore_state(self, state):
+    def restore_state(self, state, restore_rows=True):
         with self._lock:
             empty_queue_policy = state.get(
                 'empty_queue_policy', EMPTY_QUEUE_NOTHING
@@ -624,7 +625,10 @@ class QueueController(object):
             self.paused = bool(state.get('paused', False))
             self.last_sent_from_queue = None
             self.last_sent_sequence_attrs = None
-            self._items = [self._normalise_item(item) for item in state.get('items', [])]
+            if restore_rows:
+                self._items = [
+                    self._normalise_item(item) for item in state.get('items', [])
+                ]
 
     def get_queue_state(self):
         with self._lock:
@@ -709,8 +713,8 @@ class QueueController(object):
 
         Note that running means offered and not yet reported on, not that this
         particular shot is on the hardware: if the head changes while BLACS is
-        running the old one -- the operator deletes it, or a configuration is
-        loaded -- it is the new head that is offered next.
+        running the old one -- the operator deletes it -- it is the new head
+        that is offered next.
 
         The returned copy says in ``reclaimed`` whether it was a row still
         marked running, so that the caller can report a re-offer that the
@@ -959,9 +963,8 @@ class QueueManager(QtCore.QObject):
     def compile_next_in_background(self, send_to_runviewer):
         """Start compiling the shot at the head of the queue if it is not ready.
 
-        Returns True while a queued shot is pending, so the caller reports that
-        there is nothing to hand over yet rather than falling back to the
-        empty-queue policy.
+        Returns True while a queued shot is pending, so the caller reports it
+        as pending rather than falling back to the empty-queue policy.
 
         ``send_to_runviewer`` is a callable, evaluated only when a compile is
         actually started, so that a request with nothing to do does not reach
@@ -1162,8 +1165,8 @@ class QueueManager(QtCore.QObject):
     def export_state(self):
         return self.controller.export_state()
 
-    def restore_state(self, state):
-        self.controller.restore_state(dict(state or {}))
+    def restore_state(self, state, restore_rows=True):
+        self.controller.restore_state(dict(state or {}), restore_rows)
         self.queueChanged.emit()
 
     def mainloop(self):

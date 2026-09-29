@@ -39,12 +39,7 @@ import labscript_utils.shot_utils
 process_tree = ProcessTree.instance()
 
 from .__version__ import __version__
-from . import globals_file as _globals_file
-
-
-def _ensure_str(s):
-    """convert bytestrings and numpy strings to python strings"""
-    return s.decode() if isinstance(s, bytes) else str(s)
+from . import globals_file
 
 
 def is_valid_python_identifier(name):
@@ -120,40 +115,13 @@ class TraceDictionary(dict):
         return trace_data
 
 
-def new_globals_file(filename):
-    """Create a new TOML globals file."""
-    _globals_file.new_globals_file(filename)
-
-
-def add_expansion_groups(filename):
-    """Deprecated compatibility hook retained for older callers."""
-    return
-
-
-def get_grouplist(filename):
-    return _globals_file.get_group_names(filename)
-
-
 def new_group(filename, groupname):
     if not is_valid_hdf5_group_name(groupname):
         raise ValueError(
             'Invalid group name. Group names must contain only ASCII '
             'characters and cannot include "/" or ".".'
         )
-    _globals_file.new_group(filename, groupname)
-
-
-def copy_group(source_globals_file, source_groupname, dest_globals_file, delete_source_group=False):
-    """ This function copies the group source_groupname from source_globals_file
-        to dest_globals_file and renames the new group so that there is no name
-        collision. If delete_source_group is False the copyied files have
-        a suffix '_copy'."""
-    return _globals_file.copy_group(
-        source_globals_file,
-        source_groupname,
-        dest_globals_file,
-        delete_source_group=delete_source_group,
-    )
+    globals_file.new_group(filename, groupname)
 
 
 def rename_group(filename, oldgroupname, newgroupname):
@@ -165,25 +133,13 @@ def rename_group(filename, oldgroupname, newgroupname):
             'Invalid group name. Group names must contain only ASCII '
             'characters and cannot include "/" or ".".'
         )
-    _globals_file.rename_group(filename, oldgroupname, newgroupname)
-
-
-def delete_group(filename, groupname):
-    _globals_file.delete_group(filename, groupname)
-
-
-def get_globalslist(filename, groupname):
-    groups = get_globals_details({groupname: filename})
-    return {
-        global_name: record['scan'] if record['scan_enabled'] else record['default']
-        for global_name, record in groups[groupname].items()
-    }
+    globals_file.rename_group(filename, oldgroupname, newgroupname)
 
 
 def new_global(filename, groupname, globalname):
     if not is_valid_python_identifier(globalname):
         raise ValueError('%s is not a valid Python variable name'%globalname)
-    _globals_file.new_global(filename, groupname, globalname)
+    globals_file.new_global(filename, groupname, globalname)
 
 
 def rename_global(filename, groupname, oldglobalname, newglobalname):
@@ -192,76 +148,7 @@ def rename_global(filename, groupname, oldglobalname, newglobalname):
         return
     if not is_valid_python_identifier(newglobalname):
         raise ValueError('%s is not a valid Python variable name'%newglobalname)
-    _globals_file.rename_global(filename, groupname, oldglobalname, newglobalname)
-
-
-def get_value(filename, groupname, globalname):
-    return _globals_file.get_field(filename, groupname, globalname, 'default')
-
-
-def set_value(filename, groupname, globalname, value):
-    _globals_file.set_field(filename, groupname, globalname, 'default', value)
-
-
-def get_units(filename, groupname, globalname):
-    return _globals_file.get_field(filename, groupname, globalname, 'units')
-
-
-def set_units(filename, groupname, globalname, units):
-    _globals_file.set_field(filename, groupname, globalname, 'units', units)
-
-
-def get_scan_enabled(filename, groupname, globalname):
-    return _globals_file.get_field(filename, groupname, globalname, 'scan_enabled')
-
-
-def set_scan_enabled(filename, groupname, globalname, scan_enabled):
-    _globals_file.set_field(filename, groupname, globalname, 'scan_enabled', scan_enabled)
-
-
-def get_jit_enabled(filename, groupname, globalname):
-    return _globals_file.get_field(filename, groupname, globalname, 'jit_enabled')
-
-
-def set_jit_enabled(filename, groupname, globalname, jit_enabled):
-    _globals_file.set_field(filename, groupname, globalname, 'jit_enabled', jit_enabled)
-
-
-def get_scan(filename, groupname, globalname):
-    return _globals_file.get_field(filename, groupname, globalname, 'scan')
-
-
-def set_scan(filename, groupname, globalname, scan):
-    _globals_file.set_field(filename, groupname, globalname, 'scan', scan)
-
-
-def get_expansion(filename, groupname, globalname):
-    return _globals_file.get_field(filename, groupname, globalname, 'expansion')
-
-
-def set_expansion(filename, groupname, globalname, expansion):
-    _globals_file.set_field(filename, groupname, globalname, 'expansion', expansion)
-
-
-def delete_global(filename, groupname, globalname):
-    _globals_file.delete_global(filename, groupname, globalname)
-
-
-def get_globals_details(groups):
-    """Return detailed per-global records for editor/UI use."""
-    return _globals_file.get_globals_details(groups)
-
-
-def globals_file_requires_conversion(filename):
-    return _globals_file.is_legacy_hdf5(filename)
-
-
-def default_toml_globals_file(filename):
-    return _globals_file.default_toml_path(filename)
-
-
-def convert_globals_file(filename, dest_filename):
-    return _globals_file.convert_to_toml(filename, dest_filename)
+    globals_file.rename_global(filename, groupname, oldglobalname, newglobalname)
 
 
 def guess_expansion_type(value):
@@ -292,7 +179,7 @@ def get_all_groups(h5_files):
         h5_files = [h5_files]
     groups = {}
     for path in h5_files:
-        for group_name in get_grouplist(path):
+        for group_name in globals_file.get_group_names(path):
             if group_name in groups:
                 raise ValueError('Error: group %s is defined in both %s and %s. ' % (group_name, groups[group_name], path) +
                                  'Only uniquely named groups can be used together '
@@ -303,7 +190,7 @@ def get_all_groups(h5_files):
 
 def get_globals(groups):
     """Return the effective expression, units, and expansion for active globals."""
-    return _globals_file.get_globals(groups)
+    return _details_to_sequence_globals(globals_file.get_globals_details(groups))
 
 
 def _details_to_sequence_globals(globals_details, defaults_only=False, overrides=None):
@@ -330,7 +217,7 @@ def _details_to_sequence_globals(globals_details, defaults_only=False, overrides
 
 
 def get_default_shot_globals(groups):
-    globals_details = get_globals_details(groups)
+    globals_details = globals_file.get_globals_details(groups)
     sequence_globals = _details_to_sequence_globals(globals_details, defaults_only=True)
     evaled_globals, _, _ = evaluate_globals(sequence_globals, raise_exceptions=True)
     shots = expand_globals(sequence_globals, evaled_globals)
@@ -349,7 +236,9 @@ def get_frozen_globals(globals_details, shot):
             if record['jit_enabled']:
                 continue
             if record['scan_enabled']:
-                expression = repr(shot[global_name])
+                # numpy's default repr rounds to 8 digits and elides long arrays
+                with np.printoptions(threshold=sys.maxsize, floatmode='unique'):
+                    expression = repr(shot[global_name])
             else:
                 expression = record['default']
             frozen_globals[global_name] = expression
@@ -357,7 +246,7 @@ def get_frozen_globals(globals_details, shot):
 
 
 def get_queue_compile_globals(groups, frozen_globals):
-    globals_details = get_globals_details(groups)
+    globals_details = globals_file.get_globals_details(groups)
     sequence_globals = _details_to_sequence_globals(
         globals_details, defaults_only=False, overrides=frozen_globals
     )
@@ -677,7 +566,7 @@ def get_output_folder_format(config, default=False):
     """Return the configured output folder format, or the built-in fallback.
 
     If default=True, then the sequence-index placeholder is replaced with the literal
-    directory name ``default``. This is used for default-shot JIT submissions while
+    directory name ``default``. This is used for default-shot submissions while
     preserving the rest of the configured date/path structure."""
     try:
         subdir_format = config.get('runmanager', 'output_folder_format')
@@ -716,7 +605,8 @@ def new_sequence_details(
     config=None,
     increment_sequence_index=True,
     default=False,
-    format_globals={},
+    format_globals=None,
+    subdirectory_in_prefix=False,
 ):
     """Generate the details for a new sequence: the toplevel attrs sequence_date,
     sequence_index, sequence_id; and the the output directory and filename prefix for
@@ -730,7 +620,11 @@ def new_sequence_details(
 
     With default=True these are the details of the day's default sequence, which every
     default shot made that day shares: dated from the start of the day, it has
-    sequence_index -1 and claims no index."""
+    sequence_index -1 and claims no index.
+
+    With subdirectory_in_prefix=True the output directory is the storage folder alone,
+    and the subdirectory the folder format makes leads the filename prefix, so that
+    make_run_files formats it with each shot's globals and never formats the folder."""
     if config is None:
         config = LabConfig()
     script_basename = os.path.splitext(os.path.basename(script_path))[0]
@@ -757,7 +651,7 @@ def new_sequence_details(
     context = dict(
         sequence_attrs,
         sequence_timestamp=sequence_timestamp,
-        globals=format_globals,
+        globals={} if format_globals is None else format_globals,
     )
 
     # Compute the output directory based on labconfig settings:
@@ -778,6 +672,8 @@ def new_sequence_details(
         filename_prefix_format, context, dt=now, preserve_unresolved_roots=('globals',)
     )
 
+    if subdirectory_in_prefix:
+        return sequence_attrs, shot_basedir, os.path.join(subdir, filename_prefix)
     return sequence_attrs, shot_output_dir, filename_prefix
 
 
@@ -799,7 +695,9 @@ def make_run_files(
     shot files will be output to, as well as their filenames (this function will
     generate filenames with the shot number and .h5 extension appended to
     filename_prefix). Sensible defaults for these are also returned by
-    new_sequence_details(), so preferably these should be used.
+    new_sequence_details(), so preferably these should be used. output_folder is used
+    as it is; filename_prefix, which may name subdirectories, is formatted with each
+    shot's globals.
 
     Shuffle will randomise the order that the run files are generated in with respect to
     which element of shots they come from. Shuffled or not, what is yielded comes in run
@@ -822,7 +720,7 @@ def make_run_files(
         random.shuffle(indexed_shots)
     for run_no, (_, shot_globals) in enumerate(indexed_shots):
         basename = os.path.join(
-            format_lookup_string(output_folder, {'globals': shot_globals}),
+            output_folder,
             format_lookup_string(filename_prefix, {'globals': shot_globals}),
         )
         runfilename = ('%s_%0' + str(ndigits) + 'd.h5') % (basename, run_no)
@@ -934,7 +832,7 @@ def compile_labscript_async(labscript_file, run_file,
         labscript_file (str): Path to labscript file to be compiled
         run_file (str): Path to h5 file where compilation output is stored.
             This file must already exist with proper globals initialization.
-            See :func:`new_globals_file` for details.
+            See :func:`runmanager.globals_file.new_globals_file` for details.
         stream_port (zmq.socket, optional): ZMQ socket to push stdout and stderr.
             If None, defaults to calling process stdout/stderr. Default is None.
         done_callback (function, optional): Callback function run when compilation finishes.

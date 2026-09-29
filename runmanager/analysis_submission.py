@@ -1,17 +1,19 @@
 #####################################################################
 #                                                                   #
-# analysis_submission.py                                            #
+# /runmanager/analysis_submission.py                                #
 #                                                                   #
-# Copyright 2026, Monash University                                 #
+# Copyright 2026, JQI                                               #
+# Author: Ian Spielman                                              #
 #                                                                   #
-# This file is part of the program runmanager, in the labscript     #
-# suite (see http://labscriptsuite.org), and is licensed under the  #
+# This file is part of runmanager, in the labscript suite           #
+# (see http://labscriptsuite.org), and is licensed under the        #
 # Simplified BSD License. See the license.txt file in the root of   #
 # the project for the full license.                                 #
 #                                                                   #
 #####################################################################
 """Lyse submission widget and retry loop for runmanager."""
 
+import importlib.resources
 import logging
 import os
 import queue
@@ -33,7 +35,6 @@ from zprocess.security import AuthenticationFailure
 
 
 runmanager_dir = Path(__file__).absolute().parent
-art_dir = runmanager_dir.parent.parent / 'labscript-suite' / 'art'
 
 
 def set_icon_label_pixmap(label, icon_path, size=16):
@@ -52,7 +53,9 @@ class AnalysisSubmission(object):
         self.lyse = LyseClient(timeout=1)
 
         self.widget = UiLoader().load(os.path.join(runmanager_dir, 'analysis_submission.ui'))
-        set_icon_label_pixmap(self.widget.send_to_server_icon, art_dir / 'lyse_22x22.png')
+        set_icon_label_pixmap(
+            self.widget.send_to_server_icon, importlib.resources.files('lyse') / 'lyse.svg'
+        )
 
         if parent_layout is not None:
             if isinstance(parent_layout, QtWidgets.QGridLayout):

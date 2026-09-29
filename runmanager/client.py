@@ -3,11 +3,13 @@ DEFAULT_PORT = 42523
 from labscript_utils.ls_zprocess import ZMQClient
 
 # What an exchange tells BLACS about this runmanager: it offered a shot, its
-# queue is paused, or it has nothing to offer right now. Paused is told apart
-# from having nothing so that BLACS can show an operator why no queued work is
-# arriving; neither is a reason for BLACS to stop:
+# queue is paused, the shot it will offer next is still compiling, or it has
+# nothing to offer right now. Paused and pending are told apart from having
+# nothing so that BLACS can say why no queued work is arriving, or wait for it;
+# neither is a reason for BLACS to stop. Only a shot comes with a path:
 PROVIDER_SHOT = 'shot'
 PROVIDER_PAUSED = 'paused'
+PROVIDER_PENDING = 'pending'
 PROVIDER_NONE = 'none'
 # How BLACS may say a shot it was offered turned out. Every one but 'completed'
 # leaves the row at the head of the queue in red; see shot_finished() in
@@ -37,12 +39,12 @@ class RunmanagerClient(ZMQClient):
         """Return the version of runmanager the server is running in"""
         return self.request('get_version')
 
-    def get_default_globals(self, raw=False):
+    def get_values(self, raw=False):
         """Return all active globals' Default values.
 
         If raw=True, return the stored Default expression strings. Otherwise return
         the evaluated Python values."""
-        return self.request('get_default_globals', raw=raw)
+        return self.request('get_values', raw=raw)
 
     def get_globals(self, raw=False):
         """Return all active globals' effective values.
@@ -51,24 +53,20 @@ class RunmanagerClient(ZMQClient):
         the evaluated Python values."""
         return self.request('get_globals', raw=raw)
 
-    def set_default_globals(self, globals, raw=False):
+    def set_values(self, globals, raw=False):
         """Set Default expressions for active globals."""
-        return self.request('set_default_globals', globals, raw=raw)
+        return self.request('set_values', globals, raw=raw)
 
-    def set_globals(self, globals, raw=False):
-        """Alias for set_default_globals()."""
-        return self.set_default_globals(globals, raw=raw)
-
-    def get_scan_globals(self, raw=False):
+    def get_scans(self, raw=False):
         """Return all active globals' Scan values.
 
         If raw=True, return the stored Scan expression strings. Otherwise return the
         evaluated Python values."""
-        return self.request('get_scan_globals', raw=raw)
+        return self.request('get_scans', raw=raw)
 
-    def set_scan_globals(self, globals, raw=False):
+    def set_scans(self, globals, raw=False):
         """Set Scan expressions for active globals."""
-        return self.request('set_scan_globals', globals, raw=raw)
+        return self.request('set_scans', globals, raw=raw)
 
     def get_scan_enabled(self):
         """Return all active globals' Scan? state."""
@@ -252,7 +250,7 @@ class RunmanagerClient(ZMQClient):
         that gets an answer has been heard, and must move on rather than
         sending the same outcome again.
 
-        Returns a dict: ``state`` is ``'shot'``, ``'paused'`` or ``'none'``,
-        and ``shot_id`` and ``path`` name the offered shot when there is
-        one."""
+        Returns a dict: ``state`` is ``'shot'``, ``'paused'``, ``'pending'``
+        (the next shot is still compiling) or ``'none'``, and ``shot_id`` and
+        ``path`` name the offered shot when there is one."""
         return self.request('queue_exchange', outcome, request_shot)
