@@ -713,7 +713,7 @@ def new_sequence_details(
     config=None,
     increment_sequence_index=True,
     default=False,
-    format_globals={},
+    format_globals=None,
 ):
     """Generate the details for a new sequence: the toplevel attrs sequence_date,
     sequence_index, sequence_id; and the the output directory and filename prefix for
@@ -754,7 +754,7 @@ def new_sequence_details(
     context = dict(
         sequence_attrs,
         sequence_timestamp=sequence_timestamp,
-        globals=format_globals,
+        globals={} if format_globals is None else format_globals,
     )
 
     # Compute the output directory based on labconfig settings:
