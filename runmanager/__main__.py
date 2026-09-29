@@ -44,6 +44,7 @@ import ast
 import pprint
 import signal
 import unicodedata
+import importlib.metadata
 import importlib.resources
 from pathlib import Path
 
@@ -55,7 +56,7 @@ splash.update_text('importing matplotlib')
 import matplotlib
 matplotlib.use('Agg')
 
-from qtutils.qt import QtCore, QtGui, QtWidgets
+from qtutils.qt import QtCore, QtGui, QtWidgets, QT_ENV
 from qtutils.qt.QtCore import pyqtSignal as Signal
 
 splash.update_text('importing labscript suite modules')
@@ -1049,6 +1050,7 @@ class GroupTab(object):
         self.connect_signals()
 
         self.populate_model()
+        logger.info(f'Initial population of {self.group_name}')
         for col in range(self.globals_model.columnCount()):
             if col != self.GLOBALS_COL_VALUE:
                 self.ui.treeView_globals.resizeColumnToContents(col)
@@ -2071,6 +2073,14 @@ class RunManager(LabscriptApplication):
     GROUPS_DUMMY_ROW_TEXT = '<Click to add group>'
 
     def __init__(self):
+        logger.info(f'Python version: {sys.version}')
+        logger.info(f'Platform: {sys.platform}')
+        logger.info(f'Qt environment: {QT_ENV}')
+        logger.info(f'PySide/PyQt version: {importlib.metadata.version(QT_ENV)}')
+        logger.info(f'Qt version: {QtCore.qVersion()}')
+        logger.info(f"qtutils version: {importlib.metadata.version('qtutils')}")
+        logger.info(f'runmanager version: {runmanager.__version__}')
+
         splash.update_text('loading graphical interface')
         loader = UiLoader()
         loader.registerCustomWidget(FingerTabWidget)
@@ -2126,6 +2136,7 @@ class RunManager(LabscriptApplication):
             os.path.join(runmanager_dir, 'batch_compiler.py'),
             output_redirection_port=self.output_box.port,
         )
+        logger.info('compiler subprocess started')
         # Set while the subprocess can be sent work. Restarting it clears this
         # until the new one is up, so no compile is sent to the one quitting.
         self.child_ready = threading.Event()
@@ -2160,6 +2171,7 @@ class RunManager(LabscriptApplication):
         self.update_blacs_status(None)
         self.blacs_status_monitor.start()
         self.connect_signals()
+        logger.info('UI loaded')
 
         # The last location from which a labscript file was selected, defaults
         # to labscriptlib:
@@ -2252,6 +2264,7 @@ class RunManager(LabscriptApplication):
                                             ],
                                   }
         self.exp_config = LabConfig(required_params = required_config_params)
+        logger.info('LabConfig loaded')
 
     def setup_axes_tab(self):
         self.axes_model = QtGui.QStandardItemModel()
@@ -2460,6 +2473,7 @@ class RunManager(LabscriptApplication):
         QtGui.QShortcut('ctrl+W', self.ui, self.close_current_tab)
         QtGui.QShortcut('ctrl+Tab', self.ui, lambda: self.switch_tabs(+1))
         QtGui.QShortcut('ctrl+shift+Tab', self.ui, lambda: self.switch_tabs(-1))
+        logger.info('Signals connected')
 
     def on_close_event(self):
         save_data = self.get_save_data()
@@ -3345,7 +3359,6 @@ class RunManager(LabscriptApplication):
                 # Exclude <add new group> item, which is not selectable
                 name_items += [child for child in children if child.isSelectable() ]
 
-        filenames = set(item.parent().text() for item in name_items)
         for item in name_items:
             globals_file = item.parent().text()
             group_name = item.text()
@@ -3724,7 +3737,7 @@ class RunManager(LabscriptApplication):
                 self.check_output_folder_update()
             except Exception as e:
                 # Don't stop the thread.
-                logger.exception("error checking default output folder")
+                logger.exception(f"error checking default output folder: {e}")
 
     @inmain_decorator()
     def check_output_folder_update(self):
@@ -3863,6 +3876,7 @@ class RunManager(LabscriptApplication):
                 break
         self.update_tabs_parsing_indication(active_groups, sequence_globals, evaled_globals, self.n_shots)
         self.update_axes_tab(expansions, dimensions)
+        logger.info('Globals parsed')
 
     def preparse_globals_loop(self):
         """Runs in a thread, waiting on a threading.Event that tells us when
@@ -3887,6 +3901,7 @@ class RunManager(LabscriptApplication):
                         except queue.Empty:
                             break
                 # Do some work:
+                logger.info(f'Pre-parsing globals with {n_requests:d} requests')
                 try:
                     self.preparse_globals()
                 finally:
@@ -4926,7 +4941,7 @@ class RunManager(LabscriptApplication):
         agnostic_path = shared_drive.path_to_agnostic(run_file)
         try:
             self.runviewer.say_hello(timeout=1)
-        except Exception as e:
+        except Exception:
             logger.info('runviewer not running, attempting to start...')
             # Runviewer not running, start it:
             if os.name == 'nt':
