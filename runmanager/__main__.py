@@ -1819,9 +1819,12 @@ class GroupTab(object):
                     jit_item.setData(False, self.GLOBALS_ROLE_SORT_DATA)
                 expansion_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_EXPANSION)
                 if not expansion_item.text():
-                    expansion_item.setText('outer')
-                    expansion_item.setData('outer', self.GLOBALS_ROLE_PREVIOUS_TEXT)
-                    expansion_item.setData('outer', self.GLOBALS_ROLE_SORT_DATA)
+                    expansion = runmanager.get_expansion(
+                        self.globals_file, self.group_name, global_name
+                    )
+                    expansion_item.setText(expansion)
+                    expansion_item.setData(expansion, self.GLOBALS_ROLE_PREVIOUS_TEXT)
+                    expansion_item.setData(expansion, self.GLOBALS_ROLE_SORT_DATA)
             self.update_scan_controls(global_name)
             self._update_boolean_state(global_name)
             if new_state:
