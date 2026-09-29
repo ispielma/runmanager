@@ -598,7 +598,7 @@ class QueueController(object):
                 ],
             }
 
-    def restore_state(self, state):
+    def restore_state(self, state, restore_rows=True):
         with self._lock:
             empty_queue_policy = state.get(
                 'empty_queue_policy', EMPTY_QUEUE_NOTHING
@@ -624,7 +624,10 @@ class QueueController(object):
             self.paused = bool(state.get('paused', False))
             self.last_sent_from_queue = None
             self.last_sent_sequence_attrs = None
-            self._items = [self._normalise_item(item) for item in state.get('items', [])]
+            if restore_rows:
+                self._items = [
+                    self._normalise_item(item) for item in state.get('items', [])
+                ]
 
     def get_queue_state(self):
         with self._lock:
@@ -709,8 +712,8 @@ class QueueController(object):
 
         Note that running means offered and not yet reported on, not that this
         particular shot is on the hardware: if the head changes while BLACS is
-        running the old one -- the operator deletes it, or a configuration is
-        loaded -- it is the new head that is offered next.
+        running the old one -- the operator deletes it -- it is the new head
+        that is offered next.
 
         The returned copy says in ``reclaimed`` whether it was a row still
         marked running, so that the caller can report a re-offer that the
@@ -1162,8 +1165,8 @@ class QueueManager(QtCore.QObject):
     def export_state(self):
         return self.controller.export_state()
 
-    def restore_state(self, state):
-        self.controller.restore_state(dict(state or {}))
+    def restore_state(self, state, restore_rows=True):
+        self.controller.restore_state(dict(state or {}), restore_rows)
         self.queueChanged.emit()
 
     def mainloop(self):

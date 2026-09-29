@@ -2215,7 +2215,7 @@ class RunManager(LabscriptApplication):
 
             def load_the_config_file():
                 try:
-                    self.load_configuration(autoload_config_file)
+                    self.load_configuration(autoload_config_file, at_startup=True)
                     self.output_box.output('done.\n')
                 except Exception as e:
                     self.output_box.output('\nCould not load config file: %s: %s\n\n' %
@@ -4403,7 +4403,7 @@ class RunManager(LabscriptApplication):
         file = os.path.abspath(file)
         self.load_configuration(file)
 
-    def load_configuration(self, filename):
+    def load_configuration(self, filename, at_startup=False):
         # Close all files:
         save_data = self.get_save_data()
         for globals_file in save_data['h5_files_open']:
@@ -4500,7 +4500,9 @@ class RunManager(LabscriptApplication):
 
         queue_state = runmanager_config.get('queue_state')
         if isinstance(queue_state, dict):
-            self.queue_manager.restore_state(queue_state)
+            # The queue's shots come back only when runmanager starts. A load
+            # during a session applies the queue's settings and leaves its shots:
+            self.queue_manager.restore_state(queue_state, restore_rows=at_startup)
             restored_queue_state = self.queue_manager.get_queue_state()
             self.ui.lineEdit_default_labscript_file.setText(
                 restored_queue_state['default_labscript_file']
@@ -5136,10 +5138,10 @@ class RunManager(LabscriptApplication):
         record = self.queue_manager.shot_finished(shot_id, status, message)
         if record is None:
             # A completed shot that matched no row. The row can be gone for
-            # ordinary reasons -- the operator loaded a queue configuration, or
-            # restarted runmanager, while BLACS was running the shot it had
-            # been given -- and it can also be a lost reply being sent again
-            # for a row already retired. The two are indistinguishable here.
+            # ordinary reasons -- the operator restarted runmanager while BLACS
+            # was running the shot it had been given -- and it can also be a
+            # lost reply being sent again for a row already retired. The two
+            # are indistinguishable here.
             #
             # There is nothing to do to the queue either way, and nothing
             # here needs to know which case it was. The shot ran and wrote

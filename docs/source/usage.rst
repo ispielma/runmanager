@@ -120,6 +120,10 @@ apparatuses, where different users want to run different experiments, and for th
 where a user wishes to rapidly switch between one of more diagnostic configurations they
 have previously saved.
 
+The shots waiting in the queue are saved in the configuration with the rest, and come back
+when runmanager starts and loads that configuration automatically. Loading or reverting a
+configuration during a session applies the queue's settings and leaves its shots as they are.
+
 Managing global variables
 -------------------------
 
