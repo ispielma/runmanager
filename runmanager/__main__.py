@@ -3044,7 +3044,9 @@ class RunManager(LabscriptApplication):
         """Empty the queue, as the replacement modes' Clear does.
 
         Every waiting row goes, and a row still compiling has its file deleted
-        once its compile finishes. A shot BLACS has is kept."""
+        once its compile finishes. A shot BLACS has is kept. A batch being
+        compiled for runviewer alone stops after the shot it is on."""
+        self.queue_manager.stop_compile_shots()
         self.queue_manager.clear()
 
     def on_restart_subprocess_clicked(self):

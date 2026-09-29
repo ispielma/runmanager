@@ -911,6 +911,10 @@ class QueueManager(QtCore.QObject):
         self.compile_run_file_callback = compile_run_file
         self.send_to_runviewer_callback = send_to_runviewer
         self.output = output
+        # A compile_shots batch is given the event that is current when it is
+        # submitted, and stopping replaces it, so an Engage after Empty queue is
+        # not stopped by the click that came before it.
+        self._compile_shots_stop = threading.Event()
         self.thread = threading.Thread(target=self.mainloop)
         self.thread.daemon = True
         self.thread.start()
@@ -955,8 +959,13 @@ class QueueManager(QtCore.QObject):
             self.enqueue(records)
             self.compile_ahead()
             return records
-        self.command_queue.put(('compile_shots', (records,)))
+        self.command_queue.put(('compile_shots', (records, self._compile_shots_stop)))
         return records
+
+    def stop_compile_shots(self):
+        """Stop the compile_shots batches submitted so far, after the shot each is on."""
+        self._compile_shots_stop.set()
+        self._compile_shots_stop = threading.Event()
 
     def compile_shot(self, item, default_globals=False):
         """Write one shot's file, compile it, and send it to runviewer if asked.
@@ -1176,9 +1185,9 @@ class QueueManager(QtCore.QObject):
                         item = self.controller.claim_next_to_compile_ahead()
                     self.output('Ready.\n\n')
                 elif command == 'compile_shots':
-                    (records,) = args
+                    records, stop = args
                     for item in records:
-                        if not self.compile_shot(item):
+                        if stop.is_set() or not self.compile_shot(item):
                             self.output('Compilation aborted.\n\n', red=True)
                             break
                     else:
