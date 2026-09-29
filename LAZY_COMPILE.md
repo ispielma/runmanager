@@ -73,7 +73,7 @@ Queued lazy shots keep the skeleton filepath created at Engage time. If a lazy s
 - Reuse `make_run_files()` / `make_single_run_file()` for skeleton-file creation and rewriting.
 - Reuse `compile_run_file()` for the actual compile subprocess call.
 - Reuse `get_queue_compile_globals()` for the “current globals except scanned ones” rule.
-- Reuse the existing queue/default-shot `queue_request_next()` path rather than adding a second JIT protocol.
+- Reuse the existing queue/default-shot `queue_request_next()` path rather than adding a second lazy-compile protocol.
 - Reuse the existing shot-globals HDF5 read path already available in the suite to recover the frozen scanned values from queued skeleton files.
 
 ## Public / Internal Interface Changes
@@ -110,4 +110,4 @@ Queued lazy shots keep the skeleton filepath created at Engage time. If a lazy s
 - This batch should touch `runmanager` only unless implementation proves otherwise.
 - Lazy queue items keep their Engage-time filepath and sequence attrs.
 - Compile failure for a lazy queue item drops that item.
-- The existing default-shot JIT compile path remains separate and unchanged in behavior.
+- The existing default-shot compile path remains separate and unchanged in behavior.

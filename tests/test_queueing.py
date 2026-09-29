@@ -2565,7 +2565,7 @@ class SentToBlacsRowTests(unittest.TestCase):
 
         model = widget.queue_model
         mode_column = 0 if widget.path_column else 1
-        self.assertEqual(model.item(0, mode_column).text(), 'JIT')
+        self.assertEqual(model.item(0, mode_column).text(), 'lazy')
 
 
 class QueueDisplayTests(unittest.TestCase):

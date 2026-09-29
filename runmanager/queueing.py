@@ -501,7 +501,7 @@ class QueueController(object):
             items = []
             for item in self._items:
                 compile_mode = item.get('compile_mode', COMPILE_MODE_EAGER)
-                mode_label = 'JIT' if compile_mode == COMPILE_MODE_LAZY else 'compiled'
+                mode_label = 'lazy' if compile_mode == COMPILE_MODE_LAZY else 'compiled'
                 path = item['path']
                 # A failed row says why in its tooltip rather than in a column
                 # that would be empty on every other row:
