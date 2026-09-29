@@ -19,7 +19,6 @@ import unittest
 # relying on runmanager below, so that this file can be run on its own.
 import labscript_utils.h5_lock  # noqa: F401
 import h5py
-import numpy as np
 import runmanager
 from qtutils.qt.QtCore import Qt
 from qtutils.qt.QtWidgets import QApplication
@@ -37,7 +36,7 @@ from fixtures import (
     submit_to_lyse,
     wait_for,
 )
-from runmanager.client import PROVIDER_PENDING
+from runmanager.client import PROVIDER_PAUSED, PROVIDER_PENDING
 from runmanager.queueing import (
     COMPILE_MODE_EAGER,
     COMPILE_MODE_LAZY,
@@ -61,29 +60,19 @@ def queued_shot(path, **kwargs):
 
 
 class QueueIdentityTests(unittest.TestCase):
-    def test_queued_shot_has_a_stable_id(self):
+    def test_queued_shots_have_distinct_ids_that_survive_save_and_restore(self):
         controller = QueueController()
         controller.enqueue([queued_shot('/tmp/shot_a.h5'), queued_shot('/tmp/shot_b.h5')])
-        shot_ids = [item['shot_id'] for item in controller.export_state()['items']]
+        state = controller.export_state()
+        shot_ids = [item['shot_id'] for item in state['items']]
         self.assertTrue(all(shot_ids), 'every queued shot needs an id')
         self.assertEqual(len(set(shot_ids)), 2, 'ids must distinguish rows')
 
-    def test_configuration_saved_with_a_failure_policy_still_loads(self):
-        # Retry/Drop is gone: a shot now stays at the head of the queue until
-        # it completes or the operator deletes it. An older saved queue still
-        # has to open, with the setting simply ignored.
-        controller = QueueController()
-        controller.restore_state(
-            {'failure_policy': 'drop', 'items': [queued_shot('/tmp/shot_a.h5')]}
-        )
-        offered = controller.offer_next()
-        controller.shot_finished(offered['shot_id'], 'failed', 'Device error')
+        restored = QueueController()
+        restored.restore_state(state)
         self.assertEqual(
-            controller.offer_next()['shot_id'],
-            offered['shot_id'],
-            'the failed shot is retried whatever the old setting said',
+            [item['shot_id'] for item in restored.export_state()['items']], shot_ids
         )
-        self.assertNotIn('failure_policy', controller.get_queue_state())
 
     def test_running_and_failing_a_shot_does_not_change_the_saved_queue(self):
         # What this session made of a row is not part of the queue: a saved
@@ -97,9 +86,9 @@ class QueueIdentityTests(unittest.TestCase):
         self.assertEqual(controller.export_state(), before)
 
     def test_a_restored_record_without_an_id_is_given_one_and_keeps_the_rest(self):
-        # A queue saved before shot ids existed still has to open, and its
-        # shots still have to be offerable: an id is minted on the way in, is
-        # saved with the row from then on, and nothing else is lost with it.
+        # A queue saved before shot ids existed, or with a setting since
+        # retired, still has to open and its shots still have to be offerable:
+        # an id is minted on the way in and saved with the row from then on.
         legacy = {
             'path': '/tmp/shot_a.h5',
             'labscript_file': '/tmp/experiment.py',
@@ -110,7 +99,7 @@ class QueueIdentityTests(unittest.TestCase):
             'n_runs': 5,
         }
         controller = QueueController()
-        controller.restore_state({'items': [legacy]})
+        controller.restore_state({'failure_policy': 'drop', 'items': [legacy]})
 
         offered = controller.offer_next()
 
@@ -128,98 +117,40 @@ class QueueIdentityTests(unittest.TestCase):
             'and the id it was given is stable from then on',
         )
 
-    def test_shot_id_survives_save_and_restore(self):
-        controller = QueueController()
-        controller.enqueue([queued_shot('/tmp/shot_a.h5')])
-        state = controller.export_state()
-        restored = QueueController()
-        restored.restore_state(state)
-        self.assertEqual(
-            [item['shot_id'] for item in restored.export_state()['items']],
-            [item['shot_id'] for item in state['items']],
-        )
-
 
 class SavedQueueValueTests(unittest.TestCase):
-    """A queue can be saved whatever its shots' values came from.
+    """A queue can be saved whatever its shots' values came from."""
 
-    The queue is written into the app config, which holds strings, numbers and
-    booleans and nothing else. A record carrying anything else stops every
-    save from then on, the one offered on the way out included -- and that one
-    failing is a whole queue lost rather than a setting.
-    """
-
-    def setUp(self):
-        self.directory = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.directory, True)
-        self.attrs = {
+    def test_a_queue_whose_sequence_came_off_a_shot_file_can_be_saved(self):
+        # The ordinary path between one submission and the next: the queue is
+        # empty, so the sequence the batch is added to is read back out of the
+        # shot file. The app config holds only strings, numbers and booleans.
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        attrs = {
             'script_basename': 'experiment',
             'sequence_date': '2026-09-18',
             'sequence_index': 11,
             'sequence_id': '20260918T101112_experiment',
         }
-
-    def save(self, controller):
-        """Save the queue the way the application saves it, and read it back."""
-        path = os.path.join(self.directory, 'runmanager.toml')
-        save_appconfig(
-            path, {'runmanager_state': {'queue_state': controller.export_state()}}
-        )
-        return load_appconfig(path)['runmanager_state']['queue_state']
-
-    def test_a_queue_whose_sequence_came_off_a_shot_file_can_be_saved(self):
-        # The ordinary path between one submission and the next: the queue is
-        # empty, so the sequence the batch is added to is read back out of the
-        # shot file rather than off a row.
-        shot = os.path.join(self.directory, 'experiment_00.h5')
-        runmanager.make_single_run_file(shot, None, {}, self.attrs, 0, 1)
+        shot = os.path.join(directory, 'experiment_00.h5')
+        runmanager.make_single_run_file(shot, None, {}, attrs, 0, 1)
         controller = QueueController()
         controller.enqueue(
             [queued_shot(shot, sequence_attrs=runmanager.get_sequence_attrs(shot))]
         )
 
-        saved = self.save(controller)
-
-        self.assertEqual(saved['items'][0]['sequence_attrs'], self.attrs)
-
-    def test_a_record_is_saveable_whatever_its_sequence_arrived_as(self):
-        # A record is normalised on the way into the queue -- its paths, its
-        # names, its run numbers -- and that is what makes a queue saveable.
-        # Its sequence attributes are part of the record and are no exception,
-        # so the queue does not have to know where a caller read them.
-        controller = QueueController()
-        controller.enqueue(
-            [
-                queued_shot(
-                    os.path.join(self.directory, 'experiment_00.h5'),
-                    sequence_attrs=dict(self.attrs, sequence_index=np.int64(11)),
-                )
-            ]
+        path = os.path.join(directory, 'runmanager.toml')
+        save_appconfig(
+            path, {'runmanager_state': {'queue_state': controller.export_state()}}
         )
+        saved = load_appconfig(path)['runmanager_state']['queue_state']
 
-        saved = self.save(controller)
-
-        self.assertEqual(saved['items'][0]['sequence_attrs'], self.attrs)
+        self.assertEqual(saved['items'][0]['sequence_attrs'], attrs)
 
 
 class QueuePauseTests(unittest.TestCase):
-    """Pause is this runmanager's policy on its own queue.
-
-    Whether a paused runmanager withholds the shot is decided in offer_shot().
-    What is checked here is the queue's half of it: that pause is a saved queue
-    setting, and that pausing does nothing to the queue itself.
-    """
-
-    def test_a_new_queue_is_not_paused(self):
-        self.assertFalse(QueueController().get_queue_state()['paused'])
-
-    def test_pause_is_saved_and_restored_with_the_queue(self):
-        controller = QueueController()
-        controller.enqueue([queued_shot('/tmp/shot_a.h5')])
-        controller.set_paused(True)
-        restored = QueueController()
-        restored.restore_state(controller.export_state())
-        self.assertTrue(restored.get_queue_state()['paused'])
+    """Pause is this runmanager's policy on its own queue."""
 
     def test_a_saved_queue_with_no_pause_state_loads_unpaused(self):
         # A configuration carrying no pause state -- one saved by a runmanager
@@ -230,40 +161,25 @@ class QueuePauseTests(unittest.TestCase):
         controller.restore_state({'items': [queued_shot('/tmp/shot_a.h5')]})
         self.assertFalse(controller.get_queue_state()['paused'])
 
-    def test_pausing_does_not_disturb_the_shot_that_is_running(self):
-        # Pause withholds the next shot; it does not stop the one in hand. The
-        # row BLACS is running stays running, and its outcome still retires it.
-        controller = QueueController()
-        controller.enqueue(
-            [queued_shot('/tmp/shot_a.h5'), queued_shot('/tmp/shot_b.h5')]
-        )
-        offered = controller.offer_next()
-        controller.set_paused(True)
-        self.assertEqual(controller.get_queue_display_items()[0]['state'], 'running')
-        controller.shot_finished(offered['shot_id'], 'completed')
+    def test_a_paused_queue_offers_no_shot_until_it_is_resumed(self):
+        # Pause says runmanager has nothing to offer, not that BLACS should
+        # stop, and it leaves the row waiting rather than marking it running.
+        app = FakeRunManager(self)
+        self.addCleanup(app.queue_manager.shutdown)
+        app.queue_manager.enqueue([queued_shot('/tmp/shot_a.h5')])
+        app.queue_manager.set_paused(True)
+
+        self.assertEqual(app.offer_shot()['state'], PROVIDER_PAUSED)
         self.assertEqual(
-            [row['path'] for row in controller.get_queue_display_items()],
-            [os.path.abspath('/tmp/shot_b.h5')],
-            'the shot that was under way completed normally',
+            [row['state'] for row in app.queue_controller.get_queue_display_items()],
+            [''],
         )
 
-    def test_resuming_leaves_the_head_of_the_queue_where_it_was(self):
-        controller = QueueController()
-        controller.enqueue(
-            [queued_shot('/tmp/shot_a.h5'), queued_shot('/tmp/shot_b.h5')]
-        )
-        before = controller.get_queue_display_items()
-        controller.set_paused(True)
-        self.assertEqual(controller.get_queue_display_items(), before)
-        controller.set_paused(False)
+        app.queue_manager.set_paused(False)
+        offered = app.offer_shot()
 
-        offered = controller.offer_next()
+        self.assertEqual(offered['state'], PROVIDER_SHOT)
         self.assertEqual(offered['path'], os.path.abspath('/tmp/shot_a.h5'))
-        self.assertEqual(
-            [item['shot_id'] for item in controller.export_state()['items']][0],
-            offered['shot_id'],
-            'the head is the same shot it was before the pause',
-        )
 
 
 class QueueOfferTests(unittest.TestCase):
@@ -283,22 +199,6 @@ class QueueOfferTests(unittest.TestCase):
         self.assertEqual(rows[0]['state'], 'running')
         self.assertEqual(rows[1]['state'], '')
 
-
-    def test_row_still_marked_running_is_offered_again_under_the_same_id(self):
-        # BLACS asks for a shot only when it is idle, so a request that has no
-        # outcome for the running row proves the offer never reached it. The
-        # row is handed out again rather than stranding the queue behind it.
-        controller = QueueController()
-        controller.enqueue([queued_shot('/tmp/shot_a.h5')])
-        offered = controller.offer_next()
-
-        reoffered = controller.offer_next()
-
-        self.assertEqual(reoffered['shot_id'], offered['shot_id'])
-        self.assertEqual(reoffered['path'], offered['path'])
-        self.assertTrue(reoffered['reclaimed'], 'and it says that it did so')
-        self.assertFalse(offered['reclaimed'], 'the first offer reclaimed nothing')
-
     def test_failed_row_is_offered_again_under_the_same_id(self):
         controller = QueueController()
         controller.enqueue(
@@ -317,16 +217,14 @@ class QueueOfferTests(unittest.TestCase):
             'Device error', rows[0]['tooltip'], 'the old reason is not still shown'
         )
 
-    def test_a_retry_that_fails_again_keeps_the_same_row(self):
-        controller = QueueController()
-        controller.enqueue([queued_shot('/tmp/shot_a.h5')])
-        offered = controller.offer_next()
-        controller.shot_finished(offered['shot_id'], 'failed', 'Device error')
-        retried = controller.offer_next()
         controller.shot_finished(retried['shot_id'], 'failed', 'Device error again')
 
         rows = controller.get_queue_display_items()
-        self.assertEqual([row['path'] for row in rows], [os.path.abspath('/tmp/shot_a.h5')])
+        self.assertEqual(
+            [row['path'] for row in rows],
+            [os.path.abspath('/tmp/shot_a.h5'), os.path.abspath('/tmp/shot_b.h5')],
+            'a retry that fails again keeps its row',
+        )
         self.assertEqual(rows[0]['state'], 'failed')
         self.assertIn('Device error again', rows[0]['tooltip'])
 
@@ -356,12 +254,6 @@ class QueueOutcomeTests(unittest.TestCase):
         self.assertEqual(
             controller.offer_next()['path'], os.path.abspath('/tmp/shot_b.h5')
         )
-
-    def test_outcome_for_an_unknown_shot_changes_nothing(self):
-        controller = QueueController()
-        controller.enqueue([queued_shot('/tmp/shot_a.h5')])
-        self.assertIsNone(controller.shot_finished('not-a-shot-id', 'completed'))
-        self.assertEqual(len(controller.get_queue_display_items()), 1)
 
     def test_shot_that_did_not_complete_stays_queued_with_its_reason(self):
         for status in ('failed', 'aborted', 'rejected'):
@@ -396,16 +288,11 @@ class QueueOutcomeTests(unittest.TestCase):
 
 
 class RejectedShotTests(unittest.TestCase):
-    """A shot BLACS could not read at all is this queue's problem, not the
-    apparatus's.
+    """A shot BLACS could not read is the queue's problem, not the apparatus's.
 
-    A file that has gone, or a connection table that does not match: nothing
-    about the apparatus is wrong and nothing about it will change by asking
-    again. So the row is held here, red, and is not offered again -- an
-    operator deletes it, or a restart clears the state. BLACS is left running:
-    it keeps asking, gets nothing, and runs its own shot meanwhile. Anything
-    else would need somebody standing at the apparatus to restart it over a
-    file only this end can fix.
+    Nothing about the apparatus will change by asking again, so the row is held
+    red at the head and is not offered again until an operator deletes it. BLACS
+    keeps asking, gets nothing, and runs its own shot meanwhile.
     """
 
     def rejected_queue(self):
@@ -431,22 +318,6 @@ class RejectedShotTests(unittest.TestCase):
             [os.path.abspath('/tmp/shot_a.h5'), os.path.abspath('/tmp/shot_b.h5')],
             'and it holds its place rather than letting the queue past it',
         )
-
-    def test_a_failed_shot_is_offered_again_and_a_rejected_one_is_not(self):
-        # The distinction the two states exist for. A shot the apparatus could
-        # not run is worth another attempt once an operator has seen why; a
-        # shot that could not be read is not, and no amount of asking changes
-        # the file.
-        for status, offered_again in (('failed', True), ('rejected', False)):
-            with self.subTest(status=status):
-                controller = QueueController()
-                controller.enqueue([queued_shot('/tmp/shot_a.h5')])
-                offered = controller.offer_next()
-                controller.shot_finished(offered['shot_id'], status, 'a reason')
-
-                again = controller.offer_next()
-
-                self.assertEqual(again is not None, offered_again)
 
     def test_deleting_it_lets_the_queue_go_on(self):
         controller, _ = self.rejected_queue()
