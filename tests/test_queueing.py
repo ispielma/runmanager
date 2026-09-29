@@ -1785,11 +1785,11 @@ class ReplayTests(unittest.TestCase):
         #
         # The completion is passed on both times, and that is deliberate.
         # Runmanager cannot tell a resend from a shot whose row went while
-        # BLACS was running it -- an operator loading a configuration, or
-        # restarting -- and it does not need to. Reporting that a shot
-        # completed is its part; what the far end makes of a file it has
-        # already seen belongs to the far end, and withholding a real
-        # completion to spare it the trouble is the assumption to avoid.
+        # BLACS was running it -- an operator restarting runmanager -- and it
+        # does not need to. Reporting that a shot completed is its part; what
+        # the far end makes of a file it has already seen belongs to the far
+        # end, and withholding a real completion to spare it the trouble is
+        # the assumption to avoid.
         self.enqueue('shot_a.h5')
         offered = self.app.queue_exchange(request_shot=True)
         outcome = {
@@ -2694,9 +2694,9 @@ class LostRowTests(unittest.TestCase):
         self.addCleanup(app.queue_manager.shutdown)
         app.queue_manager.enqueue([queued_shot('/tmp/shot_a.h5')])
         offered = app.queue_exchange(request_shot=True)
-        # Neither Delete nor Clear can take the running row now, but loading a
-        # configuration replaces the whole queue, and the shot BLACS is running
-        # can still go that way.
+        # Neither Delete nor Clear can take the running row now. Only restoring
+        # the queue at startup replaces the whole of it, and the shot BLACS is
+        # running can still go that way.
         app.queue_manager.restore_state({})
 
         app.queue_exchange(
@@ -3212,7 +3212,7 @@ class EngageGuardTests(unittest.TestCase):
         self.assertEqual(window.submitted, [], 'nothing was submitted')
         self.assertTrue(window.output_box.said('BLACS'))
 
-    def test_a_new_sequence_needs_only_somewhere_to_send_its_shots(self):
+    def test_a_new_sequence_is_engaged_without_blacs(self):
         # The warning above is for the modes about the queue, and only those.
         # A new sequence asks nothing of the queue, so looking at the shots in
         # runviewer without running them is a whole use of Engage.
