@@ -73,9 +73,9 @@ def _normalise_record(record):
     if normalised["scan_enabled"] and normalised["jit_enabled"]:
         normalised["jit_enabled"] = False
     # The stored expansion is retained while a scan is disabled, so that a
-    # zip group survives a scan off/on cycle. get_globals() reports an empty
-    # expansion for globals that are not being scanned, so retaining it here
-    # does not affect how the global is expanded.
+    # zip group survives a scan off/on cycle. runmanager.get_globals()
+    # reports an empty expansion for globals that are not being scanned, so
+    # retaining it here does not affect how the global is expanded.
     if normalised["scan_enabled"] and not normalised["expansion"]:
         normalised["expansion"] = "outer"
     return normalised
@@ -227,22 +227,6 @@ def get_globals_details(groups):
                 global_name: copy.deepcopy(record) for global_name, record in group.items()
             }
     return details
-
-
-def get_globals(groups):
-    details = get_globals_details(groups)
-    sequence_globals = {}
-    for group_name, globals_data in details.items():
-        sequence_globals[group_name] = {}
-        for global_name, record in globals_data.items():
-            expression = record["scan"] if record["scan_enabled"] else record["default"]
-            expansion = record["expansion"] if record["scan_enabled"] else ""
-            sequence_globals[group_name][global_name] = (
-                expression,
-                record["units"],
-                expansion,
-            )
-    return sequence_globals
 
 
 def _require_editable(filename):

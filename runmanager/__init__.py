@@ -42,11 +42,6 @@ from .__version__ import __version__
 from . import globals_file as _globals_file
 
 
-def _ensure_str(s):
-    """convert bytestrings and numpy strings to python strings"""
-    return s.decode() if isinstance(s, bytes) else str(s)
-
-
 def is_valid_python_identifier(name):
     # No whitespace allowed. Do this check here because an actual newline in the source
     # is not easily distinguished from a NEWLINE token in the produced tokens, which is
@@ -303,7 +298,7 @@ def get_all_groups(h5_files):
 
 def get_globals(groups):
     """Return the effective expression, units, and expansion for active globals."""
-    return _globals_file.get_globals(groups)
+    return _details_to_sequence_globals(get_globals_details(groups))
 
 
 def _details_to_sequence_globals(globals_details, defaults_only=False, overrides=None):
