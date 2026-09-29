@@ -2336,13 +2336,11 @@ class QueueBookkeepingUnderSubmissionTests(unittest.TestCase):
 
 
 class MalformedOutcomeTests(unittest.TestCase):
-    """An outcome runmanager cannot read must not look like an outage.
+    """An outcome runmanager cannot read is refused, and the exchange goes on.
 
-    An exception raised here reaches BLACS as an error it cannot tell apart
-    from never having reached runmanager, and BLACS holds an outcome until it
-    knows runmanager took it -- so it would send the same unreadable message
-    for ever. Refusing it, saying so, and answering the exchange normally is
-    what lets BLACS move on.
+    A refusal returns normally, so the exchange goes on to offer BLACS a shot
+    in the same reply. A raise would end it at queue_exchange's guard with
+    nothing offered, and BLACS would have to ask again.
     """
 
     def make_runmanager(self):
