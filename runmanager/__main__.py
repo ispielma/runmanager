@@ -5307,30 +5307,34 @@ class RunmanagerServer(ZMQServer):
                 expression += previous[comment_start:comment_end]
         return expression
 
-    @inmain_decorator()
-    def _set_expression_field_values(self, getter, setter, changer_name, globals, raw=False):
-        _, _, locations = self._get_active_global_locations(globals)
+    @staticmethod
+    def _check_before_writing(locations, globals, raw=False):
         # Refused before any write: a batch must not be half applied, and the
         # Convert dialog would stop the server answering.
-        for path in {locations[name][0] for name in globals if name in locations}:
+        for global_name, new_value in globals.items():
+            if raw and not isinstance(new_value, (str, bytes)):
+                msg = "global %s must be a string if raw=True, not %s"
+                raise TypeError(msg % (global_name, new_value.__class__.__name__))
+            if global_name not in locations:
+                raise ValueError(
+                    "Global %s not found in any active group" % global_name
+                )
+        for path in {locations[global_name][0] for global_name in globals}:
             if runmanager.globals_file_requires_conversion(path):
                 raise ValueError(
                     f'{path} is a legacy HDF5 globals file. Convert it to TOML in '
                     'runmanager first.'
                 )
+
+    @inmain_decorator()
+    def _set_expression_field_values(self, getter, setter, changer_name, globals, raw=False):
+        _, _, locations = self._get_active_global_locations(globals)
+        self._check_before_writing(locations, globals, raw)
         try:
             for global_name, new_value in globals.items():
                 if not raw:
                     new_value = repr(new_value)
-                elif not isinstance(new_value, (str, bytes)):
-                    msg = "global %s must be a string if raw=True, not %s"
-                    raise TypeError(msg % (global_name, new_value.__class__.__name__))
-                try:
-                    globals_file, group_name = locations[global_name]
-                except KeyError:
-                    raise ValueError(
-                        "Global %s not found in any active group" % global_name
-                    )
+                globals_file, group_name = locations[global_name]
                 previous_value = getter(globals_file, group_name, global_name)
                 new_value = self._with_trailing_comment(new_value, previous_value)
                 try:
@@ -5346,26 +5350,15 @@ class RunmanagerServer(ZMQServer):
 
     @inmain_decorator()
     def _set_boolean_field_values(self, getter, setter, changer_name, globals):
+        globals = {
+            name: self._coerce_remote_boolean(value, 'global %s' % name)
+            for name, value in globals.items()
+        }
         _, _, locations = self._get_active_global_locations(globals)
-        # Refused before any write: a batch must not be half applied, and the
-        # Convert dialog would stop the server answering.
-        for path in {locations[name][0] for name in globals if name in locations}:
-            if runmanager.globals_file_requires_conversion(path):
-                raise ValueError(
-                    f'{path} is a legacy HDF5 globals file. Convert it to TOML in '
-                    'runmanager first.'
-                )
+        self._check_before_writing(locations, globals)
         try:
             for global_name, new_value in globals.items():
-                new_value = self._coerce_remote_boolean(
-                    new_value, 'global %s' % global_name
-                )
-                try:
-                    globals_file, group_name = locations[global_name]
-                except KeyError:
-                    raise ValueError(
-                        "Global %s not found in any active group" % global_name
-                    )
+                globals_file, group_name = locations[global_name]
                 previous_value = getter(globals_file, group_name, global_name)
                 try:
                     group_tab = app.currently_open_groups[globals_file, group_name]
