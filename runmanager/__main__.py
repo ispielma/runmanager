@@ -2139,10 +2139,6 @@ class RunManager(LabscriptApplication):
         self.setup_queue_tab()
         run_view_layout = self.ui.findChild(QtWidgets.QLayout, 'verticalLayout_2')
         self.analysis_submission = AnalysisSubmission(run_view_layout)
-        # Watching BLACS runs on its own thread, independently of the shot
-        # exchange and of the destination checkbox it reports beside, so that
-        # the indicator is live whether or not shots are being queued and a
-        # BLACS that has stopped answering cannot hold up this GUI:
         # The destination control wears the BLACS logo for the same reason the
         # one below it wears lyse's: three checkboxes in a column that name
         # three different applications are told apart by their logos faster
@@ -2150,6 +2146,10 @@ class RunManager(LabscriptApplication):
         set_icon_label_pixmap(
             self.ui.checkBox_run_shots_icon, importlib.resources.files('blacs') / 'blacs.svg'
         )
+        # Watching BLACS runs on its own thread, independently of the shot
+        # exchange and of the destination checkbox it reports beside, so that
+        # the indicator is live whether or not shots are being queued and a
+        # BLACS that has stopped answering cannot hold up this GUI:
         self.blacs_status_monitor = BlacsStatusMonitor(
             on_status=self.update_blacs_status
         )
