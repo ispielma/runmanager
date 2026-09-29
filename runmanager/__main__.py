@@ -4964,6 +4964,7 @@ class RunManager(LabscriptApplication):
     def prepare_default_shot(self, labscript_file, send_to_runviewer):
         """Write and compile one default shot, and leave it ready to hand over."""
         row = None
+        run_file = None
         try:
             active_groups = inmain(self.get_active_groups, interactive=False)
             sequence_globals, runglobals = runmanager.get_default_shot_globals(
@@ -5029,6 +5030,11 @@ class RunManager(LabscriptApplication):
             self.output_box.output(
                 'Could not produce a default shot: %s\n' % str(e), red=True
             )
+            if run_file is not None:
+                try:
+                    os.remove(run_file)
+                except OSError:
+                    pass
         finally:
             with self._default_shot_lock:
                 self._default_shot_ready = row
