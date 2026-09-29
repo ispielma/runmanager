@@ -13,16 +13,19 @@
 #####################################################################
 """Restarting the compiler subprocess while a shot is compiling.
 
-The subprocess is stood in for by a thread answering on queues, as
-process_tree.subprocess hands them over. The rest is runmanager's own.
+The subprocess is stood in for by a thread at the far end of real zprocess
+queues, which are what process_tree.subprocess hands over. The rest is
+runmanager's own.
 """
-import queue
+import faulthandler
 import threading
 import types
 import unittest
 from unittest import mock
 
+import zmq
 from qtutils.qt.QtWidgets import QApplication, QPushButton
+from zprocess.process_tree import ReadQueue, WriteQueue
 
 # fixtures stubs the splash and does the guarded import of the application.
 from fixtures import RunManager, main_module, wait_for
@@ -34,22 +37,29 @@ class FakeChild:
     """A compiler subprocess that finishes the compile in hand before it reads on."""
 
     def __init__(self, release=None):
-        self.to_child, self.from_child = queue.Queue(), queue.Queue()
-        self.release = release
+        context = zmq.Context.instance()
+        commands, to_child = context.socket(zmq.PULL), context.socket(zmq.PUSH)
+        from_child, replies = context.socket(zmq.PULL), context.socket(zmq.PUSH)
+        commands.bind(f'inproc://commands-{id(self)}')
+        to_child.connect(f'inproc://commands-{id(self)}')
+        from_child.bind(f'inproc://replies-{id(self)}')
+        replies.connect(f'inproc://replies-{id(self)}')
+        self.to_child, self.from_child = WriteQueue(to_child), ReadQueue(from_child)
         self.returncode = None
         self.compiled = []
-        threading.Thread(target=self.mainloop, daemon=True).start()
 
-    def mainloop(self):
-        while True:
-            signal, data = self.to_child.get()
-            if signal == 'quit':
-                self.returncode = 0
-                return
-            self.compiled.append(data[1])
-            if self.release:
-                self.release.wait(10)
-            self.from_child.put(['done', True])
+        def mainloop():
+            while True:
+                signal, data = commands.recv_pyobj()
+                if signal == 'quit':
+                    self.returncode = 0
+                    return
+                self.compiled.append(data[1])
+                if release:
+                    release.wait(10)
+                replies.send_pyobj(['done', True])
+
+        threading.Thread(target=mainloop, daemon=True).start()
 
     def poll(self):
         return self.returncode
@@ -76,6 +86,10 @@ class RestartDuringCompileTests(unittest.TestCase):
         )
         spawn.start()
         self.addCleanup(spawn.stop)
+        # A deadlock in the restart would hang the run, so it exits with the
+        # stacks instead:
+        faulthandler.dump_traceback_later(30, exit=True)
+        self.addCleanup(faulthandler.cancel_dump_traceback_later)
 
         threading.Thread(
             target=app.compile_run_file, args=('e.py', 'first.h5'), daemon=True

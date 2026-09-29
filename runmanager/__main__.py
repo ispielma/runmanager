@@ -72,7 +72,7 @@ from labscript_utils.setup_logging import setup_logging
 import labscript_utils.shared_drive as shared_drive
 from labscript_utils import dedent
 from runviewer.client import RunviewerClient
-from zprocess import raise_exception_in_thread
+from zprocess import Interruptor, raise_exception_in_thread
 import runmanager
 from runmanager.client import (
     DEFAULT_PORT,
@@ -3058,7 +3058,9 @@ class RunManager(LabscriptApplication):
         # child rather than be sent to this one.
         self.child_ready.clear()
         self.to_child.put(['quit', None])
-        self.from_child.put(['done', False])
+        # Its own Interruptor: on the queue's, put() waits for a subscription
+        # that zmq never reports while the compile's get() holds the same one.
+        self.from_child.put(['done', False], interruptor=Interruptor())
         time.sleep(0.1)
         self.output_box.output('Asking subprocess to quit...')
         timeout_time = time.time() + 2
