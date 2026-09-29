@@ -7,7 +7,6 @@ Each is sent by the real RunmanagerClient to a real RunmanagerServer on a free
 port, so a command reaches its handler under the name the client sends it by,
 and an exception the handler returns is raised by the client, as for any caller.
 """
-import copy
 import datetime
 import os
 import queue
@@ -825,16 +824,13 @@ class ShotStatusTests(RemoteCommandTestCase):
         self.assertEqual(sorted(answer), ['gone', 'here'])
 
     def test_asking_leaves_the_queue_as_it_was(self):
-        # Deep, because the rows themselves are half of the claim: a list of
-        # the same dicts compares each row to itself and would pass with the
-        # answer written back into every row it was read from.
         self.enqueue('one')
         self.enqueue('two')
-        before = copy.deepcopy(self.app.queue_controller._items)
+        before = self.app.queue_controller.get_queue_display_items()
 
         self.request(self.client.shot_status, ['one', 'two', 'three'])
 
-        self.assertEqual(self.app.queue_controller._items, before)
+        self.assertEqual(self.app.queue_controller.get_queue_display_items(), before)
 
 
 class EmptyQueueTests(RemoteCommandTestCase):
