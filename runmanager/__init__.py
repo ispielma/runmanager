@@ -115,11 +115,6 @@ class TraceDictionary(dict):
         return trace_data
 
 
-def add_expansion_groups(filename):
-    """Deprecated compatibility hook retained for older callers."""
-    return
-
-
 def new_group(filename, groupname):
     if not is_valid_hdf5_group_name(groupname):
         raise ValueError(
@@ -139,14 +134,6 @@ def rename_group(filename, oldgroupname, newgroupname):
             'characters and cannot include "/" or ".".'
         )
     globals_file.rename_group(filename, oldgroupname, newgroupname)
-
-
-def get_globalslist(filename, groupname):
-    groups = globals_file.get_globals_details({groupname: filename})
-    return {
-        global_name: record['scan'] if record['scan_enabled'] else record['default']
-        for global_name, record in groups[groupname].items()
-    }
 
 
 def new_global(filename, groupname, globalname):
