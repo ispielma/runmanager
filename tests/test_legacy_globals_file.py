@@ -85,3 +85,28 @@ class LegacyGlobalsFileTests(unittest.TestCase):
                 'older': {'v': ('[7, 8]', '', '')},
             },
         )
+
+    def test_a_converted_file_holds_the_globals_the_legacy_file_did(self):
+        # Converting is how a legacy file becomes editable, and what runs must
+        # not change with it: expressions, units, expansions and which globals
+        # are scanned all come across.
+        with h5py.File(self.path, 'w') as f:
+            group = f.create_group('globals/scans')
+            units = group.create_group('units')
+            expansions = group.create_group('expansion')
+            for name, value, unit, expansion in [
+                ('x', '[1, 2, 3]', 'ms', 'outer'),
+                ('y', '[4, 5]', 'V', 'pair'),
+                ('w', '6', 'A', ''),
+            ]:
+                group.attrs[name] = value
+                units.attrs[name] = unit
+                expansions.attrs[name] = expansion
+        converted = os.path.join(os.path.dirname(self.path), 'globals.toml')
+
+        runmanager.convert_globals_file(self.path, converted)
+
+        self.assertEqual(
+            runmanager.get_globals_details({'scans': converted}),
+            runmanager.get_globals_details({'scans': self.path}),
+        )
