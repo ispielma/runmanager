@@ -5283,19 +5283,11 @@ class RunmanagerServer(ZMQServer):
     @staticmethod
     def _merge_groups(sequence_globals, raw):
         if raw:
-            values = {}
-            for group_globals in sequence_globals.values():
-                values.update(
-                    {name: expression for name, (expression, _, _) in group_globals.items()}
-                )
-            return values
+            return runmanager.flatten_globals(sequence_globals)
         evaled_globals, _, _ = runmanager.evaluate_globals(
             sequence_globals, raise_exceptions=False
         )
-        values = {}
-        for group_globals in evaled_globals.values():
-            values.update(group_globals)
-        return values
+        return runmanager.flatten_globals(evaled_globals, evaluated=True)
 
     @staticmethod
     def _coerce_remote_boolean(value, name):
