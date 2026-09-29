@@ -4530,9 +4530,7 @@ class RunManager(LabscriptApplication):
             if at_startup and restored_queue_state['n_items']:
                 # Restored rows that were not compiled yet are compiled ahead,
                 # as they would have been after an Engage:
-                self.queue_manager.compile_ahead(
-                    self.ui.checkBox_view_shots.isChecked()
-                )
+                self.queue_manager.compile_ahead()
             self.ui.lineEdit_default_labscript_file.setText(
                 restored_queue_state['default_labscript_file']
             )
@@ -5053,10 +5051,9 @@ class RunManager(LabscriptApplication):
                 'sequence_attrs': sequence_attrs,
                 'run_no': default_index,
                 'n_runs': default_index + 1,
+                'send_to_runviewer': send_to_runviewer,
             }
-            if not self.queue_manager.compile_shot(
-                shot, send_to_runviewer, default_globals=True
-            ):
+            if not self.queue_manager.compile_shot(shot, default_globals=True):
                 raise RuntimeError(
                     'Compilation failed for %s' % os.path.basename(run_file)
                 )
@@ -5195,9 +5192,7 @@ class RunManager(LabscriptApplication):
             # stops waiting. BLACS asks again shortly, and the queue is not
             # empty meanwhile, so the empty-queue policy does not step in ahead
             # of it:
-            if self.queue_manager.compile_next_in_background(
-                lambda: inmain(self.ui.checkBox_view_shots.isChecked)
-            ):
+            if self.queue_manager.compile_next_in_background():
                 # Pending rather than none, so that BLACS can wait for this shot
                 # instead of running its local override in the gap:
                 return dict(no_shot, state=PROVIDER_PENDING)

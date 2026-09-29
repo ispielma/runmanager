@@ -548,11 +548,8 @@ class FakeRunManager(object):
         self.analysis_submission = submit_to_lyse(testcase, lyse.port)
         self.default_shot_file = default_shot_file
         self.default_shots_taken = 0
-        # Read only when a compile actually starts, and read on this thread
-        # before the compile thread is started, so no event loop is needed:
         self.run_shots = True
         self.ui = types.SimpleNamespace(
-            checkBox_view_shots=types.SimpleNamespace(isChecked=lambda: False),
             checkBox_run_shots=types.SimpleNamespace(isChecked=lambda: self.run_shots),
         )
 

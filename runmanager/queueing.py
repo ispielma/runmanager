@@ -274,6 +274,9 @@ class QueueController(object):
         # sequence is the day's default one, which no batch joins, so it must
         # never become the anchor the next Engage batch is written alongside.
         record['default_shot'] = bool(record.get('default_shot', False))
+        # Whether View shot(s) was ticked when this shot was engaged. The
+        # compile reads it from here, not from the checkbox as it stands then.
+        record['send_to_runviewer'] = bool(record.get('send_to_runviewer', False))
         # A compile in progress belongs to this session only, so a restored
         # shot never starts out claimed:
         record['compiling'] = False
@@ -921,15 +924,17 @@ class QueueManager(QtCore.QObject):
         self.controller.enqueue(list(items))
         self.queueChanged.emit()
 
-    def compile_ahead(self, send_to_runviewer):
+    def compile_ahead(self):
         """Ask the worker to compile the queued eager rows not yet compiled."""
-        self.command_queue.put(('compile_ahead', (send_to_runviewer,)))
+        self.command_queue.put(('compile_ahead', ()))
 
     def compile_shots(self, records, send_to_BLACS, send_to_runviewer):
         """Queue these records if send_to_BLACS, and compile them.
 
         Returns the records, each now carrying the identifier its row has, for
-        a caller that has to say which shots it submitted.
+        a caller that has to say which shots it submitted. Each also carries
+        ``send_to_runviewer``, the choice made with its batch, which is what
+        its compile reads.
 
         A batch bound for the queue is queued at once, so that its rows are
         there to show, to add to and to empty while they compile: the worker
@@ -945,22 +950,24 @@ class QueueManager(QtCore.QObject):
             record['shot_id'] = (
                 str(record['shot_id']) if record.get('shot_id') else new_shot_id()
             )
+            record['send_to_runviewer'] = send_to_runviewer
         if send_to_BLACS:
             self.enqueue(records)
-            self.compile_ahead(send_to_runviewer)
+            self.compile_ahead()
             return records
-        self.command_queue.put(('compile_shots', (records, send_to_runviewer)))
+        self.command_queue.put(('compile_shots', (records,)))
         return records
 
-    def compile_shot(self, item, send_to_runviewer=False, default_globals=False):
+    def compile_shot(self, item, default_globals=False):
         """Write one shot's file, compile it, and send it to runviewer if asked.
 
-        With ``default_globals`` the file is written from the globals' defaults,
-        as a default shot is, rather than from the item's frozen globals.
+        The record's ``send_to_runviewer`` says whether it is asked. With
+        ``default_globals`` the file is written from the globals' defaults, as
+        a default shot is, rather than from the item's frozen globals.
         """
         self.prepare_run_file_callback(item, default_globals=default_globals)
         success = self.compile_run_file_callback(item['labscript_file'], item['path'])
-        if success and send_to_runviewer:
+        if success and item['send_to_runviewer']:
             self.send_to_runviewer_callback(item['path'])
         # Deliberately does not mark the record compiled. For a row already in
         # the queue that is the controller's to do, under its lock, in
@@ -970,15 +977,11 @@ class QueueManager(QtCore.QObject):
         # and offered again afterwards as though it never had been.
         return success
 
-    def compile_next_in_background(self, send_to_runviewer):
+    def compile_next_in_background(self):
         """Start compiling the shot at the head of the queue if it is not ready.
 
         Returns True while a queued shot is pending, so the caller reports it
         as pending rather than falling back to the empty-queue policy.
-
-        ``send_to_runviewer`` is a callable, evaluated only when a compile is
-        actually started, so that a request with nothing to do does not reach
-        into the GUI.
 
         The compile runs on its own thread rather than through the worker's
         command queue, so that it is not held up behind an Engage batch. The
@@ -986,15 +989,12 @@ class QueueManager(QtCore.QObject):
         boundary."""
         item, pending = self.controller.claim_next_for_compile()
         if item is not None:
-            thread = threading.Thread(
-                target=self._background_compile,
-                args=(item, bool(send_to_runviewer())),
-            )
+            thread = threading.Thread(target=self._background_compile, args=(item,))
             thread.daemon = True
             thread.start()
         return pending
 
-    def _background_compile(self, item, send_to_runviewer):
+    def _background_compile(self, item):
         success = False
         # What the row will say it went red for. A failure in the user's script
         # reaches us only as False, the compiler having written the traceback to
@@ -1003,7 +1003,7 @@ class QueueManager(QtCore.QObject):
         # what happened.
         message = 'Could not be compiled. See the output for the reason.'
         try:
-            success = self.compile_shot(item, send_to_runviewer=send_to_runviewer)
+            success = self.compile_shot(item)
         except Exception as exc:
             message = 'Could not be compiled: %s' % str(exc)
             self.output(
@@ -1170,16 +1170,15 @@ class QueueManager(QtCore.QObject):
                     return
 
                 if command == 'compile_ahead':
-                    (send_to_runviewer,) = args
                     item = self.controller.claim_next_to_compile_ahead()
                     while item is not None:
-                        self._background_compile(item, send_to_runviewer)
+                        self._background_compile(item)
                         item = self.controller.claim_next_to_compile_ahead()
                     self.output('Ready.\n\n')
                 elif command == 'compile_shots':
-                    records, send_to_runviewer = args
+                    (records,) = args
                     for item in records:
-                        if not self.compile_shot(item, send_to_runviewer=send_to_runviewer):
+                        if not self.compile_shot(item):
                             self.output('Compilation aborted.\n\n', red=True)
                             break
                     else:
