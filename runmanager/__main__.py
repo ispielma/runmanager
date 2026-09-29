@@ -2113,6 +2113,10 @@ class RunManager(LabscriptApplication):
         self._default_shot_lock = threading.Lock()
         self._default_shot_preparing = False
         self._default_shot_ready = None
+        # How many times the globals have changed, and how many there had been
+        # when the default shot now being made or waiting was started:
+        self.globals_changes = 0
+        self._default_shot_globals_changes = 0
 
         splash.update_text('starting compiler subprocess')
         # Start the compiler subprocess:
@@ -3723,6 +3727,7 @@ class RunManager(LabscriptApplication):
         """Called from either self, a GroupTab, or the RunmanagerServer to inform
         runmanager that something about globals has changed, and that they need
         parsing again."""
+        self.globals_changes += 1
         self.ui.pushButton_engage.setEnabled(False)
         self.preparse_globals_required.put(None)
 
@@ -4928,7 +4933,8 @@ class RunManager(LabscriptApplication):
 
         Its globals were read when it was produced, so it must not be handed to
         BLACS later as though they were current. This happens when the queue
-        has taken over, or the empty-queue policy no longer calls for one."""
+        has taken over, the empty-queue policy no longer calls for one, or the
+        globals have changed since."""
         with self._default_shot_lock:
             row = self._default_shot_ready
             self._default_shot_ready = None
@@ -4944,6 +4950,11 @@ class RunManager(LabscriptApplication):
 
         At most one is produced at a time, however often BLACS asks. The shot
         is collected by a later request once it is ready."""
+        # A default shot started before the latest change to the globals read
+        # the old ones. Drop it now if it is ready; one still compiling is
+        # dropped by the request that finds it ready:
+        if self._default_shot_globals_changes != self.globals_changes:
+            self.discard_default_shot()
         with self._default_shot_lock:
             row = self._default_shot_ready
             if row is not None:
@@ -4952,6 +4963,7 @@ class RunManager(LabscriptApplication):
             if self._default_shot_preparing:
                 return None
             self._default_shot_preparing = True
+            self._default_shot_globals_changes = self.globals_changes
         send_to_runviewer = inmain(self.ui.checkBox_view_shots.isChecked)
         thread = threading.Thread(
             target=self.prepare_default_shot,
