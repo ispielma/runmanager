@@ -1446,7 +1446,7 @@ class ShotIdBeforeCompileTests(unittest.TestCase):
         self.addCleanup(app.queue_manager.shutdown)
         path = os.path.join(directory, 'experiment_00.h5')
         globals_file = os.path.join(directory, 'globals.toml')
-        runmanager.new_globals_file(globals_file)
+        runmanager.globals_file.new_globals_file(globals_file)
         runmanager.new_group(globals_file, 'group')
         item = {
             'path': path,
@@ -3325,7 +3325,7 @@ class QueuedShotFileTests(unittest.TestCase):
         self.app = FakeRunManager(self)
         self.addCleanup(self.app.queue_manager.shutdown)
         self.globals_file = os.path.join(self.directory, 'globals.toml')
-        runmanager.new_globals_file(self.globals_file)
+        runmanager.globals_file.new_globals_file(self.globals_file)
         runmanager.new_group(self.globals_file, 'group')
 
     def test_a_shot_with_no_id_is_written_without_the_attribute(self):

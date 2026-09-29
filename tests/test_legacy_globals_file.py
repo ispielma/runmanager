@@ -20,6 +20,7 @@ import unittest
 import labscript_utils.h5_lock, h5py
 
 import runmanager
+import runmanager.globals_file as globals_file
 # fixtures stubs the splash and does the guarded import of the application.
 from fixtures import RunManager
 
@@ -104,9 +105,9 @@ class LegacyGlobalsFileTests(unittest.TestCase):
                 expansions.attrs[name] = expansion
         converted = os.path.join(os.path.dirname(self.path), 'globals.toml')
 
-        runmanager.convert_globals_file(self.path, converted)
+        globals_file.convert_to_toml(self.path, converted)
 
         self.assertEqual(
-            runmanager.get_globals_details({'scans': converted}),
-            runmanager.get_globals_details({'scans': self.path}),
+            globals_file.get_globals_details({'scans': converted}),
+            globals_file.get_globals_details({'scans': self.path}),
         )

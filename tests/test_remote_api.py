@@ -23,6 +23,7 @@ from unittest import mock
 from labscript_utils.ls_zprocess import ZMQServer
 from qtutils.qt.QtWidgets import QApplication, QCheckBox
 import runmanager
+import runmanager.globals_file as globals_file
 from runmanager.client import RunmanagerClient, SequenceRefused
 # fixtures stubs the splash and does the guarded import of the
 # application, once, for every test module. Importing
@@ -179,7 +180,7 @@ class SubmittingApp(object):
     def __init__(self, directory):
         self.directory = directory
         self.globals_file = os.path.join(directory, 'globals.toml')
-        runmanager.new_globals_file(self.globals_file)
+        globals_file.new_globals_file(self.globals_file)
         runmanager.new_group(self.globals_file, 'group')
         self.labscript_file = os.path.join(directory, 'experiment.py')
         self.exp_config = labconfig(directory)
@@ -307,13 +308,15 @@ class SubmitShotsTests(RemoteCommandTestCase):
         """Give the operator's globals these expressions."""
         for name, expression in expressions.items():
             runmanager.new_global(self.app.globals_file, 'group', name)
-            runmanager.set_value(self.app.globals_file, 'group', name, expression)
+            globals_file.set_field(
+                self.app.globals_file, 'group', name, 'default', expression
+            )
 
     def scan(self, name, expression):
         """Turn on a scan of this global, as an operator would have left it."""
-        runmanager.set_scan(self.app.globals_file, 'group', name, expression)
-        runmanager.set_scan_enabled(self.app.globals_file, 'group', name, True)
-        runmanager.set_expansion(self.app.globals_file, 'group', name, 'outer')
+        globals_file.set_field(self.app.globals_file, 'group', name, 'scan', expression)
+        globals_file.set_field(self.app.globals_file, 'group', name, 'scan_enabled', True)
+        globals_file.set_field(self.app.globals_file, 'group', name, 'expansion', 'outer')
 
     def submit(self, *entries, **kwargs):
         return self.request(
@@ -847,7 +850,7 @@ class EmptyQueueTests(RemoteCommandTestCase):
         # the queue is asked to shut down.
         self.addCleanup(self.app.compiling.set)
         runmanager.new_global(self.app.globals_file, 'group', 'x')
-        runmanager.set_value(self.app.globals_file, 'group', 'x', '0')
+        globals_file.set_field(self.app.globals_file, 'group', 'x', 'default', '0')
 
     def test_a_batch_still_compiling_goes_with_its_files(self):
         started, written, compiled = threading.Event(), threading.Event(), []
@@ -910,7 +913,7 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         super().setUp()
         self.addCleanup(self.app.compiling.set)
         runmanager.new_global(self.app.globals_file, 'group', 'x')
-        runmanager.set_value(self.app.globals_file, 'group', 'x', '0')
+        globals_file.set_field(self.app.globals_file, 'group', 'x', 'default', '0')
 
     def enqueue(self, name, **overrides):
         path = os.path.join(self.directory, name)
@@ -943,9 +946,9 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         self.enqueue('experiment_000.h5', run_no=0, n_runs=1)
         [compiling] = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
         self.assertTrue(self.wait_until(self.app.queue_manager.get_compiling_paths))
-        runmanager.set_scan(self.app.globals_file, 'group', 'x', '[1, 2]')
-        runmanager.set_scan_enabled(self.app.globals_file, 'group', 'x', True)
-        runmanager.set_expansion(self.app.globals_file, 'group', 'x', 'outer')
+        globals_file.set_field(self.app.globals_file, 'group', 'x', 'scan', '[1, 2]')
+        globals_file.set_field(self.app.globals_file, 'group', 'x', 'scan_enabled', True)
+        globals_file.set_field(self.app.globals_file, 'group', 'x', 'expansion', 'outer')
 
         replacement = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE)
 
@@ -1127,10 +1130,10 @@ class ShuffledEngageTests(RemoteCommandTestCase):
         super().setUp()
         self.addCleanup(self.app.compiling.set)
         runmanager.new_global(self.app.globals_file, 'group', 'x')
-        runmanager.set_value(self.app.globals_file, 'group', 'x', '0')
-        runmanager.set_scan(self.app.globals_file, 'group', 'x', '[1, 2, 3]')
-        runmanager.set_scan_enabled(self.app.globals_file, 'group', 'x', True)
-        runmanager.set_expansion(self.app.globals_file, 'group', 'x', 'outer')
+        globals_file.set_field(self.app.globals_file, 'group', 'x', 'default', '0')
+        globals_file.set_field(self.app.globals_file, 'group', 'x', 'scan', '[1, 2, 3]')
+        globals_file.set_field(self.app.globals_file, 'group', 'x', 'scan_enabled', True)
+        globals_file.set_field(self.app.globals_file, 'group', 'x', 'expansion', 'outer')
         self.app.exp_config = labconfig(
             self.directory, filename_prefix_format='{globals[x]}_{script_basename}'
         )
@@ -1183,9 +1186,9 @@ class CompileOnlyEngageTests(RemoteCommandTestCase):
         self.addCleanup(shutil.rmtree, self.directory, True)
         super().setUp()
         runmanager.new_global(self.app.globals_file, 'group', 'x')
-        runmanager.set_scan(self.app.globals_file, 'group', 'x', '[1, 2]')
-        runmanager.set_scan_enabled(self.app.globals_file, 'group', 'x', True)
-        runmanager.set_expansion(self.app.globals_file, 'group', 'x', 'outer')
+        globals_file.set_field(self.app.globals_file, 'group', 'x', 'scan', '[1, 2]')
+        globals_file.set_field(self.app.globals_file, 'group', 'x', 'scan_enabled', True)
+        globals_file.set_field(self.app.globals_file, 'group', 'x', 'expansion', 'outer')
         self.app.ui.checkBox_run_shots.isChecked = lambda: False
 
     def test_the_shots_are_compiled_and_go_nowhere(self):

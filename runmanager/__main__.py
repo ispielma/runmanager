@@ -1112,7 +1112,7 @@ class GroupTab(object):
             self.tabWidget.setTabIcon(index, icon)
 
     def populate_model(self):
-        globals_details = runmanager.get_globals_details(
+        globals_details = runmanager.globals_file.get_globals_details(
             {self.group_name: self.globals_file}
         )[self.group_name]
         for name, details in globals_details.items():
@@ -1731,7 +1731,9 @@ class GroupTab(object):
     ):
         try:
             self.ensure_editable_globals_file()
-            runmanager.set_value(self.globals_file, self.group_name, global_name, new_default)
+            runmanager.globals_file.set_field(
+                self.globals_file, self.group_name, global_name, 'default', new_default
+            )
         except Exception as e:
             if interactive:
                 error_dialog(str(e))
@@ -1772,7 +1774,9 @@ class GroupTab(object):
         item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_UNITS)
         try:
             self.ensure_editable_globals_file()
-            runmanager.set_units(self.globals_file, self.group_name, global_name, new_units)
+            runmanager.globals_file.set_field(
+                self.globals_file, self.group_name, global_name, 'units', new_units
+            )
         except Exception as e:
             error_dialog(str(e))
             item.setText(previous_units)
@@ -1795,8 +1799,8 @@ class GroupTab(object):
         jit_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_JIT_ENABLED)
         try:
             self.ensure_editable_globals_file()
-            runmanager.set_scan_enabled(
-                self.globals_file, self.group_name, global_name, new_state
+            runmanager.globals_file.set_field(
+                self.globals_file, self.group_name, global_name, 'scan_enabled', new_state
             )
         except Exception as e:
             if interactive:
@@ -1819,8 +1823,8 @@ class GroupTab(object):
                     jit_item.setData(False, self.GLOBALS_ROLE_SORT_DATA)
                 expansion_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_EXPANSION)
                 if not expansion_item.text():
-                    expansion = runmanager.get_expansion(
-                        self.globals_file, self.group_name, global_name
+                    expansion = runmanager.globals_file.get_field(
+                        self.globals_file, self.group_name, global_name, 'expansion'
                     )
                     expansion_item.setText(expansion)
                     expansion_item.setData(expansion, self.GLOBALS_ROLE_PREVIOUS_TEXT)
@@ -1859,8 +1863,8 @@ class GroupTab(object):
         scan_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_SCAN_ENABLED)
         try:
             self.ensure_editable_globals_file()
-            runmanager.set_jit_enabled(
-                self.globals_file, self.group_name, global_name, new_state
+            runmanager.globals_file.set_field(
+                self.globals_file, self.group_name, global_name, 'jit_enabled', new_state
             )
         except Exception as e:
             if interactive:
@@ -1903,7 +1907,9 @@ class GroupTab(object):
                 item.setText(new_scan)
         try:
             self.ensure_editable_globals_file()
-            runmanager.set_scan(self.globals_file, self.group_name, global_name, new_scan)
+            runmanager.globals_file.set_field(
+                self.globals_file, self.group_name, global_name, 'scan', new_scan
+            )
         except Exception as e:
             if interactive:
                 error_dialog(str(e))
@@ -1934,8 +1940,8 @@ class GroupTab(object):
         item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_EXPANSION)
         try:
             self.ensure_editable_globals_file()
-            runmanager.set_expansion(
-                self.globals_file, self.group_name, global_name, new_expansion
+            runmanager.globals_file.set_field(
+                self.globals_file, self.group_name, global_name, 'expansion', new_expansion
             )
         except Exception as e:
             error_dialog(str(e))
@@ -1955,7 +1961,7 @@ class GroupTab(object):
         if confirm and not question_dialog("Delete the global '%s'?" % global_name):
             return
         self.ensure_editable_globals_file()
-        runmanager.delete_global(self.globals_file, self.group_name, global_name)
+        runmanager.globals_file.delete_global(self.globals_file, self.group_name, global_name)
         self.globals_model.removeRow(
             self.get_global_item_by_name(global_name, self.GLOBALS_COL_NAME).row()
         )
@@ -2903,7 +2909,7 @@ class RunManager(LabscriptApplication):
             )
         except Exception as e:
             raise Exception('Error parsing globals:\n%s\nCompilation aborted.' % str(e))
-        globals_details = runmanager.get_globals_details(active_groups)
+        globals_details = runmanager.globals_file.get_globals_details(active_groups)
         pending = [
             (
                 shot_globals,
@@ -3408,7 +3414,7 @@ class RunManager(LabscriptApplication):
         # Save the containing folder for use next time we open the dialog box:
         self.last_opened_globals_folder = os.path.dirname(globals_file)
         # Create the new file and open it:
-        runmanager.new_globals_file(globals_file)
+        runmanager.globals_file.new_globals_file(globals_file)
         self.open_globals_file(globals_file)
 
     def on_diff_globals_file_clicked(self):
@@ -3972,9 +3978,9 @@ class RunManager(LabscriptApplication):
         return new_path
 
     def ensure_editable_globals_file(self, globals_file, parent=None):
-        if not runmanager.globals_file_requires_conversion(globals_file):
+        if not runmanager.globals_file.is_legacy_hdf5(globals_file):
             return globals_file
-        suggested_path = runmanager.default_toml_globals_file(globals_file)
+        suggested_path = runmanager.globals_file.default_toml_path(globals_file)
         destination = QtWidgets.QFileDialog.getSaveFileName(
             parent or self.ui,
             'Convert globals file to TOML for editing',
@@ -3990,7 +3996,7 @@ class RunManager(LabscriptApplication):
         destination = os.path.abspath(destination)
         if destination != globals_file and self.groups_model.findItems(destination, column=self.GROUPS_COL_NAME):
             raise RuntimeError("A globals file named %s is already open." % destination)
-        runmanager.convert_globals_file(globals_file, destination)
+        runmanager.globals_file.convert_to_toml(globals_file, destination)
         self.last_opened_globals_folder = os.path.dirname(destination)
         return self.replace_globals_file_path(globals_file, destination)
 
@@ -4003,7 +4009,7 @@ class RunManager(LabscriptApplication):
         # selector. Conversion to TOML is deferred until the user attempts an
         # edit operation.
         # Get the groups:
-        groups = runmanager.get_grouplist(globals_file)
+        groups = runmanager.globals_file.get_group_names(globals_file)
         # Add the parent row:
         file_name_item = QtGui.QStandardItem(globals_file)
         file_name_item.setEditable(False)
@@ -4142,7 +4148,9 @@ class RunManager(LabscriptApplication):
             dest_globals_file = self.ensure_editable_globals_file(dest_globals_file)
             if source_globals_file == dest_globals_file and delete_source_group:
                 source_globals_file = dest_globals_file
-            dest_group_name = runmanager.copy_group(source_globals_file, source_group_name, dest_globals_file, delete_source_group)
+            dest_group_name = runmanager.globals_file.copy_group(
+                source_globals_file, source_group_name, dest_globals_file, delete_source_group
+            )
         except Exception as e:
             error_dialog(str(e))
         else:
@@ -4258,7 +4266,7 @@ class RunManager(LabscriptApplication):
         if group_tab is not None:
             self.close_group(globals_file, group_name)
         globals_file = self.ensure_editable_globals_file(globals_file)
-        runmanager.delete_group(globals_file, group_name)
+        runmanager.globals_file.delete_group(globals_file, group_name)
         # Find the entry for this group in self.groups_model and remove it:
         name_item = self.get_group_item_by_name(globals_file, group_name, self.GROUPS_COL_NAME)
         name_item.parent().removeRow(name_item.row())
@@ -4636,9 +4644,11 @@ class RunManager(LabscriptApplication):
                     filename = active_groups[group_name]
                     # A legacy HDF5 globals file is read-only until the user
                     # converts it, so no guess is stored in one:
-                    if runmanager.globals_file_requires_conversion(filename):
+                    if runmanager.globals_file.is_legacy_hdf5(filename):
                         continue
-                    runmanager.set_expansion(filename, group_name, global_name, new_guess)
+                    runmanager.globals_file.set_field(
+                        filename, group_name, global_name, 'expansion', new_guess
+                    )
                     expansions[global_name] = new_guess
                     expansion_types_changed = True
 
@@ -4715,10 +4725,11 @@ class RunManager(LabscriptApplication):
         for global_name, guesses in expansion_types.items():
             if guesses['new_guess'] != guesses['previous_guess']:
                 filename = active_groups[guesses['group_name']]
-                if runmanager.globals_file_requires_conversion(filename):
+                if runmanager.globals_file.is_legacy_hdf5(filename):
                     continue
-                runmanager.set_expansion(
-                    filename, str(guesses['group_name']), str(global_name), str(guesses['new_guess']))
+                runmanager.globals_file.set_field(
+                    filename, str(guesses['group_name']), str(global_name), 'expansion',
+                    str(guesses['new_guess']))
                 expansions[global_name] = guesses['new_guess']
                 expansion_types_changed = True
 
@@ -4731,7 +4742,9 @@ class RunManager(LabscriptApplication):
                         iter(evaled_globals[group_name][global_name])
                     except Exception:
                         filename = active_groups[group_name]
-                        runmanager.set_expansion(filename, group_name, global_name, '')
+                        runmanager.globals_file.set_field(
+                            filename, group_name, global_name, 'expansion', ''
+                        )
                         expansion_types_changed = True
 
         self.previous_evaled_globals = evaled_globals
@@ -5277,7 +5290,7 @@ class RunmanagerServer(ZMQServer):
 
     def _get_active_global_locations(self, names=None):
         active_groups = inmain(app.get_active_groups, interactive=False)
-        globals_details = runmanager.get_globals_details(active_groups)
+        globals_details = runmanager.globals_file.get_globals_details(active_groups)
         locations = {}
         groups_of = {}
         for group_name, group_globals in globals_details.items():
@@ -5349,14 +5362,14 @@ class RunmanagerServer(ZMQServer):
                     "Global %s not found in any active group" % global_name
                 )
         for path in {locations[global_name][0] for global_name in globals}:
-            if runmanager.globals_file_requires_conversion(path):
+            if runmanager.globals_file.is_legacy_hdf5(path):
                 raise ValueError(
                     f'{path} is a legacy HDF5 globals file. Convert it to TOML in '
                     'runmanager first.'
                 )
 
     @inmain_decorator()
-    def _set_expression_field_values(self, getter, setter, changer_name, globals, raw=False):
+    def _set_expression_field_values(self, field, changer_name, globals, raw=False):
         _, _, locations = self._get_active_global_locations(globals)
         self._check_before_writing(locations, globals, raw)
         try:
@@ -5364,12 +5377,16 @@ class RunmanagerServer(ZMQServer):
                 if not raw:
                     new_value = repr(new_value)
                 globals_file, group_name = locations[global_name]
-                previous_value = getter(globals_file, group_name, global_name)
+                previous_value = runmanager.globals_file.get_field(
+                    globals_file, group_name, global_name, field
+                )
                 new_value = self._with_trailing_comment(new_value, previous_value)
                 try:
                     group_tab = app.currently_open_groups[globals_file, group_name]
                 except KeyError:
-                    setter(globals_file, group_name, global_name, new_value)
+                    runmanager.globals_file.set_field(
+                        globals_file, group_name, global_name, field, new_value
+                    )
                 else:
                     getattr(group_tab, changer_name)(
                         global_name, previous_value, new_value, interactive=False
@@ -5378,7 +5395,7 @@ class RunmanagerServer(ZMQServer):
             app.globals_changed()
 
     @inmain_decorator()
-    def _set_boolean_field_values(self, getter, setter, changer_name, globals):
+    def _set_boolean_field_values(self, field, changer_name, globals):
         globals = {
             name: self._coerce_remote_boolean(value, 'global %s' % name)
             for name, value in globals.items()
@@ -5388,11 +5405,15 @@ class RunmanagerServer(ZMQServer):
         try:
             for global_name, new_value in globals.items():
                 globals_file, group_name = locations[global_name]
-                previous_value = getter(globals_file, group_name, global_name)
+                previous_value = runmanager.globals_file.get_field(
+                    globals_file, group_name, global_name, field
+                )
                 try:
                     group_tab = app.currently_open_groups[globals_file, group_name]
                 except KeyError:
-                    setter(globals_file, group_name, global_name, new_value)
+                    runmanager.globals_file.set_field(
+                        globals_file, group_name, global_name, field, new_value
+                    )
                 else:
                     getattr(group_tab, changer_name)(
                         global_name, previous_value, new_value, interactive=False
@@ -5418,36 +5439,22 @@ class RunmanagerServer(ZMQServer):
 
     def handle_set_values(self, globals, raw=False):
         return self._set_expression_field_values(
-            runmanager.get_value,
-            runmanager.set_value,
-            'change_global_default',
-            globals,
-            raw=raw,
+            'default', 'change_global_default', globals, raw=raw
         )
 
     def handle_set_scans(self, globals, raw=False):
         return self._set_expression_field_values(
-            runmanager.get_scan,
-            runmanager.set_scan,
-            'change_global_scan',
-            globals,
-            raw=raw,
+            'scan', 'change_global_scan', globals, raw=raw
         )
 
     def handle_set_scan_enabled(self, globals):
         return self._set_boolean_field_values(
-            runmanager.get_scan_enabled,
-            runmanager.set_scan_enabled,
-            'change_global_scan_enabled',
-            globals,
+            'scan_enabled', 'change_global_scan_enabled', globals
         )
 
     def handle_set_jit_enabled(self, globals):
         return self._set_boolean_field_values(
-            runmanager.get_jit_enabled,
-            runmanager.set_jit_enabled,
-            'change_global_jit_enabled',
-            globals,
+            'jit_enabled', 'change_global_jit_enabled', globals
         )
 
     def handle_engage(self):
@@ -5577,7 +5584,7 @@ class RunmanagerServer(ZMQServer):
         # read once it has finished, as an Engage reads them.
         app.wait_until_preparse_complete()
         active_groups = inmain(app.get_active_groups, interactive=False)
-        globals_details = runmanager.get_globals_details(active_groups)
+        globals_details = runmanager.globals_file.get_globals_details(active_groups)
         group_of = {
             name: group for group, records in globals_details.items() for name in records
         }
