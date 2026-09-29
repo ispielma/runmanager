@@ -98,6 +98,7 @@ from runmanager.queueing import (
     COMPILE_MODE_LAZY,
     EMPTY_QUEUE_DEFAULT_LABSCRIPT,
     EMPTY_QUEUE_NOTHING,
+    QueueController,
     QueueManager,
     RunmanagerQueueWidget,
 )
@@ -2133,7 +2134,9 @@ class RunManager(LabscriptApplication):
         )
 
         self.runviewer = RunviewerClient(host='localhost', timeout=0.5)
+        self.queue_controller = QueueController()
         self.queue_manager = QueueManager(
+            controller=self.queue_controller,
             prepare_run_file=self.prepare_queue_shot,
             compile_run_file=self.compile_run_file,
             send_to_runviewer=self.send_to_runviewer,
@@ -2541,7 +2544,7 @@ class RunManager(LabscriptApplication):
         # lays the waiting work out beneath it, so there is nothing to divide
         # up here.
         self.queue_widget.set_queue_paths(
-            self.queue_manager.controller.get_queue_display_items()
+            self.queue_controller.get_queue_display_items()
         )
 
     def on_output_popout_button_clicked(self):
@@ -2731,13 +2734,13 @@ class RunManager(LabscriptApplication):
         # part of a sequence, so the next batch must not be numbered alongside
         # it, and a queue holding nothing else is one there is nothing to add
         # shots to. See offer_shot().
-        queue_paths = self.queue_manager.get_queue_paths(include_default_shots=False)
+        queue_paths = self.queue_controller.get_queue_paths(include_default_shots=False)
         if not queue_paths:
             return None
         return os.path.abspath(queue_paths[-1])
 
     def get_last_sent_from_queue_filepath(self):
-        queue_state = self.queue_manager.get_queue_state()
+        queue_state = self.queue_controller.get_queue_state()
         last_sent_from_queue = queue_state.get('last_sent_from_queue')
         if not last_sent_from_queue:
             return None
@@ -2800,7 +2803,7 @@ class RunManager(LabscriptApplication):
         suffix_format = '_{index:0%dd}' % width
         # A shot still compiling writes its file after this batch is named, and
         # deletes it again if its row has gone, so its name is not given out.
-        compiling = self.queue_manager.get_compiling_paths()
+        compiling = self.queue_controller.get_compiling_paths()
         next_index = index_start
         for run_file_info in run_file_infos:
             run_file_info['name_format'] = name_format
@@ -4363,7 +4366,7 @@ class RunManager(LabscriptApplication):
                      'send_to_blacs': send_to_blacs,
                      'shuffle': shuffle,
                      'axes': axes,
-                     'queue_state': self.queue_manager.export_state(),
+                     'queue_state': self.queue_controller.export_state(),
                      'analysis_submission': self.analysis_submission.get_configuration_data()}
         return save_data
 
@@ -4506,12 +4509,12 @@ class RunManager(LabscriptApplication):
             # The queue's shots come back only when runmanager starts. A load
             # during a session applies the queue's settings and leaves its shots:
             self.queue_manager.restore_state(queue_state, restore_rows=at_startup)
-            restored_queue_state = self.queue_manager.get_queue_state()
+            restored_queue_state = self.queue_controller.get_queue_state()
             if at_startup and restored_queue_state['n_items']:
                 # Restored rows that were not compiled yet are compiled ahead,
                 # as they would have been after an Engage:
-                self.queue_manager.command_queue.put(
-                    ('compile_ahead', (self.ui.checkBox_view_shots.isChecked(),))
+                self.queue_manager.compile_ahead(
+                    self.ui.checkBox_view_shots.isChecked()
                 )
             self.ui.lineEdit_default_labscript_file.setText(
                 restored_queue_state['default_labscript_file']
@@ -4753,7 +4756,7 @@ class RunManager(LabscriptApplication):
         be written yet, and reading one takes h5_lock's cross-process lock on
         the asking thread, which for a submission is the GUI thread. The file
         is read only for a shot the queue holds no sequence for."""
-        sequence_attrs = self.queue_manager.get_queued_sequence_attrs(path)
+        sequence_attrs = self.queue_controller.get_queued_sequence_attrs(path)
         if sequence_attrs is not None:
             return sequence_attrs
         try:
@@ -5136,7 +5139,7 @@ class RunManager(LabscriptApplication):
             # is -- and there is none at all if no row matches, which leaves
             # nothing to analyse. Read while the row is still in the queue, for
             # the same reason the submission below happens while it is.
-            queued_path = self.queue_manager.get_shot_path(shot_id)
+            queued_path = self.queue_controller.get_shot_path(shot_id)
             if queued_path:
                 agnostic_path = shared_drive.path_to_agnostic(queued_path)
         if agnostic_path:
@@ -5168,7 +5171,7 @@ class RunManager(LabscriptApplication):
         Returns the exchange response: the provider state, plus the stable id
         and shared-drive-agnostic path of the shot when one is offered."""
         no_shot = {'state': PROVIDER_NONE, 'shot_id': None, 'path': None}
-        if self.queue_manager.get_queue_state()['paused']:
+        if self.queue_controller.get_queue_state()['paused']:
             # Pause is this runmanager's policy about its own queue, not
             # authority over the apparatus: a second runmanager sharing one
             # BLACS must not be able to stop it by pausing its own queue. So
@@ -5194,7 +5197,7 @@ class RunManager(LabscriptApplication):
                 # Pending rather than none, so that BLACS can wait for this shot
                 # instead of running its local override in the gap:
                 return dict(no_shot, state=PROVIDER_PENDING)
-            queue_state = self.queue_manager.get_queue_state()
+            queue_state = self.queue_controller.get_queue_state()
             labscript_file = queue_state['default_labscript_file']
             # No default shot is called for: the policy does not ask for one,
             # there is no labscript file to make it from, or the queue is not
@@ -5621,7 +5624,7 @@ class RunmanagerServer(ZMQServer):
         Read-only and batched: a caller waiting on many shots asks once. The
         queue controller is safe to ask from any thread, so this is not a GUI
         read."""
-        return app.queue_manager.get_shot_statuses(list(shot_ids))
+        return app.queue_controller.get_shot_statuses(list(shot_ids))
 
     def handle_queue_exchange(self, outcome=None, request_shot=True):
         return app.queue_exchange(outcome, bool(request_shot))

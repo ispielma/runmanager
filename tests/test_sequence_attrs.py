@@ -24,7 +24,7 @@ import h5py
 import runmanager
 import runmanager.globals_file as globals_file
 from fixtures import RunManager, labconfig
-from runmanager.queueing import QueueManager
+from runmanager.queueing import QueueController, QueueManager
 
 
 def sequence_attrs(**overrides):
@@ -152,6 +152,7 @@ class DefaultSequenceTests(unittest.TestCase):
         )
         app.prepare_queue_shot = functools.partial(RunManager.prepare_queue_shot, app)
         app.queue_manager = QueueManager(
+            QueueController(),
             app.prepare_queue_shot,
             lambda labscript_file, run_file: True,
             lambda run_file: None,

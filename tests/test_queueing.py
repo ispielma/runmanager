@@ -532,7 +532,9 @@ class FakeRunManager(object):
         # that far. Recorded so a test can say how many times it was asked.
         self.compiles = compiles
         self.compiled = []
+        self.queue_controller = QueueController()
         self.queue_manager = QueueManager(
+            self.queue_controller,
             lambda item, default_globals: None,
             self.compile_run_file,
             lambda path: None,
@@ -613,7 +615,7 @@ class DefaultShotTests(unittest.TestCase):
         return app
 
     def rows(self, app):
-        return app.queue_manager.controller.get_queue_display_items()
+        return app.queue_controller.get_queue_display_items()
 
     def test_a_default_shot_is_offered_as_a_row_of_the_queue(self):
         app = self.make_runmanager(default_shot_file=self.default_shot)
@@ -726,7 +728,7 @@ class DefaultShotTests(unittest.TestCase):
         app.offer_shot()
 
         self.assertIsNone(
-            app.queue_manager.get_queue_state()['last_sent_from_queue'],
+            app.queue_controller.get_queue_state()['last_sent_from_queue'],
             'a default shot is not the last shot sent from the queue',
         )
         self.assertIsNone(
@@ -741,7 +743,7 @@ class DefaultShotTests(unittest.TestCase):
         offered = app.offer_shot()
 
         self.assertEqual(
-            app.queue_manager.get_queue_state()['last_sent_from_queue'],
+            app.queue_controller.get_queue_state()['last_sent_from_queue'],
             offered['path'],
         )
         self.assertEqual(
@@ -797,7 +799,7 @@ class DefaultShotTests(unittest.TestCase):
         app.offer_shot()
         app.queue_manager.enqueue([queued_shot(engaged)])
 
-        saved = app.queue_manager.export_state()
+        saved = app.queue_controller.export_state()
 
         self.assertEqual(
             [item['path'] for item in saved['items']],
@@ -846,14 +848,14 @@ class LazyCompileFailureTests(unittest.TestCase):
         for _ in range(requests):
             responses.append(app.offer_shot())
             for _ in range(100):
-                if not app.queue_manager.controller._items[0]['compiling']:
+                if not app.queue_controller._items[0]['compiling']:
                     break
                 time.sleep(0.01)
             time.sleep(0.01)
         return responses
 
     def rows(self, app):
-        return app.queue_manager.controller.get_queue_display_items()
+        return app.queue_controller.get_queue_display_items()
 
     def test_a_shot_that_cannot_be_compiled_stays_red_at_the_head(self):
         app = self.make_runmanager(compiles=False)
@@ -1107,7 +1109,7 @@ class CompiledFlagOwnershipTests(unittest.TestCase):
 
     def test_a_row_is_not_offerable_until_the_controller_records_the_compile(self):
         app = self.lazy_queue()
-        controller = app.queue_manager.controller
+        controller = app.queue_controller
         item, _pending = controller.claim_next_for_compile()
         self.assertIsNotNone(item, 'the row is there to be compiled')
 
@@ -1143,7 +1145,9 @@ class SubmittedShotTests(unittest.TestCase):
         self.release = threading.Event()
         self.release.set()
         self.hold_from = 1
+        self.controller = QueueController()
         self.manager = QueueManager(
+            self.controller,
             lambda item, default_globals: None,
             self.compile_run_file,
             lambda path: None,
@@ -1178,7 +1182,7 @@ class SubmittedShotTests(unittest.TestCase):
         return [record['shot_id'] for record in records]
 
     def status(self, shot_ids):
-        return self.manager.get_shot_statuses(shot_ids)
+        return self.controller.get_shot_statuses(shot_ids)
 
     def wait_until(self, predicate):
         for _ in range(500):
@@ -1191,7 +1195,7 @@ class SubmittedShotTests(unittest.TestCase):
         self.release.clear()
         [shot_id] = self.submit()
 
-        self.assertEqual(len(self.manager.get_queue_paths()), 1)
+        self.assertEqual(len(self.controller.get_queue_paths()), 1)
         self.assertEqual(
             self.status([shot_id])[shot_id], {'pending': True, 'state': ''}
         )
@@ -1204,7 +1208,7 @@ class SubmittedShotTests(unittest.TestCase):
         self.release.clear()
         first, _second = self.submit(count=2)
         self.assertTrue(
-            self.wait_until(lambda: self.manager.controller._items[0]['compiled'])
+            self.wait_until(lambda: self.controller._items[0]['compiled'])
         )
         offered = self.manager.offer_next()
         self.manager.shot_finished(offered['shot_id'], 'completed')
@@ -1223,7 +1227,7 @@ class SubmittedShotTests(unittest.TestCase):
         self.assertTrue(self.wait_until(lambda: len(self.compiled) == 3))
         self.assertTrue(
             self.wait_until(
-                lambda: [row['state'] for row in self.manager.controller.get_queue_display_items()]
+                lambda: [row['state'] for row in self.controller.get_queue_display_items()]
                 == ['compile_failed'] * 3
             )
         )
@@ -1290,7 +1294,7 @@ class ContinuingSequenceAnchorTests(unittest.TestCase):
         self.app.queue_manager.shot_finished(offered['shot_id'], 'completed')
 
         self.assertEqual(
-            self.app.queue_manager.get_queue_paths(), [], 'the queue is empty'
+            self.app.queue_controller.get_queue_paths(), [], 'the queue is empty'
         )
         self.assertEqual(
             self.app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
@@ -1432,7 +1436,7 @@ class ShotIdBeforeCompileTests(unittest.TestCase):
         )
         self.assertEqual(
             prepared[0]['shot_id'],
-            app.queue_manager.controller.get_queue_display_items()[0]['shot_id'],
+            app.queue_controller.get_queue_display_items()[0]['shot_id'],
             'the id written into the file is the id of the row in the queue',
         )
 
@@ -1531,7 +1535,7 @@ class QueueEditingTests(unittest.TestCase):
         return path
 
     def rows(self):
-        return self.app.queue_manager.controller.get_queue_display_items()
+        return self.app.queue_controller.get_queue_display_items()
 
     def selection(self, *paths):
         """The shot ids the queue widget emits when these shots are selected."""
@@ -1674,7 +1678,7 @@ class QueueEditingTests(unittest.TestCase):
         self.assertEqual(removed, [failed])
         self.assertFalse(os.path.exists(failed), 'a red row takes its file with it')
         self.assertFalse(
-            self.app.queue_manager.get_queue_state()['paused'],
+            self.app.queue_controller.get_queue_state()['paused'],
             'editing the queue is not a way to stop BLACS asking for work',
         )
         response = self.app.queue_exchange(request_shot=True)
@@ -1692,7 +1696,7 @@ class QueueEditingTests(unittest.TestCase):
         self.app.offer_shot()
 
         restarted = QueueController()
-        restarted.restore_state(self.app.queue_manager.export_state())
+        restarted.restore_state(self.app.queue_controller.export_state())
 
         rows = restarted.get_queue_display_items()
         self.assertEqual([row['path'] for row in rows], [running])
@@ -1754,7 +1758,7 @@ class ReplayTests(unittest.TestCase):
         return path
 
     def rows(self):
-        return self.app.queue_manager.controller.get_queue_display_items()
+        return self.app.queue_controller.get_queue_display_items()
 
     def test_a_lost_offer_reply_leaves_the_same_row_available(self):
         # BLACS never saw the reply, so it asks again -- with no outcome,
@@ -1942,7 +1946,7 @@ class OutcomeAppliedOnceTests(unittest.TestCase):
         }
 
     def rows(self, app):
-        return app.queue_manager.controller.get_queue_display_items()
+        return app.queue_controller.get_queue_display_items()
 
     def test_a_submission_that_falls_over_leaves_the_shot_to_be_run_again(self):
         app, shot_id = self.app_with_shot()
@@ -2055,7 +2059,7 @@ class CancelledShotTests(unittest.TestCase):
         return app, offered['shot_id']
 
     def rows(self, app):
-        return app.queue_manager.controller.get_queue_display_items()
+        return app.queue_controller.get_queue_display_items()
 
     def test_deleting_it_keeps_the_row_and_its_file(self):
         app, shot_id = self.queue_with_a_shot_at_blacs()
@@ -2270,7 +2274,7 @@ class QueueBookkeepingUnderSubmissionTests(unittest.TestCase):
             queued_shot('/tmp/seq_00.h5'), queued_shot('/tmp/seq_01.h5')
         )
         offered = app.queue_manager.offer_next()
-        app.queue_manager.controller.set_last_sent_from_queue(
+        app.queue_controller.set_last_sent_from_queue(
             shared_drive.path_to_agnostic(offered['path'])
         )
         app.queue_manager.shot_finished(offered['shot_id'], 'rejected', 'no such file')
@@ -2286,7 +2290,7 @@ class QueueBookkeepingUnderSubmissionTests(unittest.TestCase):
     def test_the_anchor_survives_a_queue_that_has_gone_empty(self):
         app = self.app_with(queued_shot('/tmp/seq_00.h5'))
         offered = app.queue_manager.offer_next()
-        app.queue_manager.controller.set_last_sent_from_queue(
+        app.queue_controller.set_last_sent_from_queue(
             shared_drive.path_to_agnostic(offered['path'])
         )
         app.queue_manager.shot_finished(offered['shot_id'], 'completed')
@@ -2319,7 +2323,7 @@ class QueueBookkeepingUnderSubmissionTests(unittest.TestCase):
         self.assertEqual(
             [
                 row['path']
-                for row in app.queue_manager.controller.get_queue_display_items()
+                for row in app.queue_controller.get_queue_display_items()
                 if row['path'] == default_path
             ],
             [],
@@ -2377,7 +2381,7 @@ class MalformedOutcomeTests(unittest.TestCase):
 
                 app.queue_exchange(outcome=outcome, request_shot=False)
 
-                rows = app.queue_manager.controller.get_queue_display_items()
+                rows = app.queue_controller.get_queue_display_items()
                 self.assertEqual([row['state'] for row in rows], ['running'])
                 self.assertEqual(rows[0]['tooltip'], rows[0]['path'])
 
@@ -2674,7 +2678,7 @@ class ExchangeFailureTests(unittest.TestCase):
             'and the operator is told what went wrong here',
         )
         self.assertEqual(
-            app.queue_manager.get_queue_state()['n_items'],
+            app.queue_controller.get_queue_state()['n_items'],
             0,
             'the outcome that came with the request was still applied',
         )
@@ -2913,7 +2917,7 @@ class SequenceContinuityTests(unittest.TestCase):
         self.app.queue_manager.enqueue([queued_shot(path, sequence_attrs=self.existing)])
         self.app.queue_manager.enqueue([queued_shot(path, sequence_attrs=later)])
 
-        self.assertEqual(self.app.queue_manager.get_queued_sequence_attrs(path), later)
+        self.assertEqual(self.app.queue_controller.get_queued_sequence_attrs(path), later)
 
     def test_a_row_holding_no_sequence_sends_the_caller_to_the_shot_file(self):
         # The row is the quick answer, not the only one. A queue that holds
@@ -3058,7 +3062,7 @@ class DeletedAnchorTests(unittest.TestCase):
         sent = self.enqueue(self.app, 'experiment_00.h5')
         self.enqueue(self.app, 'experiment_01.h5')
         self.app.offer_shot()
-        waiting_id = self.app.queue_manager.controller.get_queue_display_items()[1][
+        waiting_id = self.app.queue_controller.get_queue_display_items()[1][
             'shot_id'
         ]
 
@@ -3165,7 +3169,7 @@ class AlternateSubmissionMenuTests(unittest.TestCase):
         offered = self.app.offer_shot()
         self.app.queue_manager.shot_finished(offered['shot_id'], 'completed')
 
-        self.assertEqual(self.app.queue_manager.get_queue_paths(), [])
+        self.assertEqual(self.app.queue_controller.get_queue_paths(), [])
         self.assertTrue(self.app.can_use_alternate_submission_mode())
 
     def test_nothing_queued_and_nothing_sent_offers_nothing(self):
@@ -3278,7 +3282,9 @@ class CallerChosenShotIdTests(unittest.TestCase):
         self.directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.directory, True)
         self.written = []
+        self.controller = QueueController()
         self.manager = QueueManager(
+            self.controller,
             lambda item, default_globals: self.written.append(item['shot_id']),
             lambda labscript_file, path: True,
             lambda path: None,
@@ -3308,12 +3314,12 @@ class CallerChosenShotIdTests(unittest.TestCase):
             time.sleep(0.01)
 
         self.assertTrue(
-            self.manager.get_shot_statuses([shot_id])[shot_id]['pending'],
+            self.controller.get_shot_statuses([shot_id])[shot_id]['pending'],
             'the queue holds the shot under the id its submitter was handed',
         )
         self.assertEqual(
             self.written,
-            [self.manager.controller.get_queue_display_items()[0]['shot_id']],
+            [self.controller.get_queue_display_items()[0]['shot_id']],
             'and the id written into the shot file is the one its row has',
         )
 
