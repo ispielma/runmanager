@@ -254,6 +254,21 @@ class ValueColumnTests(unittest.TestCase):
         self.assertEqual(active.data(self.tab.GLOBALS_ROLE_EXPRESSION), 'default')
         self.assertEqual(active.data(), '12')
 
+    def test_remote_toggle_preserves_other_globals_uncommitted_editor(self):
+        _, rect = self.value_rect('freq')
+        send_click(self.view, rect.center())
+        editor = self.editor()
+        editor.insertPlainText('half typed')
+
+        self.tab.change_global_jit_enabled('power', False, True, interactive=False)
+        self.tab.change_global_scan_enabled('power', False, True, interactive=False)
+        self.qapplication.processEvents()
+
+        self.assertEqual(self.record('freq')['default'], '10')
+        self.assertEqual(self.expression_item('freq', 'default').text(), '10')
+        self.assertIs(self.view.indexWidget(self.view.currentIndex()), editor)
+        self.assertEqual(editor.toPlainText(), 'half typed')
+
     def test_ticking_scan_with_no_scan_opens_its_line_for_typing(self):
         checkbox = self.tab.get_global_item_by_name(
             'power', self.tab.GLOBALS_COL_SCAN_ENABLED

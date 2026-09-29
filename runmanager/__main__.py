@@ -1284,15 +1284,6 @@ class GroupTab(object):
         self.ui.treeView_globals.setCurrentIndex(index)
         self.ui.treeView_globals.edit(index)
 
-    def commit_value_editor(self):
-        index = self.ui.treeView_globals.currentIndex()
-        if index.column() != self.GLOBALS_COL_VALUE:
-            return
-        editor = self.ui.treeView_globals.indexWidget(index)
-        if editor is not None:
-            self.value_delegate.commitData.emit(editor)
-            self.value_delegate.closeEditor.emit(editor)
-
     def on_globals_copy(self):
         index = self.ui.treeView_globals.currentIndex()
         text = index.data()
@@ -1578,9 +1569,20 @@ class GroupTab(object):
         parent = self.get_global_item_by_name(global_name, self.GLOBALS_COL_SCAN_ENABLED)
         row = parent.row()
         current_item = self.globals_model.itemFromIndex(view.currentIndex())
+        active = self.globals_model.item(row, self.GLOBALS_COL_VALUE)
+        inactive = parent.child(0, self.GLOBALS_COL_VALUE)
 
+        editor = view.indexWidget(view.currentIndex())
+        if editor is not None and current_item in (active, inactive):
+            self.value_delegate.commitData.emit(editor)
+            self.value_delegate.closeEditor.emit(editor)
+            parent = self.get_global_item_by_name(
+                global_name, self.GLOBALS_COL_SCAN_ENABLED
+            )
+            row = parent.row()
         active = self.globals_model.takeItem(row, self.GLOBALS_COL_VALUE)
         inactive = parent.takeChild(0, self.GLOBALS_COL_VALUE)
+
         self.globals_model.setItem(row, self.GLOBALS_COL_VALUE, inactive)
         parent.setChild(0, self.GLOBALS_COL_VALUE, active)
 
@@ -1780,7 +1782,6 @@ class GroupTab(object):
             scroll_view_to_row_if_current(self.ui.treeView_globals, item)
 
     def change_global_scan_enabled(self, global_name, previous_state, new_state, interactive=True):
-        self.commit_value_editor()
         logger.info(
             '%s:%s - change global scan enabled: %s = %s -> %s',
             self.globals_file,
@@ -1842,7 +1843,6 @@ class GroupTab(object):
                 scroll_view_to_row_if_current(self.ui.treeView_globals, item)
 
     def change_global_jit_enabled(self, global_name, previous_state, new_state, interactive=True):
-        self.commit_value_editor()
         logger.info(
             '%s:%s - change global jit enabled: %s = %s -> %s',
             self.globals_file,
