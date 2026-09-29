@@ -1091,7 +1091,7 @@ class GroupTab(object):
         index = self.tabWidget.indexOf(self.ui)
         icon = QtGui.QIcon(icon_string) if icon_string is not None else QtGui.QIcon()
         if self.tabWidget.tabIcon(index).cacheKey() != icon.cacheKey():
-            logger.info('setting tab icon')
+            logger.debug('setting tab icon')
             self.tabWidget.setTabIcon(index, icon)
 
     def populate_model(self):
