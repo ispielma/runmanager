@@ -19,6 +19,8 @@ import unittest
 from unittest import mock
 
 from labscript_utils.ls_zprocess import ZMQServer
+from qtutils.qt.QtCore import Qt
+from qtutils.qt.QtGui import QStandardItemModel
 from qtutils.qt.QtWidgets import QApplication
 import runmanager
 import runmanager.globals_file as globals_file
@@ -101,40 +103,6 @@ class RemoteCommandTestCase(unittest.TestCase):
 _qapplication = None
 
 
-class AxesModel(object):
-    """The axes the shots are expanded along, as the window holds them.
-
-    Only the preparse rebuilds the rows, so they go stale when a global changes,
-    as the window's do, and expanding along an axis the globals no longer
-    produce is what breaks. Its shuffle boxes read as unticked.
-    """
-
-    STALE_AXIS = 'outer no_longer_produced'
-
-    def __init__(self):
-        self.names = []
-
-    def go_stale(self):
-        if self.STALE_AXIS not in self.names:
-            self.names.append(self.STALE_AXIS)
-
-    def rebuild(self, expansions):
-        self.names = sorted(
-            ('outer ' + name) if expansion == 'outer' else ('zip ' + expansion)
-            for name, expansion in expansions.items()
-            if expansion
-        )
-
-    def rowCount(self):
-        return len(self.names)
-
-    def item(self, row, column):
-        name = self.names[row]
-        return types.SimpleNamespace(
-            data=lambda role: name, checkState=lambda: 0
-        )
-
-
 class SubmittingApp(object):
     """The application over the whole path a submission takes.
 
@@ -160,6 +128,9 @@ class SubmittingApp(object):
     on_engage_clicked = RunManager.on_engage_clicked
     expand_pending_shots = RunManager.expand_pending_shots
     parse_globals = RunManager.parse_globals
+    add_item_to_axes_model = RunManager.add_item_to_axes_model
+    update_axes_indentation = RunManager.update_axes_indentation
+    update_axes_tab = RunManager.update_axes_tab
 
     def __init__(self, directory):
         self.directory = directory
@@ -172,7 +143,7 @@ class SubmittingApp(object):
         self.currently_open_groups = {}
         self.n_shots = None
         self.compiling = threading.Event()
-        self.axes_model = AxesModel()
+        self.axes_model = QStandardItemModel()
         self.queue_compile_mode_combo = types.SimpleNamespace(
             currentData=lambda: COMPILE_MODE_EAGER
         )
@@ -190,7 +161,9 @@ class SubmittingApp(object):
             lineEdit_shot_output_folder=types.SimpleNamespace(
                 text=lambda: self.directory
             ),
-            pushButton_shuffle=types.SimpleNamespace(checkState=lambda: 0),
+            pushButton_shuffle=types.SimpleNamespace(
+                checkState=lambda: Qt.CheckState.Unchecked
+            ),
         )
         # The records of each batch that reached the queue.
         self.batches = []
@@ -226,7 +199,9 @@ class SubmittingApp(object):
         pass
 
     def globals_changed(self):
-        self.axes_model.go_stale()
+        # Only the preparse updates the axes, so one the globals no longer
+        # produce stays until it runs, and expanding along it is what breaks.
+        self.add_item_to_axes_model('outer no_longer_produced', False)
 
     def wait_until_preparse_complete(self):
         """Do what the preparse does to what a submission reads afterwards."""
@@ -234,7 +209,7 @@ class SubmittingApp(object):
             self.get_active_groups(), raise_exceptions=False
         )
         self.n_shots = len(shots)
-        self.axes_model.rebuild(expansions)
+        self.update_axes_tab(expansions, {})
 
 
 class SubmitShotsTests(RemoteCommandTestCase):
@@ -857,7 +832,7 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
 
 
 class ShuffledEngageTests(RemoteCommandTestCase):
-    """Engaging a scan with the shuffle button down.
+    """Engaging a scan with the shuffle button down, or an axis's box checked.
 
     The batch is queued in the order the shuffle chose, and each shot's globals
     travel with it, so a file is never named for one set of parameters and run
@@ -888,13 +863,13 @@ class ShuffledEngageTests(RemoteCommandTestCase):
         self.app.exp_config = labconfig(
             self.directory, filename_prefix_format='{globals[x]}_{script_basename}'
         )
-        self.app.ui.pushButton_shuffle.checkState = (
-            lambda: main_module.QtCore.Qt.Checked
-        )
 
     def engage(self):
         """Press Engage, and hand back the records that reached the queue."""
         self.app.wait_until_preparse_complete()
+        # Down once the axes are listed: a new axis takes its box from the
+        # button, and here only the batch is to be shuffled.
+        self.app.ui.pushButton_shuffle.checkState = lambda: Qt.CheckState.Checked
         self.app.on_engage_clicked()
         self.assertEqual(self.app.said, [], 'Engage put nothing in the output box')
         self.assertEqual(len(self.app.batches), 1)
@@ -915,6 +890,17 @@ class ShuffledEngageTests(RemoteCommandTestCase):
             'in the order the shuffle chose, each file named for the globals '
             'compiled into it',
         )
+
+    def test_an_axis_is_shuffled_only_when_its_shuffle_box_is_checked(self):
+        self.app.wait_until_preparse_complete()
+        box = self.app.axes_model.item(0, self.app.AXES_COL_SHUFFLE)
+
+        def scan():
+            return [shot['x'] for shot, _ in self.app.expand_pending_shots()]
+
+        self.assertEqual(scan(), [1, 2, 3], 'an unchecked axis keeps its order')
+        box.setCheckState(Qt.CheckState.Checked)
+        self.assertEqual(scan(), [3, 2, 1], 'and a checked one is shuffled')
 
 
 class CompileOnlyEngageTests(RemoteCommandTestCase):
