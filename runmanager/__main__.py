@@ -1083,7 +1083,7 @@ class GroupTab(object):
             self.globals_model.itemChanged, self.on_globals_model_item_changed
         )
         # Copy takes the expression at the selected index.
-        QtWidgets.QShortcut(
+        QtGui.QShortcut(
             QtGui.QKeySequence.StandardKey.Copy,
             self.ui.treeView_globals,
             self.on_globals_copy,
@@ -2454,12 +2454,12 @@ class RunManager(LabscriptApplication):
         self.queue_widget.retryCompileRequested.connect(self.queue_manager.retry_compile)
         
         # Keyboard shortcuts:
-        engage_shortcut = QtWidgets.QShortcut('F5', self.ui,
+        engage_shortcut = QtGui.QShortcut('F5', self.ui,
             lambda: self.ui.pushButton_engage.clicked.emit(False))
         engage_shortcut.setAutoRepeat(False)
-        QtWidgets.QShortcut('ctrl+W', self.ui, self.close_current_tab)
-        QtWidgets.QShortcut('ctrl+Tab', self.ui, lambda: self.switch_tabs(+1))
-        QtWidgets.QShortcut('ctrl+shift+Tab', self.ui, lambda: self.switch_tabs(-1))
+        QtGui.QShortcut('ctrl+W', self.ui, self.close_current_tab)
+        QtGui.QShortcut('ctrl+Tab', self.ui, lambda: self.switch_tabs(+1))
+        QtGui.QShortcut('ctrl+shift+Tab', self.ui, lambda: self.switch_tabs(-1))
 
     def on_close_event(self):
         save_data = self.get_save_data()
@@ -3117,7 +3117,7 @@ class RunManager(LabscriptApplication):
         # menu = QtWidgets.QMenu(self.ui)
         # menu.addAction(self.action_axes_check_selected)
         # menu.addAction(self.action_axes_uncheck_selected)
-        # menu.exec_(QtGui.QCursor.pos())
+        # menu.exec(QtGui.QCursor.pos())
         pass
 
     def on_axes_check_selected_triggered(self, *args):
