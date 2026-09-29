@@ -510,10 +510,8 @@ class ShotStatusTests(RemoteCommandTestCase):
     """
 
     # Every state a queue row can be in: whether a shot in it can still produce
-    # a result, and whether a row in it holds up the rows behind it. The queue
-    # will not hand over a rejected, cancelled or compile_failed row. A
-    # cancelled row clears itself at BLACS's next request; the others wait for
-    # an operator.
+    # a result, and whether it holds up the rows behind it. A cancelled row
+    # clears itself at BLACS's next request; rejected and compile_failed wait.
     EXPECTED = {
         # state: (pending, holds up the rows behind it)
         '': (True, False),
@@ -541,10 +539,8 @@ class ShotStatusTests(RemoteCommandTestCase):
     def queue(self, *rows):
         """A queue holding exactly these ``(shot_id, state)`` rows, in order.
 
-        Replacing what is there rather than adding to it, because what is in
-        front of a row is half of its answer: the same row at the head of one
-        queue and behind a held one in another is being asked two different
-        questions.
+        Replacing what is there rather than adding to it, because what is in front
+        of a row is half of its answer.
         """
         self.app.queue_manager.restore_state({})
         for shot_id, state in rows:
@@ -558,11 +554,9 @@ class ShotStatusTests(RemoteCommandTestCase):
                 self.assertEqual(answer[state or 'waiting']['pending'], pending)
 
     def test_a_row_behind_a_held_one_says_it_is_blocked(self):
-        # The row in front is the whole of the reason, so the answer is the
-        # same whatever the waiting row itself is doing: nothing behind a shot
-        # the queue will not hand over can be handed over either, and a caller
-        # polling for its result would otherwise wait for ever on a queue that
-        # is not moving.
+        # The row in front is the whole of the reason: nothing behind a shot the
+        # queue will not hand over can be handed over either, and a caller
+        # polling for its result would otherwise wait for ever.
         for state, (_, holds_up) in sorted(self.EXPECTED.items()):
             with self.subTest(state=state):
                 self.queue(('head', state), ('behind', ''))

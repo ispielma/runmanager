@@ -1675,7 +1675,7 @@ class LostRowTests(unittest.TestCase):
         self.addCleanup(app.queue_manager.shutdown)
         app.queue_manager.enqueue([queued_shot('/tmp/shot_a.h5')])
         offered = app.queue_exchange(request_shot=True)
-        # Neither Delete nor Clear can take the running row now. Only restoring
+        # Neither Delete nor Clear can take the running row. Only restoring
         # the queue at startup replaces the whole of it, and the shot BLACS is
         # running can still go that way.
         app.queue_manager.restore_state({})
