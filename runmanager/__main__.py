@@ -142,19 +142,13 @@ SUBMISSION_MODE_ADD_SHOTS = 'add_shots'
 SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE = 'new_folder_clear_queue'
 SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE = 'add_shots_clear_queue'
 
-# The two places a sequence for a batch to join can be found, each named by
-# the method that looks there. get_submission_anchor tries a mode's sources in
-# the order they are given.
-ANCHOR_IN_QUEUE = 'get_queue_append_filepath'
-ANCHOR_LAST_SENT = 'get_last_sent_from_queue_filepath'
-
 SubmissionMode = collections.namedtuple(
-    'SubmissionMode', ['anchor_sources', 'clears_queue']
+    'SubmissionMode', ['joins_sequence', 'clears_queue']
 )
 
-# Everything a submission mode decides, in one place. A mode with no anchor
-# source starts a sequence of its own; one with sources joins the sequence of
-# the first shot its sources find, and starts one when they find nothing.
+# Everything a submission mode decides, in one place. A mode that joins a
+# sequence takes it from the last queued shot or the shot last sent, and starts
+# one when there is neither; any other mode starts a sequence of its own.
 #
 # "Add shots to last sequence" falls back to the shot last sent to BLACS
 # because the queue empties on its own: it drains as BLACS works through it,
@@ -174,16 +168,16 @@ SubmissionMode = collections.namedtuple(
 # leaves the queue holding one sequence and BLACS running another.
 SUBMISSION_MODES = {
     SUBMISSION_MODE_NEW_FOLDER: SubmissionMode(
-        anchor_sources=(), clears_queue=False
+        joins_sequence=False, clears_queue=False
     ),
     SUBMISSION_MODE_ADD_SHOTS: SubmissionMode(
-        anchor_sources=(ANCHOR_IN_QUEUE, ANCHOR_LAST_SENT), clears_queue=False
+        joins_sequence=True, clears_queue=False
     ),
     SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE: SubmissionMode(
-        anchor_sources=(), clears_queue=True
+        joins_sequence=False, clears_queue=True
     ),
     SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE: SubmissionMode(
-        anchor_sources=(ANCHOR_LAST_SENT, ANCHOR_IN_QUEUE), clears_queue=True
+        joins_sequence=True, clears_queue=True
     ),
 }
 
@@ -2749,20 +2743,22 @@ class RunManager(LabscriptApplication):
     def get_submission_anchor(self, submission_mode):
         """The shot this mode numbers its batch after, or None for a new one.
 
-        The mode's anchor sources are tried in order and the first shot found
-        is the answer; None means there is no sequence to join, and a batch
-        with nothing to be numbered after starts one of its own.
+        A mode that joins a sequence tries the last queued shot, then the shot
+        last sent, or the reverse if it empties the queue. None means there is
+        no sequence to join, and a batch with nothing to be numbered after
+        starts one of its own.
 
         Read here, where the answer is used, and once. The queue moves on its
         own -- BLACS takes the last shot on the server thread -- so a mode
         offered against a queue with work in it can be carried out against one
         that has none, and a second read taken later answers about a different
         queue than the one that was checked."""
-        for source in SUBMISSION_MODES[submission_mode].anchor_sources:
-            anchor = getattr(self, source)()
-            if anchor is not None:
-                return anchor
-        return None
+        mode = SUBMISSION_MODES[submission_mode]
+        if not mode.joins_sequence:
+            return None
+        if mode.clears_queue:
+            return self.get_last_sent_from_queue_filepath() or self.get_queue_append_filepath()
+        return self.get_queue_append_filepath() or self.get_last_sent_from_queue_filepath()
 
     def can_use_alternate_submission_mode(self):
         """Whether the menu offers the alternate submission modes right now.
@@ -2855,7 +2851,7 @@ class RunManager(LabscriptApplication):
             send_to_BLACS = self.ui.checkBox_run_shots.isChecked()
             send_to_runviewer = self.ui.checkBox_view_shots.isChecked()
             mode = SUBMISSION_MODES[submission_mode]
-            if (mode.anchor_sources or mode.clears_queue) and not send_to_BLACS:
+            if (mode.joins_sequence or mode.clears_queue) and not send_to_BLACS:
                 # A mode that reads the queue for a sequence to join, or
                 # empties it, is about the queue -- so with nothing going to
                 # BLACS there is nothing for it to do.
