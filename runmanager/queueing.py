@@ -15,7 +15,8 @@
 
 This module keeps queue state and background queue/compile work out of
 ``runmanager.__main__``. QueueManager owns the background compile loop used by
-Engage, and it also exposes the existing queue state used by BLACS requests.
+Engage, and the queue edits that delete files or redraw the queue tab. Queue
+state is in QueueController, which the application holds.
 Queue items are stored internally as shot records, while the queue widget still
 shows only their filepaths.
 """
@@ -883,24 +884,25 @@ class QueueController(object):
 
 
 class QueueManager(QtCore.QObject):
-    """Queue state access, and the worker thread that compiles shots.
+    """The queue's edits, and the worker thread that compiles shots.
 
-    Queue state lives in the controller, which is safe to use from any thread,
-    so state operations act on it directly. Only compilation is handed to the
-    worker thread, so that a long Engage batch cannot hold up a queue-tab
-    control or a BLACS request for the next shot."""
+    Queue state lives in the controller it is given, which is safe to use from
+    any thread, so state operations act on it directly. Only compilation is
+    handed to the worker thread, so that a long Engage batch cannot hold up a
+    queue-tab control or a BLACS request for the next shot."""
 
     queueChanged = Signal()
 
     def __init__(
         self,
+        controller,
         prepare_run_file,
         compile_run_file,
         send_to_runviewer,
         output,
     ):
         QtCore.QObject.__init__(self)
-        self.controller = QueueController()
+        self.controller = controller
         self.command_queue = queue.Queue()
         self.prepare_run_file_callback = prepare_run_file
         self.compile_run_file_callback = compile_run_file
@@ -918,6 +920,10 @@ class QueueManager(QtCore.QObject):
     def enqueue(self, items):
         self.controller.enqueue(list(items))
         self.queueChanged.emit()
+
+    def compile_ahead(self, send_to_runviewer):
+        """Ask the worker to compile the queued eager rows not yet compiled."""
+        self.command_queue.put(('compile_ahead', (send_to_runviewer,)))
 
     def compile_shots(self, records, send_to_BLACS, send_to_runviewer):
         """Queue these records if send_to_BLACS, and compile them.
@@ -941,14 +947,18 @@ class QueueManager(QtCore.QObject):
             )
         if send_to_BLACS:
             self.enqueue(records)
-            self.command_queue.put(('compile_ahead', (send_to_runviewer,)))
+            self.compile_ahead(send_to_runviewer)
             return records
         self.command_queue.put(('compile_shots', (records, send_to_runviewer)))
         return records
 
-    def _compile_shot(self, item, send_to_runviewer=False):
-        if 'frozen_globals' in item:
-            self.prepare_run_file_callback(item)
+    def compile_shot(self, item, send_to_runviewer=False, default_globals=False):
+        """Write one shot's file, compile it, and send it to runviewer if asked.
+
+        With ``default_globals`` the file is written from the globals' defaults,
+        as a default shot is, rather than from the item's frozen globals.
+        """
+        self.prepare_run_file_callback(item, default_globals=default_globals)
         success = self.compile_run_file_callback(item['labscript_file'], item['path'])
         if success and send_to_runviewer:
             self.send_to_runviewer_callback(item['path'])
@@ -993,7 +1003,7 @@ class QueueManager(QtCore.QObject):
         # what happened.
         message = 'Could not be compiled. See the output for the reason.'
         try:
-            success = self._compile_shot(item, send_to_runviewer=send_to_runviewer)
+            success = self.compile_shot(item, send_to_runviewer=send_to_runviewer)
         except Exception as exc:
             message = 'Could not be compiled: %s' % str(exc)
             self.output(
@@ -1144,27 +1154,6 @@ class QueueManager(QtCore.QObject):
         self.queueChanged.emit()
         return record
 
-    def get_queue_paths(self, include_default_shots=True):
-        return self.controller.get_queue_paths(include_default_shots)
-
-    def get_shot_statuses(self, shot_ids):
-        return self.controller.get_shot_statuses(shot_ids)
-
-    def get_queued_sequence_attrs(self, path):
-        return self.controller.get_queued_sequence_attrs(path)
-
-    def get_shot_path(self, shot_id):
-        return self.controller.get_shot_path(shot_id)
-
-    def get_compiling_paths(self):
-        return self.controller.get_compiling_paths()
-
-    def get_queue_state(self):
-        return self.controller.get_queue_state()
-
-    def export_state(self):
-        return self.controller.export_state()
-
     def restore_state(self, state, restore_rows=True):
         self.controller.restore_state(dict(state or {}), restore_rows)
         self.queueChanged.emit()
@@ -1190,7 +1179,7 @@ class QueueManager(QtCore.QObject):
                 elif command == 'compile_shots':
                     records, send_to_runviewer = args
                     for item in records:
-                        if not self._compile_shot(item, send_to_runviewer=send_to_runviewer):
+                        if not self.compile_shot(item, send_to_runviewer=send_to_runviewer):
                             self.output('Compilation aborted.\n\n', red=True)
                             break
                     else:

@@ -33,6 +33,7 @@ from runmanager.queueing import (
     BLACS_STATES,
     BLOCKED_SHOT_STATE,
     COMPILE_MODE_EAGER,
+    QueueController,
     QueueManager,
 )
 
@@ -46,8 +47,10 @@ class FakeApp(object):
     """
 
     def __init__(self):
+        self.queue_controller = QueueController()
         self.queue_manager = QueueManager(
-            lambda item: None,
+            self.queue_controller,
+            lambda item, default_globals: None,
             lambda labscript_file, path: True,
             lambda path: None,
             lambda *args, **kwargs: None,
@@ -216,7 +219,9 @@ class SubmittingApp(object):
         self.compiled = []
         self.sent_to_runviewer = []
         self.sequences = {}
+        self.queue_controller = QueueController()
         self.queue_manager = QueueManager(
+            self.queue_controller,
             self.prepare_queue_shot,
             self.compile_run_file,
             self.sent_to_runviewer.append,
@@ -395,7 +400,7 @@ class SubmitShotsTests(RemoteCommandTestCase):
         )
         self.assertIn(
             self.anchor,
-            self.app.queue_manager.get_queue_paths(),
+            self.app.queue_controller.get_queue_paths(),
             'and the shot that was queued when the batch arrived is queued '
             'still: a remote submission adds to the queue, never replaces it',
         )
@@ -525,7 +530,7 @@ class SubmitShotsTests(RemoteCommandTestCase):
             self.submit({'x': 1}, {'x': 2}, {'x': 3})
 
         self.assertEqual(self.app.batches, [])
-        self.assertEqual(self.app.queue_manager.get_queue_paths(), [self.anchor])
+        self.assertEqual(self.app.queue_controller.get_queue_paths(), [self.anchor])
 
     def test_the_window_is_left_holding_the_last_shot_submitted(self):
         # Whoever is watching has to be able to see what is running, so the
@@ -701,7 +706,7 @@ class ShotStatusTests(RemoteCommandTestCase):
         self.app.queue_manager.enqueue(
             [{'path': path, 'shot_id': shot_id, 'compiled': True}]
         )
-        for item in self.app.queue_manager.controller._items:
+        for item in self.app.queue_controller._items:
             if item['shot_id'] == shot_id:
                 item['state'] = state
 
@@ -824,11 +829,11 @@ class ShotStatusTests(RemoteCommandTestCase):
         # answer written back into every row it was read from.
         self.enqueue('one')
         self.enqueue('two')
-        before = copy.deepcopy(self.app.queue_manager.controller._items)
+        before = copy.deepcopy(self.app.queue_controller._items)
 
         self.request('shot_status', ['one', 'two', 'three'])
 
-        self.assertEqual(self.app.queue_manager.controller._items, before)
+        self.assertEqual(self.app.queue_controller._items, before)
 
 
 class EmptyQueueTests(RemoteCommandTestCase):
@@ -876,7 +881,7 @@ class EmptyQueueTests(RemoteCommandTestCase):
             if not os.path.exists(descriptors[0]['path']):
                 break
             time.sleep(0.01)
-        self.assertEqual(self.app.queue_manager.get_queue_paths(), [])
+        self.assertEqual(self.app.queue_controller.get_queue_paths(), [])
         self.assertEqual(compiled, [descriptors[0]['path']], 'the second never compiled')
         self.assertFalse(os.path.exists(descriptors[0]['path']), 'and no file is left')
 
@@ -945,7 +950,7 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         # deletes it, its row having gone with the Clear.
         self.enqueue('experiment_000.h5', run_no=0, n_runs=1)
         [compiling] = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
-        self.assertTrue(self.wait_until(self.app.queue_manager.get_compiling_paths))
+        self.assertTrue(self.wait_until(self.app.queue_controller.get_compiling_paths))
         globals_file.set_field(self.app.globals_file, 'group', 'x', 'scan', '[1, 2]')
         globals_file.set_field(self.app.globals_file, 'group', 'x', 'scan_enabled', True)
         globals_file.set_field(self.app.globals_file, 'group', 'x', 'expansion', 'outer')
@@ -961,7 +966,7 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE)
         self.app.compiling.set()
         self.assertTrue(
-            self.wait_until(lambda: not self.app.queue_manager.get_compiling_paths())
+            self.wait_until(lambda: not self.app.queue_controller.get_compiling_paths())
         )
 
         later = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
@@ -1084,7 +1089,7 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
             [self.SEQUENCE['sequence_id']],
         )
         self.assertEqual(
-            self.app.queue_manager.get_queue_paths(),
+            self.app.queue_controller.get_queue_paths(),
             [record['path'] for record in records],
             'and the work that was waiting was thrown away, which is the '
             'other half of what the mode offers',
@@ -1202,7 +1207,7 @@ class CompileOnlyEngageTests(RemoteCommandTestCase):
         self.assertEqual(self.app.said, [])
         self.assertEqual(len(self.app.compiled), 2)
         self.assertTrue(all(os.path.isfile(path) for path in self.app.compiled))
-        self.assertEqual(self.app.queue_manager.get_queue_paths(), [])
+        self.assertEqual(self.app.queue_controller.get_queue_paths(), [])
         self.assertEqual(self.app.sent_to_runviewer, [])
 
 

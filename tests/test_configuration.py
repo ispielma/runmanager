@@ -24,7 +24,7 @@ from qtutils.qt.QtWidgets import QApplication
 import runmanager
 # fixtures stubs the splash and does the guarded import of the application.
 from fixtures import FingerTabWidget, RunManager, TreeView
-from runmanager.queueing import QueueManager
+from runmanager.queueing import QueueController, QueueManager
 
 _qapplication = None
 
@@ -56,8 +56,10 @@ class QueueInConfigurationTests(unittest.TestCase):
         app.analysis_submission = types.SimpleNamespace(
             get_configuration_data=dict, restore_configuration_data=lambda data: None
         )
+        app.queue_controller = QueueController()
         app.queue_manager = QueueManager(
-            lambda item: None,
+            app.queue_controller,
+            lambda item, default_globals: None,
             lambda labscript_file, path: True,
             lambda path: None,
             lambda *args, **kwargs: None,
@@ -76,12 +78,12 @@ class QueueInConfigurationTests(unittest.TestCase):
 
         starting = self.session()
         starting.load_configuration(path, at_startup=True)
-        self.assertEqual(starting.queue_manager.get_queue_paths(), [a, b])
+        self.assertEqual(starting.queue_controller.get_queue_paths(), [a, b])
 
         running = self.session(c)
         running.load_configuration(path)
-        self.assertEqual(running.queue_manager.get_queue_paths(), [c])
+        self.assertEqual(running.queue_controller.get_queue_paths(), [c])
         self.assertTrue(
-            running.queue_manager.get_queue_state()['paused'],
+            running.queue_controller.get_queue_state()['paused'],
             'the queue settings in the configuration are still applied',
         )
