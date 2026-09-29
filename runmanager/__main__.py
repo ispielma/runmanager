@@ -2126,6 +2126,10 @@ class RunManager(LabscriptApplication):
             os.path.join(runmanager_dir, 'batch_compiler.py'),
             output_redirection_port=self.output_box.port,
         )
+        # Set while the subprocess can be sent work. Restarting it clears this
+        # until the new one is up, so no compile is sent to the one quitting.
+        self.child_ready = threading.Event()
+        self.child_ready.set()
 
         self.runviewer = RunviewerClient(host='localhost', timeout=0.5)
         self.queue_controller = QueueController()
@@ -3045,6 +3049,11 @@ class RunManager(LabscriptApplication):
 
     def on_restart_subprocess_clicked(self):
         # Kill and restart the compilation subprocess
+        self.ui.pushButton_restart_subprocess.setEnabled(False)
+        # Cleared before the fake reply, which frees a compile waiting on the
+        # old child to go on to the next shot. That shot must wait for the new
+        # child rather than be sent to this one.
+        self.child_ready.clear()
         self.to_child.put(['quit', None])
         self.from_child.put(['done', False])
         time.sleep(0.1)
@@ -3072,12 +3081,24 @@ class RunManager(LabscriptApplication):
         else:
             self.output_box.output('done.\n')
         self.output_box.output('Spawning new compiler subprocess...')
-        self.to_child, self.from_child, self.child = process_tree.subprocess(
-            os.path.join(runmanager_dir, 'batch_compiler.py'),
-            output_redirection_port=self.output_box.port,
-        )
-        self.output_box.output('done.\n')
-        self.output_box.output('Ready.\n\n')
+        try:
+            self.to_child, self.from_child, self.child = process_tree.subprocess(
+                os.path.join(runmanager_dir, 'batch_compiler.py'),
+                output_redirection_port=self.output_box.port,
+            )
+            self.child_ready.set()
+            self.output_box.output('done.\n')
+            self.output_box.output('Ready.\n\n')
+        except Exception as e:
+            logger.exception('Could not spawn the compiler subprocess')
+            # Compiles stay held, rather than going to a child that has gone,
+            # until a restart gets a new one up:
+            self.output_box.output(
+                f'failed: {e}\nCompiling waits until Restart subprocess succeeds.\n\n',
+                red=True,
+            )
+        finally:
+            self.ui.pushButton_restart_subprocess.setEnabled(True)
 
     def on_tabCloseRequested(self, index):
         tab_page = self.ui.tabWidget.widget(index)
@@ -4540,6 +4561,7 @@ class RunManager(LabscriptApplication):
 
     def compile_run_file(self, labscript_file, run_file):
         with self.compiler_lock:
+            self.child_ready.wait()
             self.to_child.put(['compile', [labscript_file, run_file]])
             signal, success = self.from_child.get()
         assert signal == 'done'
