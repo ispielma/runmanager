@@ -2451,6 +2451,7 @@ class RunManager(LabscriptApplication):
         )
         self.queue_pause_button.toggled.connect(self.queue_manager.set_paused)
         self.queue_widget.deleteRowsRequested.connect(self.queue_manager.delete_rows)
+        self.queue_widget.retryCompileRequested.connect(self.queue_manager.retry_compile)
         
         # Keyboard shortcuts:
         engage_shortcut = QtWidgets.QShortcut('F5', self.ui,

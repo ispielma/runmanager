@@ -819,9 +819,8 @@ class LazyCompileFailureTests(unittest.TestCase):
     queue to say why. A shot that never compiled did not complete, so the row
     stays where it is and goes red with the reason, like any other failure.
 
-    It is not compiled again either. A compile that fails partway leaves data
-    in the shot file that stops labscript compiling into it ever again, so
-    retrying the same row cannot succeed however often it is asked for.
+    It is not compiled again by itself either, unless the operator asks: a
+    shot that fails every time would otherwise be recompiled for ever.
     """
 
     def make_runmanager(self, compiles):
@@ -887,7 +886,7 @@ class LazyCompileFailureTests(unittest.TestCase):
         self.assertEqual(
             app.compiled,
             [os.path.join(self.directory, 'lazy_a.h5')],
-            'the same row cannot compile twice, so it is only tried once',
+            'a failed compile is not retried by itself, so it is only tried once',
         )
 
     def test_nothing_is_offered_while_it_is_held(self):
@@ -934,9 +933,9 @@ class CompileFailureIsNotAHandoverTests(unittest.TestCase):
     refuse to clear it; and the operator would be told BLACS was running a file
     it had never seen.
 
-    What the operator chose stays: the row is still red, still at the head, and
-    still a dead end until it is deleted. What it does not carry is any claim
-    that BLACS has it.
+    The row is still red and still at the head, and holds the queue until it
+    is deleted or compiled again. What it does not carry is any claim that
+    BLACS has it.
     """
 
     def failed_compile_queue(self):

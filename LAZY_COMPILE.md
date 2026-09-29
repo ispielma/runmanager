@@ -53,10 +53,10 @@ Queued lazy shots keep the skeleton filepath created at Engage time. If a lazy s
 > what a labscript file that could not compile looked like: rows vanishing one
 > per request with no shot ever running.
 >
-> It is not compiled again either. A compile that fails partway leaves the
-> `devices` and `calibrations` groups in the shot file, and labscript refuses to
-> compile into a file that has them, so the same row can never succeed. Deleting
-> it — which takes the half-written file with it — is the way on.
+> It is not compiled again by itself, which would recompile a persistently bad
+> shot for ever. The operator can right-click the row and choose *Compile again*,
+> or delete it. Every compile rewrites the shot file from scratch, so a row that
+> failed once can succeed.
 
 - Extend the existing `queue_request_next()` logic in runmanager.
 - When the next queue item is eager, keep the current behavior and return its agnostic path immediately.

@@ -676,14 +676,15 @@ class ShotStatusTests(RemoteCommandTestCase):
     # which is the reclaim -- and a failed one, which is the retry. It refuses
     # a rejected row, because offering it again would only be refused again,
     # and a cancelled one, which the operator has said is not to be sent;
-    # claim_next_for_compile() refuses a compile_failed row, which can never
-    # compile however often it is asked for.
+    # claim_next_for_compile() refuses a compile_failed row, which is not
+    # compiled again unless the operator asks.
     #
     # Of the three refusals only the cancelled row clears itself: the queue
     # drops it at the next request from BLACS, so the shots behind it are
     # waiting their turn rather than waiting on somebody. It was deleted while
     # BLACS had it, and BLACS can still complete it, so it is pending. The
-    # other two stay where they are until an operator deletes them.
+    # other two stay where they are until an operator deletes them, or, for a
+    # compile_failed row, asks for another compile.
     EXPECTED = {
         # state: (pending, holds up the rows behind it)
         '': (True, False),
