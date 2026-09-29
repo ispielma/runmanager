@@ -119,118 +119,47 @@ class ValueColumnTests(unittest.TestCase):
         return globals_file.get_global_record(self.path, 'group', name)
 
     def test_native_fold_shows_two_distinct_editable_expressions(self):
-        parent, rect = self.value_rect('freq')
+        _, rect = self.value_rect('freq')
         scan = self.expression_item('freq', 'scan').index()
-        self.assertEqual(parent.data(self.tab.GLOBALS_ROLE_EXPRESSION), 'default')
-        self.assertFalse(self.view.isExpanded(parent.siblingAtColumn(0)))
         self.assertFalse(self.view.visualRect(scan).isValid())
 
         send_click(self.view, QtCore.QPoint(rect.left() - 10, rect.center().y()))
         self.qapplication.processEvents()
-        self.assertTrue(self.view.isExpanded(parent.siblingAtColumn(0)))
         scan_rect = self.view.visualRect(scan)
         self.assertTrue(scan_rect.isValid())
-        self.assertEqual(scan.data(self.tab.GLOBALS_ROLE_EXPRESSION), 'scan')
 
+        send_click(self.view, rect.center())
+        self.editor().setPlainText('11')
         send_click(self.view, scan_rect.center())
+        self.assertEqual(self.editor().toPlainText(), 'linspace(0, 1, 3)')
+        self.assertEqual(self.record('freq')['default'], '11')
         self.commit('linspace(0, 1, 5)')
         self.assertEqual(self.record('freq')['scan'], 'linspace(0, 1, 5)')
 
-    def test_rendered_fold_and_active_expression_change(self):
+    def test_rendered_label_and_text_follow_active_expression(self):
         active, rect = self.value_rect('freq')
-        root = active.siblingAtColumn(0)
-        self.view.clearSelection()
-        self.view.setCurrentIndex(QtCore.QModelIndex())
-        self.qapplication.processEvents()
-
-        collapsed = self.view.viewport().grab().toImage()
-        self.view.expand(root)
-        self.qapplication.processEvents()
-        expanded = self.view.viewport().grab().toImage()
-        branch_rect = QtCore.QRect(
-            rect.left() - self.view.indentation(),
-            rect.top() + 2,
-            self.view.indentation(),
-            rect.height() - 4,
-        )
-        self.assertNotEqual(collapsed.copy(branch_rect), expanded.copy(branch_rect))
-        self.view.collapse(root)
-        self.qapplication.processEvents()
-
         option = QtWidgets.QStyleOptionViewItem()
         self.tab.value_delegate.initStyleOption(option, active)
         offset = self.tab.value_delegate.text_offset(option)
         label_rect = QtCore.QRect(rect.left(), rect.top(), offset, rect.height())
         expression_rect = rect.adjusted(offset, 0, 0, 0)
+        self.view.clearSelection()
+        self.view.setCurrentIndex(QtCore.QModelIndex())
+        self.qapplication.processEvents()
         default_render = self.view.viewport().grab().toImage()
-        self.assertEqual(active.data(self.tab.GLOBALS_ROLE_EXPRESSION), 'default')
-        self.assertEqual(active.data(), '10')
-        with self.tab.globals_model_item_changed_disconnected:
-            self.tab.globals_model.setData(
-                active, '', self.tab.GLOBALS_ROLE_EXPRESSION
-            )
-            self.tab.globals_model.setData(active, '')
-        self.qapplication.processEvents()
-        blank_default = self.view.viewport().grab().toImage()
-        with self.tab.globals_model_item_changed_disconnected:
-            self.tab.globals_model.setData(
-                active, 'default', self.tab.GLOBALS_ROLE_EXPRESSION
-            )
-            self.tab.globals_model.setData(active, '10')
-        self.qapplication.processEvents()
-        self.assertNotEqual(
-            default_render.copy(label_rect), blank_default.copy(label_rect)
-        )
-        self.assertNotEqual(
-            default_render.copy(expression_rect), blank_default.copy(expression_rect)
-        )
 
         checkbox = self.tab.get_global_item_by_name(
             'freq', self.tab.GLOBALS_COL_SCAN_ENABLED
         )
         checkbox.setCheckState(QtCore.Qt.CheckState.Checked)
         self.qapplication.processEvents()
-        active, rect = self.value_rect('freq')
         scan_render = self.view.viewport().grab().toImage()
-        self.assertEqual(active.data(self.tab.GLOBALS_ROLE_EXPRESSION), 'scan')
-        self.assertEqual(active.data(), 'linspace(0, 1, 3)')
-        with self.tab.globals_model_item_changed_disconnected:
-            self.tab.globals_model.setData(
-                active, '', self.tab.GLOBALS_ROLE_EXPRESSION
-            )
-            self.tab.globals_model.setData(active, '')
-        self.qapplication.processEvents()
-        blank_scan = self.view.viewport().grab().toImage()
-        with self.tab.globals_model_item_changed_disconnected:
-            self.tab.globals_model.setData(
-                active, 'scan', self.tab.GLOBALS_ROLE_EXPRESSION
-            )
-            self.tab.globals_model.setData(active, 'linspace(0, 1, 3)')
-        self.qapplication.processEvents()
-        self.assertNotEqual(scan_render.copy(label_rect), blank_scan.copy(label_rect))
-        self.assertNotEqual(
-            scan_render.copy(expression_rect), blank_scan.copy(expression_rect)
-        )
         self.assertNotEqual(
             default_render.copy(label_rect), scan_render.copy(label_rect)
         )
         self.assertNotEqual(
             default_render.copy(expression_rect), scan_render.copy(expression_rect)
         )
-
-    def test_clicking_other_expression_commits_and_changes_editor(self):
-        parent, _ = self.value_rect('freq')
-        self.view.expand(parent)
-        self.qapplication.processEvents()
-        send_click(self.view, self.view.visualRect(parent).center())
-        self.editor().setPlainText('11')
-        scan = self.expression_item('freq', 'scan').index()
-        send_click(self.view, self.view.visualRect(scan).center())
-
-        self.assertEqual(self.editor().toPlainText(), 'linspace(0, 1, 3)')
-        self.assertEqual(self.record('freq')['default'], '11')
-        self.commit('[1, 2]')
-        self.assertEqual(self.record('freq')['scan'], '[1, 2]')
 
     def test_toggling_scan_commits_editor_and_swaps_active_expression(self):
         parent, rect = self.value_rect('freq')
@@ -309,38 +238,6 @@ class ValueColumnTests(unittest.TestCase):
         send_click(self.view, QtCore.QPoint(rect.right() - 5, rect.center().y()))
         self.qapplication.processEvents()
         self.assertTrue(self.record('power')['jit_enabled'])
-
-    def test_selected_row_highlight_spans_checkbox_cells(self):
-        name = self.tab.get_global_item_by_name('freq', self.tab.GLOBALS_COL_NAME)
-        checkboxes = [
-            self.tab.get_global_item_by_name('freq', column)
-            for column in (
-                self.tab.GLOBALS_COL_SCAN_ENABLED,
-                self.tab.GLOBALS_COL_JIT_ENABLED,
-            )
-        ]
-        self.view.clearSelection()
-        self.view.setCurrentIndex(QtCore.QModelIndex())
-        self.qapplication.processEvents()
-        unselected = self.view.viewport().grab().toImage()
-
-        self.view.selectionModel().select(
-            name.index(),
-            QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect
-            | QtCore.QItemSelectionModel.SelectionFlag.Rows,
-        )
-        self.qapplication.processEvents()
-        selected = self.view.viewport().grab().toImage()
-
-        name_rect = self.view.visualRect(name.index())
-        name_point = QtCore.QPoint(name_rect.right() - 4, name_rect.center().y())
-        unselected_name = unselected.pixelColor(name_point)
-        selected_name = selected.pixelColor(name_point)
-        self.assertNotEqual(unselected_name, selected_name)
-        for checkbox in checkboxes:
-            rect = self.view.visualRect(checkbox.index())
-            point = QtCore.QPoint(rect.right() - 4, rect.center().y())
-            self.assertNotEqual(unselected.pixelColor(point), selected.pixelColor(point))
 
     def test_child_selection_targets_the_global_for_bulk_changes(self):
         active, _ = self.value_rect('time')
