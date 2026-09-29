@@ -495,14 +495,9 @@ class PauseQueueControlTests(unittest.TestCase):
     enum here -- nothing else would, until runmanager was launched.
     """
 
-    @classmethod
-    def setUpClass(cls):
-        # The real main.ui, because setup_queue_tab pins its tab in place with
-        # tabBar().setMovable(False, index=...), and only runmanager's own
-        # FingerTabBarWidget takes that index keyword. labscript_utils' bar of
-        # the same name inherits QTabBar.setMovable(bool), which takes no
-        # keywords at all, so building the tab against it raises TypeError.
-        cls.ui = load_main_ui()
+    def setUp(self):
+        # The real main.ui supplies the Queue page and its layout.
+        self.ui = load_main_ui()
 
     def build_queue_tab(self):
         app = types.SimpleNamespace(ui=self.ui, refresh_queue_tab=lambda: None)
@@ -517,6 +512,11 @@ class PauseQueueControlTests(unittest.TestCase):
         self.assertTrue(button.isCheckable())
         self.assertFalse(button.isChecked(), 'a queue starts unpaused')
         self.assertEqual(button.text(), 'Pause queue')
+
+    def test_queue_tab_has_its_icon(self):
+        index = self.ui.tabWidget.indexOf(self.ui.tab_queue)
+        self.assertNotEqual(index, -1)
+        self.assertFalse(self.ui.tabWidget.tabIcon(index).isNull())
 
     def test_the_button_shows_a_different_icon_once_the_queue_is_paused(self):
         icon = self.build_queue_tab().queue_pause_button.icon()

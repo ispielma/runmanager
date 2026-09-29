@@ -11,12 +11,7 @@
 # the project for the full license.                                 #
 #                                                                   #
 #####################################################################
-"""The Value(s) column, which shows a global's Default and Scan in one cell.
-
-A group tab is shown offscreen, so the view, its delegate and the tab's handlers
-all run. Of the application behind the tab only globals_changed is stood in for,
-because RunManager's startup builds the whole window.
-"""
+"""The foldable Default and Scan expressions in a group tab."""
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,7 +24,7 @@ import runmanager.globals_file as globals_file
 from fixtures import Editor, FingerTabWidget, GroupTab, RunManager, main_module
 
 
-def send_click(view, pos):
+def send_click(view, pos, modifiers=QtCore.Qt.KeyboardModifier.NoModifier):
     for event_type in (
         QtCore.QEvent.Type.MouseButtonPress,
         QtCore.QEvent.Type.MouseButtonRelease,
@@ -40,7 +35,7 @@ def send_click(view, pos):
             QtCore.QPointF(view.viewport().mapToGlobal(pos)),
             QtCore.Qt.MouseButton.LeftButton,
             QtCore.Qt.MouseButton.LeftButton,
-            QtCore.Qt.KeyboardModifier.NoModifier,
+            modifiers,
         )
         QtWidgets.QApplication.sendEvent(view.viewport(), event)
 
@@ -96,20 +91,21 @@ class ValueColumnTests(unittest.TestCase):
         )
         self.addCleanup(tabs.deleteLater)
         self.tab = GroupTab(tabs, self.path, 'group')
-        self.view = self.tab.ui.tableView_globals
+        self.view = self.tab.ui.treeView_globals
         tabs.resize(900, 300)
         tabs.show()
         self.qapplication.processEvents()
 
+    def expression_item(self, name, expression):
+        return self.tab.get_global_expression_item(name, expression)
+
     def value_rect(self, name):
-        row = self.tab.get_global_item_by_name(name, self.tab.GLOBALS_COL_NAME).row()
-        index = self.tab.globals_model.index(row, self.tab.GLOBALS_COL_DEFAULT)
+        index = self.tab.get_active_value_item(name).index()
         return index, self.view.visualRect(index)
 
     def editor(self):
         self.qapplication.processEvents()
-        editors = self.view.findChildren(Editor)
-        visible = [editor for editor in editors if editor.isVisible()]
+        visible = [editor for editor in self.view.findChildren(Editor) if editor.isVisible()]
         self.assertEqual(len(visible), 1)
         return visible[0]
 
@@ -117,60 +113,303 @@ class ValueColumnTests(unittest.TestCase):
         editor = self.editor()
         editor.setPlainText(text)
         send_key(editor, QtCore.Qt.Key.Key_Return)
+        self.qapplication.processEvents()
 
     def record(self, name):
         return globals_file.get_global_record(self.path, 'group', name)
 
-    def test_a_click_on_a_line_edits_that_expression(self):
-        _, rect = self.value_rect('freq')
-        send_click(self.view, QtCore.QPoint(rect.left() + 6, rect.top() + 6))
-        _, rect = self.value_rect('freq')
-        send_click(self.view, QtCore.QPoint(rect.center().x(), rect.bottom() - 6))
-        self.commit('linspace(0, 1, 5)')
+    def test_native_fold_shows_two_distinct_editable_expressions(self):
+        parent, rect = self.value_rect('freq')
+        scan = self.expression_item('freq', 'scan').index()
+        self.assertEqual(parent.data(self.tab.GLOBALS_ROLE_EXPRESSION), 'default')
+        self.assertFalse(self.view.isExpanded(parent.siblingAtColumn(0)))
+        self.assertFalse(self.view.visualRect(scan).isValid())
 
+        send_click(self.view, QtCore.QPoint(rect.left() - 10, rect.center().y()))
+        self.qapplication.processEvents()
+        self.assertTrue(self.view.isExpanded(parent.siblingAtColumn(0)))
+        scan_rect = self.view.visualRect(scan)
+        self.assertTrue(scan_rect.isValid())
+        self.assertEqual(scan.data(self.tab.GLOBALS_ROLE_EXPRESSION), 'scan')
+
+        send_click(self.view, scan_rect.center())
+        self.commit('linspace(0, 1, 5)')
         self.assertEqual(self.record('freq')['scan'], 'linspace(0, 1, 5)')
 
-    def test_a_key_edits_the_expression_in_use_even_when_both_show(self):
-        _, rect = self.value_rect('time')
-        send_click(self.view, QtCore.QPoint(rect.left() + 6, rect.top() + 6))
-        index, _ = self.value_rect('time')
-        self.view.setCurrentIndex(index)
-        send_key(self.view, QtCore.Qt.Key.Key_7, '7')
-        send_key(self.editor(), QtCore.Qt.Key.Key_Return)
+    def test_rendered_fold_and_active_expression_change(self):
+        active, rect = self.value_rect('freq')
+        root = active.siblingAtColumn(0)
+        self.view.clearSelection()
+        self.view.setCurrentIndex(QtCore.QModelIndex())
+        self.qapplication.processEvents()
 
-        self.assertEqual(self.record('time')['scan'], '7')
+        collapsed = self.view.viewport().grab().toImage()
+        self.view.expand(root)
+        self.qapplication.processEvents()
+        expanded = self.view.viewport().grab().toImage()
+        branch_rect = QtCore.QRect(
+            rect.left() - self.view.indentation(),
+            rect.top() + 2,
+            self.view.indentation(),
+            rect.height() - 4,
+        )
+        self.assertNotEqual(collapsed.copy(branch_rect), expanded.copy(branch_rect))
+        self.view.collapse(root)
+        self.qapplication.processEvents()
 
-    def test_tab_moves_past_the_hidden_scan_column(self):
-        # The Scan column only stores the scan the Value(s) cell shows. Stopping on
-        # it would open an editor no one can see, and type into the scan.
+        option = QtWidgets.QStyleOptionViewItem()
+        self.tab.value_delegate.initStyleOption(option, active)
+        offset = self.tab.value_delegate.text_offset(option)
+        label_rect = QtCore.QRect(rect.left(), rect.top(), offset, rect.height())
+        expression_rect = rect.adjusted(offset, 0, 0, 0)
+        default_render = self.view.viewport().grab().toImage()
+        self.assertEqual(active.data(self.tab.GLOBALS_ROLE_EXPRESSION), 'default')
+        self.assertEqual(active.data(), '10')
+        with self.tab.globals_model_item_changed_disconnected:
+            self.tab.globals_model.setData(
+                active, '', self.tab.GLOBALS_ROLE_EXPRESSION
+            )
+            self.tab.globals_model.setData(active, '')
+        self.qapplication.processEvents()
+        blank_default = self.view.viewport().grab().toImage()
+        with self.tab.globals_model_item_changed_disconnected:
+            self.tab.globals_model.setData(
+                active, 'default', self.tab.GLOBALS_ROLE_EXPRESSION
+            )
+            self.tab.globals_model.setData(active, '10')
+        self.qapplication.processEvents()
+        self.assertNotEqual(
+            default_render.copy(label_rect), blank_default.copy(label_rect)
+        )
+        self.assertNotEqual(
+            default_render.copy(expression_rect), blank_default.copy(expression_rect)
+        )
+
+        checkbox = self.tab.get_global_item_by_name(
+            'freq', self.tab.GLOBALS_COL_SCAN_ENABLED
+        )
+        checkbox.setCheckState(QtCore.Qt.CheckState.Checked)
+        self.qapplication.processEvents()
+        active, rect = self.value_rect('freq')
+        scan_render = self.view.viewport().grab().toImage()
+        self.assertEqual(active.data(self.tab.GLOBALS_ROLE_EXPRESSION), 'scan')
+        self.assertEqual(active.data(), 'linspace(0, 1, 3)')
+        with self.tab.globals_model_item_changed_disconnected:
+            self.tab.globals_model.setData(
+                active, '', self.tab.GLOBALS_ROLE_EXPRESSION
+            )
+            self.tab.globals_model.setData(active, '')
+        self.qapplication.processEvents()
+        blank_scan = self.view.viewport().grab().toImage()
+        with self.tab.globals_model_item_changed_disconnected:
+            self.tab.globals_model.setData(
+                active, 'scan', self.tab.GLOBALS_ROLE_EXPRESSION
+            )
+            self.tab.globals_model.setData(active, 'linspace(0, 1, 3)')
+        self.qapplication.processEvents()
+        self.assertNotEqual(scan_render.copy(label_rect), blank_scan.copy(label_rect))
+        self.assertNotEqual(
+            scan_render.copy(expression_rect), blank_scan.copy(expression_rect)
+        )
+        self.assertNotEqual(
+            default_render.copy(label_rect), scan_render.copy(label_rect)
+        )
+        self.assertNotEqual(
+            default_render.copy(expression_rect), scan_render.copy(expression_rect)
+        )
+
+    def test_clicking_other_expression_commits_and_changes_editor(self):
+        parent, _ = self.value_rect('freq')
+        self.view.expand(parent)
+        self.qapplication.processEvents()
+        send_click(self.view, self.view.visualRect(parent).center())
+        self.editor().setPlainText('11')
+        scan = self.expression_item('freq', 'scan').index()
+        send_click(self.view, self.view.visualRect(scan).center())
+
+        self.assertEqual(self.editor().toPlainText(), 'linspace(0, 1, 3)')
+        self.assertEqual(self.record('freq')['default'], '11')
+        self.commit('[1, 2]')
+        self.assertEqual(self.record('freq')['scan'], '[1, 2]')
+
+    def test_toggling_scan_commits_editor_and_swaps_active_expression(self):
+        parent, rect = self.value_rect('freq')
+        send_click(self.view, rect.center())
+        self.editor().setPlainText('12')
+        checkbox = self.tab.get_global_item_by_name('freq', self.tab.GLOBALS_COL_SCAN_ENABLED)
+        checkbox.setCheckState(QtCore.Qt.CheckState.Checked)
+        self.qapplication.processEvents()
+
+        active, _ = self.value_rect('freq')
+        self.assertEqual(active.data(self.tab.GLOBALS_ROLE_EXPRESSION), 'scan')
+        self.assertEqual(self.expression_item('freq', 'default').text(), '12')
+        self.assertEqual(self.record('freq')['default'], '12')
+        self.assertTrue(self.record('freq')['scan_enabled'])
+        self.assertFalse(self.view.isExpanded(active.siblingAtColumn(0)))
+
+        checkbox = self.tab.get_global_item_by_name('freq', self.tab.GLOBALS_COL_SCAN_ENABLED)
+        checkbox.setCheckState(QtCore.Qt.CheckState.Unchecked)
+        self.qapplication.processEvents()
+        active, _ = self.value_rect('freq')
+        self.assertEqual(active.data(self.tab.GLOBALS_ROLE_EXPRESSION), 'default')
+        self.assertEqual(active.data(), '12')
+
+    def test_remote_toggle_preserves_other_globals_uncommitted_editor(self):
         _, rect = self.value_rect('freq')
         send_click(self.view, rect.center())
-        send_key(self.editor(), QtCore.Qt.Key.Key_Tab)
+        editor = self.editor()
+        editor.insertPlainText('half typed')
 
-        self.assertEqual(self.view.currentIndex().column(), self.tab.GLOBALS_COL_UNITS)
+        self.tab.change_global_jit_enabled('power', False, True, interactive=False)
+        self.tab.change_global_scan_enabled('power', False, True, interactive=False)
+        self.qapplication.processEvents()
+
+        self.assertEqual(self.record('freq')['default'], '10')
+        self.assertEqual(self.expression_item('freq', 'default').text(), '10')
+        self.assertIs(self.view.indexWidget(self.view.currentIndex()), editor)
+        self.assertEqual(editor.toPlainText(), 'half typed')
 
     def test_ticking_scan_with_no_scan_opens_its_line_for_typing(self):
-        column = self.tab.GLOBALS_COL_SCAN_ENABLED
-        item = self.tab.get_global_item_by_name('power', column)
-        item.setCheckState(QtCore.Qt.CheckState.Checked)
-        self.commit('[1, 2, 3]')
+        checkbox = self.tab.get_global_item_by_name(
+            'power', self.tab.GLOBALS_COL_SCAN_ENABLED
+        )
+        checkbox.setCheckState(QtCore.Qt.CheckState.Checked)
+        self.qapplication.processEvents()
 
-        self.assertEqual(self.record('power')['scan'], '[1, 2, 3]')
+        active = self.tab.get_active_value_item('power').index()
+        self.assertEqual(active.data(self.tab.GLOBALS_ROLE_EXPRESSION), 'scan')
+        self.assertEqual(self.view.currentIndex(), active)
+        self.assertIs(self.view.indexWidget(active), self.editor())
+        self.commit('[1, 2]')
+        self.assertEqual(self.record('power')['scan'], '[1, 2]')
 
-    def test_an_open_editor_follows_its_global_until_typed_in(self):
-        # freq's default is in use, so a change to its scan leaves its Value(s) item
-        # as it was, and Qt would not reload the scan line's editor by itself:
-        _, rect = self.value_rect('freq')
-        send_click(self.view, QtCore.QPoint(rect.left() + 6, rect.top() + 6))
-        _, rect = self.value_rect('freq')
-        send_click(self.view, QtCore.QPoint(rect.center().x(), rect.bottom() - 6))
+    def test_keyboard_and_copy_follow_selected_expression(self):
+        active, _ = self.value_rect('time')
+        self.view.expand(active)
+        scan = self.expression_item('time', 'scan').index()
+        self.view.setCurrentIndex(scan)
+        send_key(self.view, QtCore.Qt.Key.Key_7, '7')
+        self.commit('7')
+        self.assertEqual(self.record('time')['scan'], '7')
+        self.view.setCurrentIndex(self.expression_item('time', 'default').index())
+        self.tab.on_globals_copy()
+        self.assertEqual(self.qapplication.clipboard().text(), '5')
+
+    def test_checkbox_cells_toggle_and_shift_click_preserves_selection(self):
+        scan = self.tab.get_global_item_by_name('freq', self.tab.GLOBALS_COL_SCAN_ENABLED)
+        rect = self.view.visualRect(scan.index())
+        point = QtCore.QPoint(rect.right() - 5, rect.center().y())
+        send_click(self.view, point, QtCore.Qt.KeyboardModifier.ShiftModifier)
+        self.assertFalse(self.record('freq')['scan_enabled'])
+        send_click(self.view, point)
+        self.qapplication.processEvents()
+        self.assertTrue(self.record('freq')['scan_enabled'])
+        jit = self.tab.get_global_item_by_name('power', self.tab.GLOBALS_COL_JIT_ENABLED)
+        rect = self.view.visualRect(jit.index())
+        send_click(self.view, QtCore.QPoint(rect.right() - 5, rect.center().y()))
+        self.qapplication.processEvents()
+        self.assertTrue(self.record('power')['jit_enabled'])
+
+    def test_selected_row_highlight_spans_checkbox_cells(self):
+        name = self.tab.get_global_item_by_name('freq', self.tab.GLOBALS_COL_NAME)
+        checkboxes = [
+            self.tab.get_global_item_by_name('freq', column)
+            for column in (
+                self.tab.GLOBALS_COL_SCAN_ENABLED,
+                self.tab.GLOBALS_COL_JIT_ENABLED,
+            )
+        ]
+        self.view.clearSelection()
+        self.view.setCurrentIndex(QtCore.QModelIndex())
+        self.qapplication.processEvents()
+        unselected = self.view.viewport().grab().toImage()
+
+        self.view.selectionModel().select(
+            name.index(),
+            QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect
+            | QtCore.QItemSelectionModel.SelectionFlag.Rows,
+        )
+        self.qapplication.processEvents()
+        selected = self.view.viewport().grab().toImage()
+
+        name_rect = self.view.visualRect(name.index())
+        name_point = QtCore.QPoint(name_rect.right() - 4, name_rect.center().y())
+        unselected_name = unselected.pixelColor(name_point)
+        selected_name = selected.pixelColor(name_point)
+        self.assertNotEqual(unselected_name, selected_name)
+        for checkbox in checkboxes:
+            rect = self.view.visualRect(checkbox.index())
+            point = QtCore.QPoint(rect.right() - 4, rect.center().y())
+            self.assertNotEqual(unselected.pixelColor(point), selected.pixelColor(point))
+
+    def test_child_selection_targets_the_global_for_bulk_changes(self):
+        active, _ = self.value_rect('time')
+        self.view.expand(active)
+        child = self.expression_item('time', 'default').index()
+        self.view.selectionModel().select(
+            child,
+            QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect
+            | QtCore.QItemSelectionModel.SelectionFlag.Rows,
+        )
+        self.view.setCurrentIndex(child)
+        self.tab.on_globals_set_selected_bools_triggered('True')
+        self.qapplication.processEvents()
+        self.assertEqual(self.record('time')['scan'], 'True')
+
+    def test_metadata_refresh_keeps_uncommitted_editor_text(self):
+        parent, _ = self.value_rect('freq')
+        self.view.expand(parent)
+        scan = self.expression_item('freq', 'scan').index()
+        send_click(self.view, self.view.visualRect(scan).center())
         editor = self.editor()
-        scan = self.record('freq')['scan']
-        self.tab.change_global_scan('freq', scan, '[3]', interactive=False)
-        self.assertEqual(editor.toPlainText(), '[3]')
-        editor.insertPlainText('0')
-        typed = editor.toPlainText()
-        # What a preparse does to each row as its results come back:
+        editor.insertPlainText('[0]')
         self.tab.update_expression_backgrounds('freq')
+        self.assertEqual(editor.toPlainText(), '[0]')
 
-        self.assertEqual(editor.toPlainText(), typed)
+    def test_expansion_selection_and_sort_survive_scan_toggle(self):
+        self.view.sortByColumn(self.tab.GLOBALS_COL_VALUE, QtCore.Qt.SortOrder.DescendingOrder)
+        active, _ = self.value_rect('freq')
+        root = active.siblingAtColumn(0)
+        self.view.expand(root)
+        self.view.selectionModel().select(
+            root,
+            QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect
+            | QtCore.QItemSelectionModel.SelectionFlag.Rows,
+        )
+        current_expression = self.tab.get_active_value_item('freq')
+        self.view.setCurrentIndex(current_expression.index())
+        checkbox = self.tab.get_global_item_by_name('freq', self.tab.GLOBALS_COL_SCAN_ENABLED)
+        checkbox.setCheckState(QtCore.Qt.CheckState.Checked)
+        self.qapplication.processEvents()
+
+        active, _ = self.value_rect('freq')
+        self.assertEqual(active.data(self.tab.GLOBALS_ROLE_EXPRESSION), 'scan')
+        self.assertTrue(self.view.isExpanded(active.siblingAtColumn(0)))
+        self.assertEqual(self.tab.selected_global_names(), ['freq'])
+        self.assertEqual(self.view.currentIndex(), current_expression.index())
+        names = [
+            self.tab.globals_model.item(row, self.tab.GLOBALS_COL_NAME).text()
+            for row in range(self.tab.globals_model.rowCount())
+        ]
+        self.assertLess(names.index('freq'), names.index('power'))
+
+    def test_arrow_keys_visit_expanded_child(self):
+        active, _ = self.value_rect('freq')
+        self.view.expand(active.siblingAtColumn(0))
+        self.view.setCurrentIndex(active)
+        send_key(self.view, QtCore.Qt.Key.Key_Down)
+        self.assertEqual(self.view.currentIndex(), self.expression_item('freq', 'scan').index())
+
+    def test_tab_from_active_value_goes_to_units(self):
+        active, _ = self.value_rect('freq')
+        self.view.setCurrentIndex(active)
+        self.view.edit(active)
+        send_key(self.editor(), QtCore.Qt.Key.Key_Tab)
+        self.assertEqual(self.view.currentIndex().column(), self.tab.GLOBALS_COL_UNITS)
+
+    def test_hidden_unicode_in_inactive_expression_stays_visible(self):
+        self.tab.change_global_scan('freq', 'linspace(0, 1, 3)', '1\u200b', interactive=False)
+        root = self.tab.get_global_item_by_name('freq', self.tab.GLOBALS_COL_SCAN_ENABLED).index()
+        self.assertTrue(self.view.isExpanded(root))
+        self.view.collapse(root)
+        self.assertTrue(self.view.isExpanded(root))

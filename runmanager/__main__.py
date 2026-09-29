@@ -305,8 +305,8 @@ def scroll_view_to_row_if_current(view, item):
     horizontal_scrollbar = view.horizontalScrollBar()
     existing_horizontal_position = horizontal_scrollbar.value()
     index = item.index()
-    current_row = view.currentIndex().row()
-    if index.row() == current_row:
+    current_index = view.currentIndex()
+    if index.row() == current_index.row() and index.parent() == current_index.parent():
         view.scrollTo(index)
         horizontal_scrollbar.setValue(existing_horizontal_position)
 
@@ -627,6 +627,29 @@ class TreeView(ItemView, QtWidgets.QTreeView):
         self.setItemDelegate(ItemDelegate(self))
 
 
+class GlobalsTreeView(TreeView):
+    def moveCursor(self, cursor_action, keyboard_modifiers):
+        if (
+            cursor_action in (
+                QtWidgets.QAbstractItemView.CursorAction.MoveNext,
+                QtWidgets.QAbstractItemView.CursorAction.MovePrevious,
+            )
+            and not self.currentIndex().parent().isValid()
+        ):
+            return ItemView.moveCursor(self, cursor_action, keyboard_modifiers)
+        return QtWidgets.QTreeView.moveCursor(self, cursor_action, keyboard_modifiers)
+
+    def mouseReleaseEvent(self, event):
+        index = self.indexAt(event.pos())
+        if (
+            index.isValid()
+            and index.column() == self.treePosition()
+            and event.pos().x() < self.visualRect(index).left()
+        ):
+            self._pressed_index = None
+        return super().mouseReleaseEvent(event)
+
+
 class TableView(ItemView, QtWidgets.QTableView):
     """TableView version of our customised ItemView"""
     def __init__(self, parent=None):
@@ -831,227 +854,149 @@ class ItemDelegate(QtWidgets.QStyledItemDelegate):
         model.setData(index, editor.toPlainText())
 
 
-class ValueDelegate(ItemDelegate):
-    """Draw a global's Default and Scan expressions in one foldable cell."""
-    CARET_WIDTH = 16
-
-    def __init__(self, view):
-        super().__init__(view)
-        self.edit_line = None
-        self.pressed_line = None
-
-    def active_label(self, index):
-        column = GroupTab.GLOBALS_COL_SCAN_ENABLED
-        item = index.model().itemFromIndex(index.siblingAtColumn(column))
-        if item.checkState() == QtCore.Qt.CheckState.Checked:
-            return 'scan'
-        return 'default'
-
-    def line_index(self, index, label):
-        if label == 'default':
-            return index
-        return index.siblingAtColumn(GroupTab.GLOBALS_COL_SCAN)
-
-    def text_offset(self, option):
-        label_width = QtGui.QFontMetrics(option.font).horizontalAdvance('default')
-        return self.CARET_WIDTH + label_width + 8
-
-    def text_option(self, option, rect):
-        text_option = QtWidgets.QStyleOptionViewItem(option)
-        offset = self.text_offset(option)
-        # A cell too narrow for its labels still lays its text out at their width:
-        text_option.rect = rect.adjusted(offset, 0, max(0, 2 * offset - rect.width()), 0)
-        return text_option
-
-    def caret_rect(self, rect):
-        size = QtCore.QSize(self.CARET_WIDTH, rect.height())
-        return QtCore.QRect(rect.topLeft(), size)
-
-    def line_sizes(self, option, index):
-        """The (label, index, size) of each line shown, top to bottom."""
-        active = self.active_label(index)
-        folded = self.line_index(index, 'default' if active == 'scan' else 'scan')
-        editor = self.parent().indexWidget(index)
-        # Neither a hidden-Unicode warning nor a line being edited is folded away:
-        if (
-            index.data(GroupTab.GLOBALS_ROLE_EXPANDED)
-            or hidden_unicode_issues(folded.data() or '')
-            or (editor is not None and editor.line != active)
-        ):
-            labels = ['default', 'scan']
-        else:
-            labels = [active]
-        text_option = self.text_option(option, option.rect)
-        sizes = []
-        for label in labels:
-            line_index = self.line_index(index, label)
-            sizes.append((label, line_index, super().sizeHint(text_option, line_index)))
-        return sizes
-
-    def line_rects(self, option, index):
-        """The (label, index, rect) of each line shown, top to bottom."""
-        lines = []
-        top = option.rect.top()
-        for label, line_index, size in self.line_sizes(option, index):
-            rect = QtCore.QRect(option.rect)
-            rect.setTop(top)
-            rect.setHeight(size.height())
-            lines.append((label, line_index, rect))
-            top += size.height()
-        # Another column can make the row taller than its lines; the last takes the
-        # rest, so the lines tile the cell:
-        lines[-1][2].setBottom(max(lines[-1][2].bottom(), option.rect.bottom()))
-        return lines
+class CenteredCheckDelegate(ItemDelegate):
+    """Center a checkbox and make its entire cell clickable."""
 
     def paint(self, painter, option, index):
-        if index.data(GroupTab.GLOBALS_ROLE_IS_DUMMY_ROW):
+        if not index.flags() & QtCore.Qt.ItemFlag.ItemIsUserCheckable:
             return super().paint(painter, option, index)
         style = option.widget.style()
-        lines = self.line_rects(option, index)
-        expanded = len(lines) == 2
-        active = self.active_label(index)
-        # Text at part opacity, rather than the palette's PlaceholderText, which some
-        # platforms make too faint to read on the tint:
-        muted_palette = QtGui.QPalette(option.palette)
-        muted = QtGui.QColor(option.palette.color(QtGui.QPalette.ColorRole.Text))
-        muted.setAlpha(150)
-        muted_palette.setColor(QtGui.QPalette.ColorRole.Text, muted)
-        align = QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
-        painter.save()
-        painter.setClipRect(option.rect)
-        for i, (label, line_index, rect) in enumerate(lines):
-            background = line_index.data(QtCore.Qt.ItemDataRole.BackgroundRole)
-            painter.fillRect(rect, background)
-            if i == 0:
-                caret = QtWidgets.QStyleOption()
-                caret.rect = self.caret_rect(rect)
-                caret.palette = option.palette
-                caret.state = QtWidgets.QStyle.StateFlag.State_Children
-                if expanded:
-                    caret.state |= QtWidgets.QStyle.StateFlag.State_Open
-                # A faint caret says nothing is folded away:
-                other = 'default' if label == 'scan' else 'scan'
-                folded = self.line_index(index, other)
-                painter.setOpacity(1 if expanded or folded.data() else 0.35)
-                style.drawPrimitive(
-                    QtWidgets.QStyle.PrimitiveElement.PE_IndicatorBranch,
-                    caret,
-                    painter,
-                    option.widget,
-                )
-                painter.setOpacity(1)
-            style.drawItemText(
-                painter,
-                rect.adjusted(self.CARET_WIDTH, 0, 0, 0),
-                align,
-                muted_palette,
-                True,
-                label,
-                QtGui.QPalette.ColorRole.Text,
-            )
-            text_option = self.text_option(option, rect)
-            text_option.state &= ~(
-                QtWidgets.QStyle.StateFlag.State_Selected
-                | QtWidgets.QStyle.StateFlag.State_HasFocus
-            )
-            if label != active:
-                text_option.palette = muted_palette
-            # The style draws each expression as it draws any other cell. This
-            # skips ItemDelegate.paint, whose column rule is the whole cell's:
-            QtWidgets.QStyledItemDelegate.paint(self, painter, text_option, line_index)
-            if i:
-                # After the line's own panel, which would cover it:
-                painter.setPen(self._pen)
-                painter.drawLine(rect.topLeft(), rect.topRight())
-        # The style's own item drawing frames the cell when it has focus. Each line
-        # has drawn its own hover:
-        frame = QtWidgets.QStyleOptionViewItem(option)
-        frame.state &= ~(
-            QtWidgets.QStyle.StateFlag.State_Selected
-            | QtWidgets.QStyle.StateFlag.State_MouseOver
+        background_option = QtWidgets.QStyleOptionViewItem(option)
+        self.initStyleOption(background_option, index)
+        background_option.features &= ~(
+            QtWidgets.QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
         )
+        background_option.checkState = QtCore.Qt.CheckState.Unchecked
+        width = style.pixelMetric(QtWidgets.QStyle.PixelMetric.PM_IndicatorWidth)
+        height = style.pixelMetric(QtWidgets.QStyle.PixelMetric.PM_IndicatorHeight)
+        check = QtWidgets.QStyleOptionButton()
+        check.rect = QtCore.QRect(
+            option.rect.center().x() - width // 2,
+            option.rect.center().y() - height // 2,
+            width,
+            height,
+        )
+        check.state = QtWidgets.QStyle.StateFlag.State_Enabled
+        checked = QtCore.Qt.CheckState(index.data(QtCore.Qt.ItemDataRole.CheckStateRole))
+        check.state |= (
+            QtWidgets.QStyle.StateFlag.State_On
+            if checked == QtCore.Qt.CheckState.Checked
+            else QtWidgets.QStyle.StateFlag.State_Off
+        )
+        painter.save()
         style.drawControl(
             QtWidgets.QStyle.ControlElement.CE_ItemViewItem,
-            frame,
+            background_option,
             painter,
             option.widget,
+        )
+        style.drawPrimitive(QtWidgets.QStyle.PrimitiveElement.PE_IndicatorCheckBox, check, painter)
+        if index.column() > 0:
+            painter.setPen(self._pen)
+            painter.drawLine(option.rect.topLeft(), option.rect.bottomLeft())
+        painter.restore()
+
+    def editorEvent(self, event, model, option, index):
+        if not index.flags() & QtCore.Qt.ItemFlag.ItemIsUserCheckable:
+            return False
+        mouse_events = (
+            QtCore.QEvent.Type.MouseButtonPress,
+            QtCore.QEvent.Type.MouseButtonRelease,
+            QtCore.QEvent.Type.MouseButtonDblClick,
+        )
+        if event.type() in mouse_events and event.button() == QtCore.Qt.MouseButton.LeftButton:
+            if event.modifiers() != QtCore.Qt.KeyboardModifier.NoModifier:
+                return False
+            if not option.rect.contains(event.position().toPoint()):
+                return False
+            if event.type() == QtCore.QEvent.Type.MouseButtonRelease:
+                checked = QtCore.Qt.CheckState(
+                    index.data(QtCore.Qt.ItemDataRole.CheckStateRole)
+                )
+                state = (
+                    QtCore.Qt.CheckState.Unchecked
+                    if checked == QtCore.Qt.CheckState.Checked
+                    else QtCore.Qt.CheckState.Checked
+                )
+                model.setData(index, state, QtCore.Qt.ItemDataRole.CheckStateRole)
+            return True
+        return super().editorEvent(event, model, option, index)
+
+
+class ExpressionDelegate(ItemDelegate):
+    def text_offset(self, option):
+        return QtGui.QFontMetrics(option.font).horizontalAdvance('default') + 14
+
+    def paint(self, painter, option, index):
+        label = index.data(GroupTab.GLOBALS_ROLE_EXPRESSION)
+        if label is None:
+            return super().paint(painter, option, index)
+        offset = self.text_offset(option)
+        background_option = QtWidgets.QStyleOptionViewItem(option)
+        background_option.text = ''
+        background_option.icon = QtGui.QIcon()
+        expression_option = QtWidgets.QStyleOptionViewItem(option)
+        expression_option.rect = option.rect.adjusted(offset, 0, 0, 0)
+        painter.save()
+        painter.setClipRect(option.rect)
+        option.widget.style().drawControl(
+            QtWidgets.QStyle.ControlElement.CE_ItemViewItem,
+            background_option,
+            painter,
+            option.widget,
+        )
+        QtWidgets.QStyledItemDelegate.paint(self, painter, expression_option, index)
+        color_role = (
+            QtGui.QPalette.ColorRole.HighlightedText
+            if option.state & QtWidgets.QStyle.StateFlag.State_Selected
+            else QtGui.QPalette.ColorRole.Text
+        )
+        label_palette = QtGui.QPalette(option.palette)
+        label_color = QtGui.QColor(label_palette.color(color_role))
+        label_color.setAlpha(180)
+        label_palette.setColor(color_role, label_color)
+        option.widget.style().drawItemText(
+            painter,
+            option.rect.adjusted(4, 0, -option.rect.width() + offset, 0),
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
+            label_palette,
+            bool(option.state & QtWidgets.QStyle.StateFlag.State_Enabled),
+            label,
+            color_role,
         )
         painter.setPen(self._pen)
         painter.drawLine(option.rect.topLeft(), option.rect.bottomLeft())
         painter.restore()
 
     def sizeHint(self, option, index):
-        if index.data(GroupTab.GLOBALS_ROLE_IS_DUMMY_ROW):
-            return super().sizeHint(option, index)
-        sizes = [size for _, _, size in self.line_sizes(option, index)]
-        return QtCore.QSize(
-            self.text_offset(option) + max(size.width() for size in sizes),
-            sum(size.height() for size in sizes),
-        )
-
-    def helpEvent(self, event, view, option, index):
-        for _, line_index, rect in self.line_rects(option, index):
-            if rect.contains(event.pos()):
-                return super().helpEvent(event, view, option, line_index)
-        return super().helpEvent(event, view, option, index)
-
-    def editorEvent(self, event, model, option, index):
-        press = QtCore.QEvent.Type.MouseButtonPress
-        if event.type() == press and not index.data(GroupTab.GLOBALS_ROLE_IS_DUMMY_ROW):
-            pos = event.position().toPoint()
-            lines = self.line_rects(option, index)
-            # The line a click edits, taken before a fold moves it:
-            self.pressed_line = next(
-                (label for label, _, rect in lines if rect.contains(pos)), None
-            )
-            if self.caret_rect(lines[0][2]).contains(pos):
-                self.pressed_line = None
-                plain = event.modifiers() == QtCore.Qt.KeyboardModifier.NoModifier
-                if event.button() == QtCore.Qt.MouseButton.LeftButton and plain:
-                    expanded = not index.data(GroupTab.GLOBALS_ROLE_EXPANDED)
-                    model.setData(index, expanded, GroupTab.GLOBALS_ROLE_EXPANDED)
-                    self.parent().resizeRowToContents(index.row())
-                    return True
-        return super().editorEvent(event, model, option, index)
-
-    def createEditor(self, parent, option, index):
-        editor = super().createEditor(parent, option, index)
-        # A click chooses the line; a key edits the expression in use:
-        editor.line = self.edit_line or self.active_label(index)
-        return editor
-
-    def setEditorData(self, editor, index):
-        # Qt reloads an open editor whenever its item changes, as a preparse's tint
-        # does. Once the user has typed, keep what they typed:
-        if not editor.document().isModified():
-            super().setEditorData(editor, self.line_index(index, editor.line))
-            # Setting the document margin marked it modified:
-            editor.document().setModified(False)
-
-    def setModelData(self, editor, model, index):
-        super().setModelData(editor, model, self.line_index(index, editor.line))
+        size = super().sizeHint(option, index)
+        return QtCore.QSize(size.width() + self.text_offset(option), size.height())
 
     def updateEditorGeometry(self, editor, option, index):
-        lines = self.line_rects(option, index)
-        _, line_index, rect = next(line for line in lines if line[0] == editor.line)
-        super().updateEditorGeometry(editor, self.text_option(option, rect), line_index)
+        expression_option = QtWidgets.QStyleOptionViewItem(option)
+        expression_option.rect = option.rect.adjusted(self.text_offset(option), 0, 0, 0)
+        super().updateEditorGeometry(editor, expression_option, index)
+
+    def setEditorData(self, editor, index):
+        if not editor.document().isModified():
+            super().setEditorData(editor, index)
+            editor.document().setModified(False)
 
 
 class GroupTab(object):
     GLOBALS_COL_SCAN_ENABLED = 0
     GLOBALS_COL_JIT_ENABLED = 1
     GLOBALS_COL_NAME = 2
-    GLOBALS_COL_DEFAULT = 3
-    GLOBALS_COL_SCAN = 4
-    GLOBALS_COL_UNITS = 5
-    GLOBALS_COL_EXPANSION = 6
+    GLOBALS_COL_VALUE = 3
+    GLOBALS_COL_UNITS = 4
+    GLOBALS_COL_EXPANSION = 5
 
     GLOBALS_ROLE_IS_DUMMY_ROW = QtCore.Qt.UserRole + 1
     GLOBALS_ROLE_SORT_DATA = QtCore.Qt.UserRole + 2
     GLOBALS_ROLE_PREVIOUS_TEXT = QtCore.Qt.UserRole + 3
     GLOBALS_ROLE_PREVIOUS_CHECKSTATE = QtCore.Qt.UserRole + 4
     GLOBALS_ROLE_IS_BOOL = QtCore.Qt.UserRole + 5
-    GLOBALS_ROLE_EXPANDED = QtCore.Qt.ItemDataRole.UserRole + 6
+    GLOBALS_ROLE_EXPRESSION = QtCore.Qt.UserRole + 6
 
     GLOBALS_DUMMY_ROW_TEXT = '<Click to add global>'
 
@@ -1059,7 +1004,7 @@ class GroupTab(object):
         self.tabWidget = tabWidget
 
         loader = UiLoader()
-        loader.registerCustomWidget(TableView)
+        loader.registerCustomWidget(GlobalsTreeView)
         self.ui = loader.load(os.path.join(runmanager_dir, 'group.ui'))
         self.ui.gridLayout.setColumnStretch(1, 1)
         self.tabWidget.addTab(self.ui, group_name, closable=True)
@@ -1067,29 +1012,33 @@ class GroupTab(object):
         self.color_error, self.color_active = expression_cell_colors()
         self.set_file_and_group_name(globals_file, group_name)
 
-        self.globals_model = AlternatingColorModel(view=self.ui.tableView_globals)
+        self.globals_model = AlternatingColorModel(view=self.ui.treeView_globals)
         self.globals_model.setHorizontalHeaderLabels(
-            ['Scan?', 'JIT?', 'Name', 'Value(s)', 'Scan', 'Units', 'Expansion']
+            ['Scan?', 'JIT?', 'Name', 'Value(s)', 'Units', 'Expansion']
         )
         self.globals_model.setSortRole(self.GLOBALS_ROLE_SORT_DATA)
-        self.ui.tableView_globals.setModel(self.globals_model)
-        self.ui.tableView_globals.setSelectionBehavior(QtWidgets.QTableView.SelectRows)
-        self.ui.tableView_globals.setSelectionMode(QtWidgets.QTableView.ExtendedSelection)
-        self.ui.tableView_globals.setSortingEnabled(True)
-        self.ui.tableView_globals.setEditTriggers(
-            QtWidgets.QTableView.AnyKeyPressed | QtWidgets.QTableView.EditKeyPressed
+        self.ui.treeView_globals.setModel(self.globals_model)
+        self.ui.treeView_globals.setTreePosition(self.GLOBALS_COL_VALUE)
+        self.ui.treeView_globals.setRootIsDecorated(True)
+        self.ui.treeView_globals.setItemsExpandable(True)
+        self.ui.treeView_globals.setSelectionBehavior(QtWidgets.QTreeView.SelectRows)
+        self.ui.treeView_globals.setSelectionMode(QtWidgets.QTreeView.ExtendedSelection)
+        self.ui.treeView_globals.setSortingEnabled(True)
+        self.ui.treeView_globals.setEditTriggers(
+            QtWidgets.QTreeView.AnyKeyPressed | QtWidgets.QTreeView.EditKeyPressed
         )
-        self.ui.tableView_globals.horizontalHeader().setStretchLastSection(False)
-        self.ui.tableView_globals.horizontalHeader().setSectionResizeMode(
-            self.GLOBALS_COL_DEFAULT, QtWidgets.QHeaderView.Stretch
+        self.ui.treeView_globals.header().setStretchLastSection(False)
+        self.ui.treeView_globals.header().setSectionResizeMode(
+            self.GLOBALS_COL_VALUE, QtWidgets.QHeaderView.Stretch
         )
-        # The Value(s) column shows the scan as well, so the Scan column only holds it:
-        self.value_delegate = ValueDelegate(self.ui.tableView_globals)
-        self.ui.tableView_globals.setItemDelegateForColumn(
-            self.GLOBALS_COL_DEFAULT, self.value_delegate
+        self.value_delegate = ExpressionDelegate(self.ui.treeView_globals)
+        self.ui.treeView_globals.setItemDelegateForColumn(
+            self.GLOBALS_COL_VALUE, self.value_delegate
         )
-        self.ui.tableView_globals.setColumnHidden(self.GLOBALS_COL_SCAN, True)
-        self.ui.tableView_globals.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.check_delegate = CenteredCheckDelegate(self.ui.treeView_globals)
+        for column in (self.GLOBALS_COL_SCAN_ENABLED, self.GLOBALS_COL_JIT_ENABLED):
+            self.ui.treeView_globals.setItemDelegateForColumn(column, self.check_delegate)
+        self.ui.treeView_globals.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.action_globals_delete_selected = QtWidgets.QAction(
             QtGui.QIcon(':qtutils/fugue/minus'), 'Delete selected global(s)', self.ui
         )
@@ -1105,24 +1054,25 @@ class GroupTab(object):
 
         self.populate_model()
         for col in range(self.globals_model.columnCount()):
-            if col not in (self.GLOBALS_COL_DEFAULT, self.GLOBALS_COL_SCAN):
-                self.ui.tableView_globals.resizeColumnToContents(col)
-        if self.ui.tableView_globals.columnWidth(self.GLOBALS_COL_NAME) < 200:
-            self.ui.tableView_globals.setColumnWidth(self.GLOBALS_COL_NAME, 200)
-        if self.ui.tableView_globals.columnWidth(self.GLOBALS_COL_DEFAULT) < 220:
-            self.ui.tableView_globals.setColumnWidth(self.GLOBALS_COL_DEFAULT, 220)
-        if self.ui.tableView_globals.columnWidth(self.GLOBALS_COL_UNITS) < 100:
-            self.ui.tableView_globals.setColumnWidth(self.GLOBALS_COL_UNITS, 100)
-        if self.ui.tableView_globals.columnWidth(self.GLOBALS_COL_EXPANSION) < 100:
-            self.ui.tableView_globals.setColumnWidth(self.GLOBALS_COL_EXPANSION, 100)
+            if col != self.GLOBALS_COL_VALUE:
+                self.ui.treeView_globals.resizeColumnToContents(col)
+        if self.ui.treeView_globals.columnWidth(self.GLOBALS_COL_NAME) < 200:
+            self.ui.treeView_globals.setColumnWidth(self.GLOBALS_COL_NAME, 200)
+        if self.ui.treeView_globals.columnWidth(self.GLOBALS_COL_VALUE) < 220:
+            self.ui.treeView_globals.setColumnWidth(self.GLOBALS_COL_VALUE, 220)
+        if self.ui.treeView_globals.columnWidth(self.GLOBALS_COL_UNITS) < 100:
+            self.ui.treeView_globals.setColumnWidth(self.GLOBALS_COL_UNITS, 100)
+        if self.ui.treeView_globals.columnWidth(self.GLOBALS_COL_EXPANSION) < 100:
+            self.ui.treeView_globals.setColumnWidth(self.GLOBALS_COL_EXPANSION, 100)
 
         self.tab_contains_errors = False
 
     def connect_signals(self):
-        self.ui.tableView_globals.leftClicked.connect(self.on_tableView_globals_leftClicked)
-        self.ui.tableView_globals.customContextMenuRequested.connect(
-            self.on_tableView_globals_context_menu_requested
+        self.ui.treeView_globals.leftClicked.connect(self.on_treeView_globals_leftClicked)
+        self.ui.treeView_globals.customContextMenuRequested.connect(
+            self.on_treeView_globals_context_menu_requested
         )
+        self.ui.treeView_globals.collapsed.connect(self.on_global_collapsed)
         self.action_globals_set_selected_true.triggered.connect(
             lambda: self.on_globals_set_selected_bools_triggered('True')
         )
@@ -1136,11 +1086,10 @@ class GroupTab(object):
         self.globals_model_item_changed_disconnected = DisconnectContextManager(
             self.globals_model.itemChanged, self.on_globals_model_item_changed
         )
-        self.globals_model.dataChanged.connect(self.on_globals_model_data_changed)
-        # Copy takes a Value(s) cell's expression in use, not always its Default:
+        # Copy takes the expression at the selected index.
         QtWidgets.QShortcut(
             QtGui.QKeySequence.StandardKey.Copy,
-            self.ui.tableView_globals,
+            self.ui.treeView_globals,
             self.on_globals_copy,
             context=QtCore.Qt.ShortcutContext.WidgetShortcut,
         )
@@ -1158,7 +1107,7 @@ class GroupTab(object):
         index = self.tabWidget.indexOf(self.ui)
         icon = QtGui.QIcon(icon_string) if icon_string is not None else QtGui.QIcon()
         if self.tabWidget.tabIcon(index).cacheKey() != icon.cacheKey():
-            logger.info('setting tab icon')
+            logger.debug('setting tab icon')
             self.tabWidget.setTabIcon(index, icon)
 
     def populate_model(self):
@@ -1202,11 +1151,6 @@ class GroupTab(object):
         dummy_default_item.setFlags(QtCore.Qt.NoItemFlags)
         dummy_default_item.setToolTip('Click to add global')
 
-        dummy_scan_item = QtGui.QStandardItem()
-        dummy_scan_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
-        dummy_scan_item.setFlags(QtCore.Qt.NoItemFlags)
-        dummy_scan_item.setToolTip('Click to add global')
-
         dummy_units_item = QtGui.QStandardItem()
         dummy_units_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
         dummy_units_item.setFlags(QtCore.Qt.NoItemFlags)
@@ -1223,12 +1167,11 @@ class GroupTab(object):
                 dummy_jit_enabled_item,
                 dummy_name_item,
                 dummy_default_item,
-                dummy_scan_item,
                 dummy_units_item,
                 dummy_expansion_item,
             ]
         )
-        self.ui.tableView_globals.sortByColumn(self.GLOBALS_COL_NAME, QtCore.Qt.AscendingOrder)
+        self.ui.treeView_globals.sortByColumn(self.GLOBALS_COL_NAME, QtCore.Qt.AscendingOrder)
 
     def make_global_row(
         self,
@@ -1251,6 +1194,7 @@ class GroupTab(object):
         default_item = QtGui.QStandardItem(default)
         default_item.setData(default, self.GLOBALS_ROLE_SORT_DATA)
         default_item.setData(str(default), self.GLOBALS_ROLE_PREVIOUS_TEXT)
+        default_item.setData('default', self.GLOBALS_ROLE_EXPRESSION)
         default_item.setFont(QtGui.QFont(GLOBAL_MONOSPACE_FONT))
         self.update_expression_item_metadata(default_item, 'Evaluating...')
 
@@ -1277,6 +1221,7 @@ class GroupTab(object):
         scan_item = QtGui.QStandardItem(scan)
         scan_item.setData(scan, self.GLOBALS_ROLE_SORT_DATA)
         scan_item.setData(scan, self.GLOBALS_ROLE_PREVIOUS_TEXT)
+        scan_item.setData('scan', self.GLOBALS_ROLE_EXPRESSION)
         scan_item.setFont(QtGui.QFont(GLOBAL_MONOSPACE_FONT))
         self.update_expression_item_metadata(scan_item, 'Used when Scan? is checked.')
 
@@ -1291,68 +1236,56 @@ class GroupTab(object):
         expansion_item.setData(expansion, self.GLOBALS_ROLE_PREVIOUS_TEXT)
         expansion_item.setToolTip('')
 
+        active_item, inactive_item = (
+            (scan_item, default_item) if scan_enabled else (default_item, scan_item)
+        )
+        child_row = [QtGui.QStandardItem() for _ in range(self.globals_model.columnCount())]
+        for column, child_item in enumerate(child_row):
+            if column == self.GLOBALS_COL_SCAN_ENABLED:
+                child_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable)
+            elif column != self.GLOBALS_COL_VALUE:
+                child_item.setFlags(QtCore.Qt.NoItemFlags)
+        child_row[self.GLOBALS_COL_VALUE] = inactive_item
+        scan_enabled_item.appendRow(child_row)
+
         return [
             scan_enabled_item,
             jit_enabled_item,
             name_item,
-            default_item,
-            scan_item,
+            active_item,
             units_item,
             expansion_item,
         ]
 
-    def on_tableView_globals_leftClicked(self, index):
+    def on_treeView_globals_leftClicked(self, index):
         if qapplication.keyboardModifiers() != QtCore.Qt.NoModifier:
             return
         item = self.globals_model.itemFromIndex(index)
-        name_index = index.sibling(index.row(), self.GLOBALS_COL_NAME)
+        parent_index = index.parent() if index.parent().isValid() else index
+        name_index = parent_index.siblingAtColumn(self.GLOBALS_COL_NAME)
         name_item = self.globals_model.itemFromIndex(name_index)
         global_name = name_item.text()
         if item.data(self.GLOBALS_ROLE_IS_DUMMY_ROW):
-            self.ui.tableView_globals.setCurrentIndex(name_index)
-            self.ui.tableView_globals.edit(name_index)
+            self.ui.treeView_globals.setCurrentIndex(name_index)
+            self.ui.treeView_globals.edit(name_index)
         elif item.column() == self.GLOBALS_COL_UNITS and item.data(self.GLOBALS_ROLE_IS_BOOL):
             active_item = self.get_active_value_item(global_name)
             active_item.setText('False' if item.checkState() == QtCore.Qt.Checked else 'True')
+        elif index.parent().isValid() and item.column() != self.GLOBALS_COL_VALUE:
+            return
         elif item.column() not in (self.GLOBALS_COL_SCAN_ENABLED, self.GLOBALS_COL_JIT_ENABLED):
-            line = None
-            if item.column() == self.GLOBALS_COL_DEFAULT:
-                line = self.value_delegate.pressed_line
-                if line is None:
-                    # The caret, which the delegate folds on the press:
-                    return
             if (
-                self.ui.tableView_globals.currentIndex() != index
-                or self.ui.tableView_globals.state() != QtWidgets.QTreeView.EditingState
+                self.ui.treeView_globals.currentIndex() != index
+                or self.ui.treeView_globals.state() != QtWidgets.QTreeView.EditingState
             ):
-                self.edit_cell(index, line)
+                self.edit_cell(index)
 
-    def edit_cell(self, index, line=None):
-        # line picks a Value(s) cell's line, and a folded one is unfolded to be edited:
-        if line is not None and line != self.value_delegate.active_label(index):
-            self.globals_model.setData(index, True, self.GLOBALS_ROLE_EXPANDED)
-        self.ui.tableView_globals.resizeRowToContents(index.row())
-        self.ui.tableView_globals.setCurrentIndex(index)
-        self.value_delegate.edit_line = line
-        self.ui.tableView_globals.edit(index)
-        self.value_delegate.edit_line = None
-
-    def on_globals_model_data_changed(self, top_left, bottom_right, roles=()):
-        # A Value(s) cell shows its row's scan and folds by Scan?, and Qt reloads
-        # its editor only when the Value(s) item itself changes:
-        if top_left.column() in (self.GLOBALS_COL_SCAN, self.GLOBALS_COL_SCAN_ENABLED):
-            self.ui.tableView_globals.viewport().update()
-            value_index = top_left.siblingAtColumn(self.GLOBALS_COL_DEFAULT)
-            editor = self.ui.tableView_globals.indexWidget(value_index)
-            if editor is not None:
-                self.value_delegate.setEditorData(editor, value_index)
+    def edit_cell(self, index):
+        self.ui.treeView_globals.setCurrentIndex(index)
+        self.ui.treeView_globals.edit(index)
 
     def on_globals_copy(self):
-        index = self.ui.tableView_globals.currentIndex()
-        if index.column() == self.GLOBALS_COL_DEFAULT:
-            index = self.value_delegate.line_index(
-                index, self.value_delegate.active_label(index)
-            )
+        index = self.ui.treeView_globals.currentIndex()
         text = index.data()
         if text is not None:
             QtWidgets.QApplication.clipboard().setText(str(text))
@@ -1360,16 +1293,17 @@ class GroupTab(object):
     def on_globals_model_item_changed(self, item):
         if item.column() == self.GLOBALS_COL_NAME:
             self.on_globals_model_name_changed(item)
-        elif item.column() == self.GLOBALS_COL_DEFAULT:
-            self.on_globals_model_default_changed(item)
+        elif item.column() == self.GLOBALS_COL_VALUE:
+            if item.data(self.GLOBALS_ROLE_EXPRESSION) == 'scan':
+                self.on_globals_model_scan_changed(item)
+            else:
+                self.on_globals_model_default_changed(item)
         elif item.column() == self.GLOBALS_COL_UNITS:
             self.on_globals_model_units_changed(item)
         elif item.column() == self.GLOBALS_COL_SCAN_ENABLED:
             self.on_globals_model_scan_enabled_changed(item)
         elif item.column() == self.GLOBALS_COL_JIT_ENABLED:
             self.on_globals_model_jit_enabled_changed(item)
-        elif item.column() == self.GLOBALS_COL_SCAN:
-            self.on_globals_model_scan_changed(item)
         elif item.column() == self.GLOBALS_COL_EXPANSION:
             self.on_globals_model_expansion_changed(item)
 
@@ -1387,8 +1321,9 @@ class GroupTab(object):
     def on_globals_model_default_changed(self, item):
         new_default = item.text()
         previous_default = item.data(self.GLOBALS_ROLE_PREVIOUS_TEXT)
+        parent_index = item.index().parent() if item.index().parent().isValid() else item.index()
         global_name = self.globals_model.itemFromIndex(
-            item.index().sibling(item.index().row(), self.GLOBALS_COL_NAME)
+            parent_index.siblingAtColumn(self.GLOBALS_COL_NAME)
         ).text()
         if new_default != previous_default:
             self.change_global_default(global_name, previous_default, new_default)
@@ -1423,8 +1358,9 @@ class GroupTab(object):
     def on_globals_model_scan_changed(self, item):
         new_scan = item.text()
         previous_scan = item.data(self.GLOBALS_ROLE_PREVIOUS_TEXT)
+        parent_index = item.index().parent() if item.index().parent().isValid() else item.index()
         global_name = self.globals_model.itemFromIndex(
-            item.index().sibling(item.index().row(), self.GLOBALS_COL_NAME)
+            parent_index.siblingAtColumn(self.GLOBALS_COL_NAME)
         ).text()
         if new_scan != previous_scan:
             self.change_global_scan(global_name, previous_scan, new_scan)
@@ -1466,29 +1402,39 @@ class GroupTab(object):
         if new_expansion != previous_expansion:
             self.change_global_expansion(global_name, previous_expansion, new_expansion)
 
-    def on_tableView_globals_context_menu_requested(self, point):
+    def on_treeView_globals_context_menu_requested(self, point):
         menu = QtWidgets.QMenu(self.ui)
         menu.addAction(self.action_globals_set_selected_true)
         menu.addAction(self.action_globals_set_selected_false)
         menu.addAction(self.action_globals_delete_selected)
         menu.exec(QtGui.QCursor.pos())
 
+    def selected_global_names(self):
+        names = []
+        for index in self.ui.treeView_globals.selectionModel().selectedRows():
+            parent_index = index.parent() if index.parent().isValid() else index
+            name_item = self.globals_model.itemFromIndex(
+                parent_index.siblingAtColumn(self.GLOBALS_COL_NAME)
+            )
+            if (
+                name_item is not None
+                and not name_item.data(self.GLOBALS_ROLE_IS_DUMMY_ROW)
+                and name_item.text() not in names
+            ):
+                names.append(name_item.text())
+        return names
+
     def on_globals_delete_selected_triggered(self):
-        selected_indexes = self.ui.tableView_globals.selectedIndexes()
-        selected_items = (self.globals_model.itemFromIndex(index) for index in selected_indexes)
-        name_items = [item for item in selected_items if item.column() == self.GLOBALS_COL_NAME]
-        confirm_multiple = len(name_items) > 1
-        if confirm_multiple and not question_dialog("Delete %d globals?" % len(name_items)):
+        names = self.selected_global_names()
+        confirm_multiple = len(names) > 1
+        if confirm_multiple and not question_dialog("Delete %d globals?" % len(names)):
             return
-        for item in name_items:
-            self.delete_global(item.text(), confirm=not confirm_multiple)
+        for name in names:
+            self.delete_global(name, confirm=not confirm_multiple)
 
     def on_globals_set_selected_bools_triggered(self, state):
-        selected_indexes = self.ui.tableView_globals.selectedIndexes()
-        selected_items = [self.globals_model.itemFromIndex(index) for index in selected_indexes]
-        name_items = [item for item in selected_items if item.column() == self.GLOBALS_COL_NAME]
-        for name_item in name_items:
-            self.get_active_value_item(name_item.text()).setText(state)
+        for name in self.selected_global_names():
+            self.get_active_value_item(name).setText(state)
 
     def close(self):
         self.tabWidget.removeTab(self.tabWidget.indexOf(self.ui))
@@ -1516,20 +1462,23 @@ class GroupTab(object):
             name_item.index().sibling(name_item.index().row(), column)
         )
 
+    def get_global_expression_item(self, global_name, expression, previous_name=None):
+        name_item = self.get_global_item_by_name(
+            global_name, self.GLOBALS_COL_NAME, previous_name=previous_name
+        )
+        parent_item = self.globals_model.item(name_item.row(), self.GLOBALS_COL_VALUE)
+        if parent_item.data(self.GLOBALS_ROLE_EXPRESSION) == expression:
+            return parent_item
+        return self.globals_model.item(name_item.row(), self.GLOBALS_COL_SCAN_ENABLED).child(
+            0, self.GLOBALS_COL_VALUE
+        )
+
     def ensure_editable_globals_file(self):
         self.globals_file = app.ensure_editable_globals_file(self.globals_file, parent=self.ui)
         return self.globals_file
 
     def get_active_value_item(self, global_name):
-        scan_enabled_item = self.get_global_item_by_name(
-            global_name, self.GLOBALS_COL_SCAN_ENABLED
-        )
-        target_column = (
-            self.GLOBALS_COL_SCAN
-            if scan_enabled_item.checkState() == QtCore.Qt.Checked
-            else self.GLOBALS_COL_DEFAULT
-        )
-        return self.get_global_item_by_name(global_name, target_column)
+        return self.get_global_item_by_name(global_name, self.GLOBALS_COL_VALUE)
 
     def _update_boolean_state(self, global_name):
         active_item = self.get_active_value_item(global_name)
@@ -1565,11 +1514,14 @@ class GroupTab(object):
         jit_enabled_item = self.get_global_item_by_name(
             global_name, self.GLOBALS_COL_JIT_ENABLED
         )
-        default_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_DEFAULT)
-        scan_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_SCAN)
+        default_item = self.get_global_expression_item(global_name, 'default')
+        scan_item = self.get_global_expression_item(global_name, 'scan')
         expansion_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_EXPANSION)
         scan_enabled = scan_enabled_item.checkState() == QtCore.Qt.Checked
         jit_enabled = jit_enabled_item.checkState() == QtCore.Qt.Checked
+        active_expression = 'scan' if scan_enabled else 'default'
+        if self.get_active_value_item(global_name).data(self.GLOBALS_ROLE_EXPRESSION) != active_expression:
+            self.swap_value_items(global_name)
         default_tooltip = 'Used for standard shots and when Scan? is unchecked.'
         scan_tooltip = (
             'Expression used when Scan? is checked.'
@@ -1612,16 +1564,41 @@ class GroupTab(object):
             self.update_expression_backgrounds(global_name)
         self.update_value_sort_data(global_name)
 
+    def swap_value_items(self, global_name):
+        view = self.ui.treeView_globals
+        parent = self.get_global_item_by_name(global_name, self.GLOBALS_COL_SCAN_ENABLED)
+        row = parent.row()
+        current_item = self.globals_model.itemFromIndex(view.currentIndex())
+        active = self.globals_model.item(row, self.GLOBALS_COL_VALUE)
+        inactive = parent.child(0, self.GLOBALS_COL_VALUE)
+
+        editor = view.indexWidget(view.currentIndex())
+        if editor is not None and current_item in (active, inactive):
+            self.value_delegate.commitData.emit(editor)
+            self.value_delegate.closeEditor.emit(editor)
+            parent = self.get_global_item_by_name(
+                global_name, self.GLOBALS_COL_SCAN_ENABLED
+            )
+            row = parent.row()
+        active = self.globals_model.takeItem(row, self.GLOBALS_COL_VALUE)
+        inactive = parent.takeChild(0, self.GLOBALS_COL_VALUE)
+
+        self.globals_model.setItem(row, self.GLOBALS_COL_VALUE, inactive)
+        parent.setChild(0, self.GLOBALS_COL_VALUE, active)
+
+        if current_item in (active, inactive) and not view.currentIndex().isValid():
+            view.setCurrentIndex(current_item.index())
+        if hidden_unicode_issues(active.text()):
+            view.expand(parent.index())
+
     def update_value_sort_data(self, global_name):
-        # The Value(s) column sorts by the expression in use:
-        default_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_DEFAULT)
         active_item = self.get_active_value_item(global_name)
         with self.globals_model_item_changed_disconnected:
-            default_item.setData(active_item.text(), self.GLOBALS_ROLE_SORT_DATA)
+            active_item.setData(active_item.text(), self.GLOBALS_ROLE_SORT_DATA)
 
     def update_expression_backgrounds(self, global_name, error=False):
-        default_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_DEFAULT)
-        scan_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_SCAN)
+        default_item = self.get_global_expression_item(global_name, 'default')
+        scan_item = self.get_global_expression_item(global_name, 'scan')
         active_item = self.get_active_value_item(global_name)
         inactive_item = default_item if active_item is scan_item else scan_item
         with self.globals_model_item_changed_disconnected:
@@ -1640,10 +1617,19 @@ class GroupTab(object):
             item.setIcon(QtGui.QIcon(':qtutils/fugue/exclamation-red'))
         elif not item.icon().isNull():
             item.setData(None, QtCore.Qt.DecorationRole)
+        if hidden_unicode_issues(item.text()) and item.index().parent().isValid():
+            self.ui.treeView_globals.expand(item.index().parent())
+
+    def on_global_collapsed(self, index):
+        parent = self.globals_model.itemFromIndex(index.siblingAtColumn(0))
+        if parent is not None:
+            inactive = parent.child(0, self.GLOBALS_COL_VALUE)
+            if inactive is not None and hidden_unicode_issues(inactive.text()):
+                self.ui.treeView_globals.expand(index)
 
     def do_model_sort(self):
-        header = self.ui.tableView_globals.horizontalHeader()
-        self.ui.tableView_globals.sortByColumn(
+        header = self.ui.treeView_globals.header()
+        self.ui.treeView_globals.sortByColumn(
             header.sortIndicatorSection(), header.sortIndicatorOrder()
         )
 
@@ -1663,11 +1649,11 @@ class GroupTab(object):
             self.update_scan_controls(global_name)
             self._update_boolean_state(global_name)
             self.do_model_sort()
-            default_item = self.get_global_item_by_name(
-                global_name, self.GLOBALS_COL_DEFAULT, previous_name=global_name
+            default_item = self.get_global_expression_item(
+                global_name, 'default', previous_name=global_name
             )
-            self.ui.tableView_globals.setCurrentIndex(default_item.index())
-            self.ui.tableView_globals.edit(default_item.index())
+            self.ui.treeView_globals.setCurrentIndex(default_item.index())
+            self.ui.treeView_globals.edit(default_item.index())
             self.globals_changed()
         finally:
             item.setText(self.GLOBALS_DUMMY_ROW_TEXT)
@@ -1697,14 +1683,16 @@ class GroupTab(object):
             self.do_model_sort()
             item.setToolTip(new_global_name)
             self.globals_changed()
-            default_item = self.get_global_item_by_name(new_global_name, self.GLOBALS_COL_DEFAULT)
+            default_item = self.get_global_expression_item(new_global_name, 'default')
             if (
                 not default_item.text()
-                and self.ui.tableView_globals.state() != QtWidgets.QAbstractItemView.EditingState
+                and self.ui.treeView_globals.state() != QtWidgets.QAbstractItemView.EditingState
             ):
-                self.edit_cell(default_item.index(), 'default')
+                if default_item.index().parent().isValid():
+                    self.ui.treeView_globals.expand(default_item.index().parent())
+                self.edit_cell(default_item.index())
             else:
-                scroll_view_to_row_if_current(self.ui.tableView_globals, item)
+                scroll_view_to_row_if_current(self.ui.treeView_globals, item)
 
     def change_global_default(self, global_name, previous_default, new_default, interactive=True):
         logger.info(
@@ -1715,7 +1703,7 @@ class GroupTab(object):
             previous_default,
             new_default,
         )
-        item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_DEFAULT)
+        item = self.get_global_expression_item(global_name, 'default')
         if not interactive:
             with self.globals_model_item_changed_disconnected:
                 item.setText(new_default)
@@ -1764,12 +1752,12 @@ class GroupTab(object):
             units_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_UNITS)
             if (
                 not units_item.text()
-                and self.ui.tableView_globals.state() != QtWidgets.QAbstractItemView.EditingState
+                and self.ui.treeView_globals.state() != QtWidgets.QAbstractItemView.EditingState
             ):
-                self.ui.tableView_globals.setCurrentIndex(units_item.index())
-                self.ui.tableView_globals.edit(units_item.index())
+                self.ui.treeView_globals.setCurrentIndex(units_item.index())
+                self.ui.treeView_globals.edit(units_item.index())
             else:
-                scroll_view_to_row_if_current(self.ui.tableView_globals, item)
+                scroll_view_to_row_if_current(self.ui.treeView_globals, item)
 
     def change_global_units(self, global_name, previous_units, new_units):
         logger.info(
@@ -1791,7 +1779,7 @@ class GroupTab(object):
             item.setData(new_units, self.GLOBALS_ROLE_PREVIOUS_TEXT)
             item.setData(new_units, self.GLOBALS_ROLE_SORT_DATA)
             self.do_model_sort()
-            scroll_view_to_row_if_current(self.ui.tableView_globals, item)
+            scroll_view_to_row_if_current(self.ui.treeView_globals, item)
 
     def change_global_scan_enabled(self, global_name, previous_state, new_state, interactive=True):
         logger.info(
@@ -1843,21 +1831,16 @@ class GroupTab(object):
             self.globals_changed()
             if not interactive:
                 return
-            focus_item = self.get_active_value_item(global_name)
+            active_item = self.get_active_value_item(global_name)
             if (
                 new_state
-                and not focus_item.text()
-                and self.ui.tableView_globals.state() != QtWidgets.QAbstractItemView.EditingState
+                and not active_item.text()
+                and self.ui.treeView_globals.state()
+                != QtWidgets.QAbstractItemView.EditingState
             ):
-                # The scan is typed on the Value(s) cell's scan line, with the
-                # default in view above it:
-                value_item = self.get_global_item_by_name(
-                    global_name, self.GLOBALS_COL_DEFAULT
-                )
-                value_item.setData(True, self.GLOBALS_ROLE_EXPANDED)
-                self.edit_cell(value_item.index(), 'scan')
+                self.edit_cell(active_item.index())
             else:
-                scroll_view_to_row_if_current(self.ui.tableView_globals, item)
+                scroll_view_to_row_if_current(self.ui.treeView_globals, item)
 
     def change_global_jit_enabled(self, global_name, previous_state, new_state, interactive=True):
         logger.info(
@@ -1899,7 +1882,7 @@ class GroupTab(object):
             self.globals_changed()
             if not interactive:
                 return
-            scroll_view_to_row_if_current(self.ui.tableView_globals, item)
+            scroll_view_to_row_if_current(self.ui.treeView_globals, item)
 
     def change_global_scan(self, global_name, previous_scan, new_scan, interactive=True):
         logger.info(
@@ -1910,7 +1893,7 @@ class GroupTab(object):
             previous_scan,
             new_scan,
         )
-        item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_SCAN)
+        item = self.get_global_expression_item(global_name, 'scan')
         if not interactive:
             with self.globals_model_item_changed_disconnected:
                 item.setText(new_scan)
@@ -1933,9 +1916,7 @@ class GroupTab(object):
             self.globals_changed()
             if not interactive:
                 return
-            # The Scan column is hidden, and a view scrolls only to what it shows:
-            value_item = self.globals_model.item(item.row(), self.GLOBALS_COL_DEFAULT)
-            scroll_view_to_row_if_current(self.ui.tableView_globals, value_item)
+            scroll_view_to_row_if_current(self.ui.treeView_globals, item)
 
     def change_global_expansion(self, global_name, previous_expansion, new_expansion):
         logger.info(
@@ -1960,7 +1941,7 @@ class GroupTab(object):
             item.setData(new_expansion, self.GLOBALS_ROLE_SORT_DATA)
             self.do_model_sort()
             self.globals_changed()
-            scroll_view_to_row_if_current(self.ui.tableView_globals, item)
+            scroll_view_to_row_if_current(self.ui.treeView_globals, item)
 
     def globals_changed(self):
         app.globals_changed()
@@ -1983,11 +1964,11 @@ class GroupTab(object):
                 name_item = self.globals_model.item(i, self.GLOBALS_COL_NAME)
                 if name_item.data(self.GLOBALS_ROLE_IS_DUMMY_ROW):
                     continue
-                default_item = self.globals_model.item(i, self.GLOBALS_COL_DEFAULT)
                 scan_enabled_item = self.globals_model.item(i, self.GLOBALS_COL_SCAN_ENABLED)
-                scan_item = self.globals_model.item(i, self.GLOBALS_COL_SCAN)
                 expansion_item = self.globals_model.item(i, self.GLOBALS_COL_EXPANSION)
                 global_name = name_item.text()
+                default_item = self.get_global_expression_item(global_name, 'default')
+                scan_item = self.get_global_expression_item(global_name, 'scan')
                 value = evaled_globals[self.group_name][global_name]
                 active_item = (
                     scan_item
@@ -2025,10 +2006,11 @@ class GroupTab(object):
         else:
             self.set_tab_icon(None)
             for row in range(self.globals_model.rowCount()):
-                default_item = self.globals_model.item(row, self.GLOBALS_COL_DEFAULT)
-                if default_item.data(self.GLOBALS_ROLE_IS_DUMMY_ROW):
+                name_item = self.globals_model.item(row, self.GLOBALS_COL_NAME)
+                if name_item.data(self.GLOBALS_ROLE_IS_DUMMY_ROW):
                     continue
-                scan_item = self.globals_model.item(row, self.GLOBALS_COL_SCAN)
+                default_item = self.get_global_expression_item(name_item.text(), 'default')
+                scan_item = self.get_global_expression_item(name_item.text(), 'scan')
                 for item in (default_item, scan_item):
                     self.update_expression_item_metadata(item, 'Group inactive')
                 self.update_expression_backgrounds(
@@ -2104,8 +2086,8 @@ class RunManager(LabscriptApplication):
         self.output_popout_button.setIcon(QtGui.QIcon(':/qtutils/fugue/arrow-out'))
         self.output_popout_button.setToolTip('Toggle whether the output box is in a separate window')
         self.ui.tabWidget.tabBar().setTabButton(output_tab_index, QtWidgets.QTabBar.RightSide, self.output_popout_button)
-        # Fix the first three tabs in place:
-        for index in range(3):
+        # Fix the first four tabs in place:
+        for index in range(4):
             self.ui.tabWidget.tabBar().setMovable(False, index=index)
         # Whether or not the output box is currently popped out:
         self.output_box_is_popped_out = False
@@ -2342,36 +2324,17 @@ class RunManager(LabscriptApplication):
         self.on_groups_model_active_changed_recursion_depth = 0
 
     def setup_queue_tab(self):
-        self.tab_queue = QtWidgets.QWidget(self.ui.tabWidget)
-        self.tab_queue.setObjectName('tab_queue')
-        self.tab_queue.setSizePolicy(
-            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
-        )
-        self.verticalLayout_queue_tab = QtWidgets.QVBoxLayout(self.tab_queue)
-        self.verticalLayout_queue_tab.setObjectName('verticalLayout_queue_tab')
-        controls_layout = QtWidgets.QHBoxLayout()
-        controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.addWidget(QtWidgets.QLabel('Compile mode', self.tab_queue))
-        self.queue_compile_mode_combo = QtWidgets.QComboBox(self.tab_queue)
+        self.tab_queue = self.ui.tab_queue
+        self.verticalLayout_queue_tab = self.ui.verticalLayout_queue_tab
+        self.queue_compile_mode_combo = self.ui.queue_compile_mode_combo
         self.queue_compile_mode_combo.addItem('Eager compile', COMPILE_MODE_EAGER)
         self.queue_compile_mode_combo.addItem('Lazy compile', COMPILE_MODE_LAZY)
-        controls_layout.addWidget(self.queue_compile_mode_combo)
-        controls_layout.addWidget(QtWidgets.QLabel('When queue is empty', self.tab_queue))
-        self.queue_empty_policy_combo = QtWidgets.QComboBox(self.tab_queue)
+        self.queue_empty_policy_combo = self.ui.queue_empty_policy_combo
         self.queue_empty_policy_combo.addItem('Send nothing', EMPTY_QUEUE_NOTHING)
         self.queue_empty_policy_combo.addItem(
             'Send default shot', EMPTY_QUEUE_DEFAULT_LABSCRIPT
         )
-        controls_layout.addWidget(self.queue_empty_policy_combo)
-        # A button rather than a checkbox, matching BLACS's Request shots: the
-        # two are the pair of controls that decide whether shots run, they are
-        # read from across the room, and a filled button says which way it is
-        # set at a glance. The icon follows the state Qt is in, as that one's
-        # does -- running when the queue is offering work, paused when it is
-        # not.
-        self.queue_pause_button = QtWidgets.QPushButton('Pause queue', self.tab_queue)
-        self.queue_pause_button.setCheckable(True)
-        self.queue_pause_button.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        self.queue_pause_button = self.ui.queue_pause_button
         pause_icon = QtGui.QIcon()
         pause_icon.addPixmap(
             QtGui.QPixmap(':/qtutils/fugue/control.png'),
@@ -2384,34 +2347,12 @@ class RunManager(LabscriptApplication):
             QtGui.QIcon.State.On,
         )
         self.queue_pause_button.setIcon(pause_icon)
-        self.queue_pause_button.setToolTip(
-            'Stop this runmanager offering shots to BLACS, including the '
-            'default shot.\n'
-            'This does not stop BLACS: the shot it is running finishes '
-            'normally, and it goes on\nrunning its local override shot while '
-            'the queue is paused. The queue is left as it\nis, so resuming '
-            'offers the same shot at its head.'
-        )
-        controls_layout.addWidget(self.queue_pause_button)
-        # What BLACS is doing sits next to the control that decides whether it
-        # is offered anything, because the two are read together: a paused
-        # queue and a BLACS running its own override shot is a different
-        # situation from a paused queue and a BLACS that has stopped.
-        self.queue_blacs_activity_label = QtWidgets.QLabel(self.tab_queue)
-        self.queue_blacs_activity_label.setTextInteractionFlags(
-            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        controls_layout.addWidget(self.queue_blacs_activity_label)
-        controls_layout.addStretch(1)
+        self.queue_blacs_activity_label = self.ui.queue_blacs_activity_label
         self.queue_widget = RunmanagerQueueWidget(self.tab_queue)
         self.queue_widget.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
         )
-        self.verticalLayout_queue_tab.addLayout(controls_layout)
         self.verticalLayout_queue_tab.addWidget(self.queue_widget)
-        self.ui.tabWidget.insertTab(0, self.tab_queue, 'Queue')
-        queue_tab_index = self.ui.tabWidget.indexOf(self.tab_queue)
-        self.ui.tabWidget.tabBar().setMovable(False, index=queue_tab_index)
         self.ui.tabWidget.setCurrentWidget(self.tab_queue)
         self.refresh_queue_tab()
 
