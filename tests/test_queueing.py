@@ -3179,10 +3179,10 @@ class AlternateSubmissionMenuTests(unittest.TestCase):
 class EngageGuardTests(unittest.TestCase):
     """What Engage refuses before it compiles anything.
 
-    Its warnings are about the window: which destinations are ticked, and
-    whether the mode the operator picked from the menu can be used with them.
-    Anything about the queue is settled where the queue is read, because the
-    queue moves on its own between the two.
+    Its one warning is about the window: whether the mode the operator picked
+    from the menu can be used with the destinations ticked. Anything about the
+    queue is settled where the queue is read, because the queue moves on its
+    own between the two.
     """
 
     def test_a_mode_that_has_somewhere_to_send_its_shots_is_engaged(self):
@@ -3222,14 +3222,6 @@ class EngageGuardTests(unittest.TestCase):
             window.submitted, [main_module.SUBMISSION_MODE_NEW_FOLDER]
         )
         self.assertEqual(window.output_box.lines, [])
-
-    def test_engaging_with_nowhere_to_send_the_shots_is_refused(self):
-        window = EngageWindow(run_shots=False, view_shots=False)
-
-        window.on_engage_clicked()
-
-        self.assertEqual(window.submitted, [])
-        self.assertTrue(window.output_box.said('neither'))
 
 
 class MissingSequenceReportTests(unittest.TestCase):

@@ -2850,12 +2850,6 @@ class RunManager(LabscriptApplication):
         try:
             send_to_BLACS = self.ui.checkBox_run_shots.isChecked()
             send_to_runviewer = self.ui.checkBox_view_shots.isChecked()
-            if not send_to_BLACS and not send_to_runviewer:
-                self.output_box.output(
-                    "Warning: neither 'BLACS' nor 'View shot(s)' is selected.\n\n",
-                    red=True,
-                )
-                return
             mode = SUBMISSION_MODES[submission_mode]
             if (mode.anchor_sources or mode.clears_queue) and not send_to_BLACS:
                 # A mode that reads the queue for a sequence to join, or

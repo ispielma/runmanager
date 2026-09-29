@@ -170,6 +170,7 @@ class SubmittingApp(object):
     compile_and_queue_shots = RunManager.compile_and_queue_shots
     reindex_run_file_infos = RunManager.reindex_run_file_infos
     make_h5_files = RunManager.make_h5_files
+    prepare_queue_shot = RunManager.prepare_queue_shot
     on_abort_clicked = RunManager.on_abort_clicked
     on_engage_clicked = RunManager.on_engage_clicked
     expand_pending_shots = RunManager.expand_pending_shots
@@ -210,11 +211,14 @@ class SubmittingApp(object):
         # records of each batch that reached the queue.
         self.destinations = []
         self.batches = []
+        # The files compiled, and the files sent to runviewer:
+        self.compiled = []
+        self.sent_to_runviewer = []
         self.sequences = {}
         self.queue_manager = QueueManager(
-            lambda item: None,
+            self.prepare_queue_shot,
             self.compile_run_file,
-            lambda path: None,
+            self.sent_to_runviewer.append,
             lambda *args, **kwargs: None,
         )
         submit_batch = self.queue_manager.compile_shots
@@ -228,6 +232,7 @@ class SubmittingApp(object):
 
     def compile_run_file(self, labscript_file, path):
         self.compiling.wait()
+        self.compiled.append(path)
         return True
 
     def get_active_groups(self, interactive=True):
@@ -1165,6 +1170,37 @@ class ShuffledEngageTests(RemoteCommandTestCase):
             [('3', '3'), ('2', '2'), ('1', '1')],
             'each file is named for the globals that are compiled into it',
         )
+
+
+class CompileOnlyEngageTests(RemoteCommandTestCase):
+    """Engage with neither destination ticked compiles the batch and leaves it alone."""
+
+    def make_app(self):
+        return SubmittingApp(self.directory)
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        super().setUp()
+        runmanager.new_global(self.app.globals_file, 'group', 'x')
+        runmanager.set_scan(self.app.globals_file, 'group', 'x', '[1, 2]')
+        runmanager.set_scan_enabled(self.app.globals_file, 'group', 'x', True)
+        runmanager.set_expansion(self.app.globals_file, 'group', 'x', 'outer')
+        self.app.ui.checkBox_run_shots.isChecked = lambda: False
+
+    def test_the_shots_are_compiled_and_go_nowhere(self):
+        self.app.compiling.set()
+        self.app.wait_until_preparse_complete()
+
+        self.app.on_engage_clicked()
+        # The worker compiles the whole batch before it closes:
+        self.app.queue_manager.shutdown()
+
+        self.assertEqual(self.app.said, [])
+        self.assertEqual(len(self.app.compiled), 2)
+        self.assertTrue(all(os.path.isfile(path) for path in self.app.compiled))
+        self.assertEqual(self.app.queue_manager.get_queue_paths(), [])
+        self.assertEqual(self.app.sent_to_runviewer, [])
 
 
 class DestinationTests(RemoteCommandTestCase):
