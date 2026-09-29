@@ -5360,7 +5360,7 @@ class RunmanagerServer(ZMQServer):
                 )
 
     @inmain_decorator()
-    def _set_expression_field_values(self, field, changer_name, globals, raw=False):
+    def _set_expression_field_values(self, field, changer, globals, raw=False):
         _, _, locations = self._get_active_global_locations(globals)
         self._check_before_writing(locations, globals, raw)
         try:
@@ -5379,14 +5379,14 @@ class RunmanagerServer(ZMQServer):
                         globals_file, group_name, global_name, field, new_value
                     )
                 else:
-                    getattr(group_tab, changer_name)(
-                        global_name, previous_value, new_value, interactive=False
+                    changer(
+                        group_tab, global_name, previous_value, new_value, interactive=False
                     )
         finally:
             app.globals_changed()
 
     @inmain_decorator()
-    def _set_boolean_field_values(self, field, changer_name, globals):
+    def _set_boolean_field_values(self, field, changer, globals):
         globals = {
             name: self._coerce_remote_boolean(value, 'global %s' % name)
             for name, value in globals.items()
@@ -5406,8 +5406,8 @@ class RunmanagerServer(ZMQServer):
                         globals_file, group_name, global_name, field, new_value
                     )
                 else:
-                    getattr(group_tab, changer_name)(
-                        global_name, previous_value, new_value, interactive=False
+                    changer(
+                        group_tab, global_name, previous_value, new_value, interactive=False
                     )
         finally:
             app.globals_changed()
@@ -5430,22 +5430,22 @@ class RunmanagerServer(ZMQServer):
 
     def handle_set_values(self, globals, raw=False):
         return self._set_expression_field_values(
-            'default', 'change_global_default', globals, raw=raw
+            'default', GroupTab.change_global_default, globals, raw=raw
         )
 
     def handle_set_scans(self, globals, raw=False):
         return self._set_expression_field_values(
-            'scan', 'change_global_scan', globals, raw=raw
+            'scan', GroupTab.change_global_scan, globals, raw=raw
         )
 
     def handle_set_scan_enabled(self, globals):
         return self._set_boolean_field_values(
-            'scan_enabled', 'change_global_scan_enabled', globals
+            'scan_enabled', GroupTab.change_global_scan_enabled, globals
         )
 
     def handle_set_jit_enabled(self, globals):
         return self._set_boolean_field_values(
-            'jit_enabled', 'change_global_jit_enabled', globals
+            'jit_enabled', GroupTab.change_global_jit_enabled, globals
         )
 
     def handle_engage(self):
