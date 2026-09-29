@@ -1,11 +1,12 @@
 #####################################################################
 #                                                                   #
-# analysis_submission.py                                            #
+# /runmanager/analysis_submission.py                                #
 #                                                                   #
-# Copyright 2026, Monash University                                 #
+# Copyright 2026, JQI                                               #
+# Author: Ian Spielman                                              #
 #                                                                   #
-# This file is part of the program runmanager, in the labscript     #
-# suite (see http://labscriptsuite.org), and is licensed under the  #
+# This file is part of runmanager, in the labscript suite           #
+# (see http://labscriptsuite.org), and is licensed under the        #
 # Simplified BSD License. See the license.txt file in the root of   #
 # the project for the full license.                                 #
 #                                                                   #
