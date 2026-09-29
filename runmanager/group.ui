@@ -115,7 +115,7 @@
     </layout>
    </item>
    <item>
-    <widget class="TableView" name="tableView_globals">
+    <widget class="GlobalsTreeView" name="treeView_globals">
      <property name="styleSheet">
       <string notr="true"/>
      </property>
@@ -128,8 +128,8 @@
  </widget>
  <customwidgets>
   <customwidget>
-   <class>TableView</class>
-   <extends>QTableView</extends>
+   <class>GlobalsTreeView</class>
+   <extends>QTreeView</extends>
    <header>qtutils/widgets.h</header>
   </customwidget>
  </customwidgets>
