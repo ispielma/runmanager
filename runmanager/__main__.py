@@ -72,7 +72,7 @@ from labscript_utils.setup_logging import setup_logging
 import labscript_utils.shared_drive as shared_drive
 from labscript_utils import dedent
 from runviewer.client import RunviewerClient
-from zprocess import raise_exception_in_thread
+from zprocess import Interruptor, raise_exception_in_thread
 import runmanager
 from runmanager.client import (
     DEFAULT_PORT,
@@ -2126,6 +2126,10 @@ class RunManager(LabscriptApplication):
             os.path.join(runmanager_dir, 'batch_compiler.py'),
             output_redirection_port=self.output_box.port,
         )
+        # Set while the subprocess can be sent work. Restarting it clears this
+        # until the new one is up, so no compile is sent to the one quitting.
+        self.child_ready = threading.Event()
+        self.child_ready.set()
 
         self.runviewer = RunviewerClient(host='localhost', timeout=0.5)
         self.queue_controller = QueueController()
@@ -2447,6 +2451,7 @@ class RunManager(LabscriptApplication):
         )
         self.queue_pause_button.toggled.connect(self.queue_manager.set_paused)
         self.queue_widget.deleteRowsRequested.connect(self.queue_manager.delete_rows)
+        self.queue_widget.retryCompileRequested.connect(self.queue_manager.retry_compile)
         
         # Keyboard shortcuts:
         engage_shortcut = QtWidgets.QShortcut('F5', self.ui,
@@ -3040,13 +3045,22 @@ class RunManager(LabscriptApplication):
         """Empty the queue, as the replacement modes' Clear does.
 
         Every waiting row goes, and a row still compiling has its file deleted
-        once its compile finishes. A shot BLACS has is kept."""
+        once its compile finishes. A shot BLACS has is kept. A batch being
+        compiled for runviewer alone stops after the shot it is on."""
+        self.queue_manager.stop_compile_shots()
         self.queue_manager.clear()
 
     def on_restart_subprocess_clicked(self):
         # Kill and restart the compilation subprocess
+        self.ui.pushButton_restart_subprocess.setEnabled(False)
+        # Cleared before the fake reply, which frees a compile waiting on the
+        # old child to go on to the next shot. That shot must wait for the new
+        # child rather than be sent to this one.
+        self.child_ready.clear()
         self.to_child.put(['quit', None])
-        self.from_child.put(['done', False])
+        # Its own Interruptor: on the queue's, put() waits for a subscription
+        # that zmq never reports while the compile's get() holds the same one.
+        self.from_child.put(['done', False], interruptor=Interruptor())
         time.sleep(0.1)
         self.output_box.output('Asking subprocess to quit...')
         timeout_time = time.time() + 2
@@ -3072,12 +3086,24 @@ class RunManager(LabscriptApplication):
         else:
             self.output_box.output('done.\n')
         self.output_box.output('Spawning new compiler subprocess...')
-        self.to_child, self.from_child, self.child = process_tree.subprocess(
-            os.path.join(runmanager_dir, 'batch_compiler.py'),
-            output_redirection_port=self.output_box.port,
-        )
-        self.output_box.output('done.\n')
-        self.output_box.output('Ready.\n\n')
+        try:
+            self.to_child, self.from_child, self.child = process_tree.subprocess(
+                os.path.join(runmanager_dir, 'batch_compiler.py'),
+                output_redirection_port=self.output_box.port,
+            )
+            self.child_ready.set()
+            self.output_box.output('done.\n')
+            self.output_box.output('Ready.\n\n')
+        except Exception as e:
+            logger.exception('Could not spawn the compiler subprocess')
+            # Compiles stay held, rather than going to a child that has gone,
+            # until a restart gets a new one up:
+            self.output_box.output(
+                f'failed: {e}\nCompiling waits until Restart subprocess succeeds.\n\n',
+                red=True,
+            )
+        finally:
+            self.ui.pushButton_restart_subprocess.setEnabled(True)
 
     def on_tabCloseRequested(self, index):
         tab_page = self.ui.tabWidget.widget(index)
@@ -4509,9 +4535,7 @@ class RunManager(LabscriptApplication):
             if at_startup and restored_queue_state['n_items']:
                 # Restored rows that were not compiled yet are compiled ahead,
                 # as they would have been after an Engage:
-                self.queue_manager.compile_ahead(
-                    self.ui.checkBox_view_shots.isChecked()
-                )
+                self.queue_manager.compile_ahead()
             self.ui.lineEdit_default_labscript_file.setText(
                 restored_queue_state['default_labscript_file']
             )
@@ -4540,6 +4564,7 @@ class RunManager(LabscriptApplication):
 
     def compile_run_file(self, labscript_file, run_file):
         with self.compiler_lock:
+            self.child_ready.wait()
             self.to_child.put(['compile', [labscript_file, run_file]])
             signal, success = self.from_child.get()
         assert signal == 'done'
@@ -5031,10 +5056,9 @@ class RunManager(LabscriptApplication):
                 'sequence_attrs': sequence_attrs,
                 'run_no': default_index,
                 'n_runs': default_index + 1,
+                'send_to_runviewer': send_to_runviewer,
             }
-            if not self.queue_manager.compile_shot(
-                shot, send_to_runviewer, default_globals=True
-            ):
+            if not self.queue_manager.compile_shot(shot, default_globals=True):
                 raise RuntimeError(
                     'Compilation failed for %s' % os.path.basename(run_file)
                 )
@@ -5173,9 +5197,7 @@ class RunManager(LabscriptApplication):
             # stops waiting. BLACS asks again shortly, and the queue is not
             # empty meanwhile, so the empty-queue policy does not step in ahead
             # of it:
-            if self.queue_manager.compile_next_in_background(
-                lambda: inmain(self.ui.checkBox_view_shots.isChecked)
-            ):
+            if self.queue_manager.compile_next_in_background():
                 # Pending rather than none, so that BLACS can wait for this shot
                 # instead of running its local override in the gap:
                 return dict(no_shot, state=PROVIDER_PENDING)

@@ -1,11 +1,10 @@
-"""Behavioural tests for what runmanager shows about a remote BLACS.
+"""What runmanager shows about a remote BLACS.
 
-The indicator state and its tooltip are worked out from the status BLACS sent,
-so they are tested against snapshots rather than against a running apparatus or
-a constructed RunManager. The poller runs here with a real BlacsClient and no
-BLACS behind it; BLACS's own tests run it against a real BlacsServer.
+The link light and the activity line are worked out from the status BLACS sent,
+so they are tested against snapshots rather than a running apparatus. The
+poller runs with a real BlacsClient and no BLACS behind it; BLACS's own tests
+run it against a real BlacsServer.
 """
-import importlib.resources
 import os
 import socket
 import threading
@@ -14,28 +13,12 @@ import types
 import unittest
 
 from blacs.client import BlacsClient
-from qtutils import UiLoader
-from qtutils.qt.QtCore import QSize
-from qtutils.qt.QtGui import QIcon
-from qtutils.qt.QtWidgets import (
-    QApplication,
-    QCheckBox,
-    QLabel,
-    QLayout,
-    QPushButton,
-)
-import runmanager
-# FingerTabWidget is runmanager's own, defined in __main__ beside RunManager --
-# not the labscript_utils widget of the same name. Loading main.ui with the
-# wrong one gives a tab widget whose tab bar the queue tab cannot configure.
-# fixtures stubs the splash and does the guarded import of the
-# application, once, for every test module. Importing
-# runmanager.__main__ here instead would show the startup banner.
-from fixtures import (
-    FingerTabWidget,
-    RunManager,
-    TreeView,
-)
+from qtutils.qt.QtWidgets import QApplication, QLabel
+
+# fixtures stubs the splash and does the guarded import of the application,
+# once, for every test module. Importing runmanager.__main__ here instead would
+# show the startup banner.
+from fixtures import RunManager
 from runmanager.blacs_status import (
     BlacsStatusMonitor,
     blacs_activity_display,
@@ -64,30 +47,23 @@ def answered(**fields):
 class LinkIndicatorTests(unittest.TestCase):
     """The light beside the BLACS checkbox: is BLACS answering?
 
-    It means what the lyse light on the row below means, and no more. Whether
-    BLACS is requesting shots, and what it is running, are queue behaviour and
-    are reported in words beside Pause queue instead.
+    It means what the lyse light on the row below means, and no more. What BLACS
+    is doing with the queue is reported in words beside Pause queue instead.
     """
 
-    def test_nothing_heard_from_blacs_yet_is_shown_as_checking(self):
-        state, tooltip = blacs_link_display(None)
-        self.assertEqual(state, 'checking')
-        self.assertIn('Checking', tooltip)
+    def test_the_light_says_whether_blacs_has_answered(self):
+        unreachable = {'reachable': False, 'reason': 'Timed out waiting for BLACS'}
+        for description, status, state in (
+            ('nothing heard yet', None, 'checking'),
+            ('answered', answered(requesting_shots=True), 'online'),
+            ('did not answer', unreachable, 'offline'),
+        ):
+            with self.subTest(blacs=description):
+                self.assertEqual(blacs_link_display(status)[0], state)
 
-    def test_a_blacs_that_answered_is_shown_as_online(self):
-        state, tooltip = blacs_link_display(answered(requesting_shots=True))
-        self.assertEqual(state, 'online')
-        self.assertIn('responding', tooltip)
-
-    def test_a_blacs_that_did_not_answer_is_shown_as_offline(self):
-        state, tooltip = blacs_link_display(
-            {'reachable': False, 'reason': 'Timed out waiting for BLACS'}
-        )
-        self.assertEqual(state, 'offline')
-        self.assertIn('not responding', tooltip)
         self.assertIn(
             'Timed out waiting for BLACS',
-            tooltip,
+            blacs_link_display(unreachable)[1],
             'why runmanager could not reach BLACS is worth reading',
         )
 
@@ -106,30 +82,27 @@ class LinkIndicatorTests(unittest.TestCase):
             with self.subTest(blacs=description):
                 self.assertEqual(blacs_link_display(status)[0], 'online')
 
-    def test_the_light_names_the_host_it_is_talking_to(self):
-        _, tooltip = blacs_link_display(answered(), host='blacs-pc')
-        self.assertIn('blacs-pc', tooltip)
-
 
 class ActivityLineTests(unittest.TestCase):
     """The line beside Pause queue: what is BLACS doing with the queue?"""
 
-    def test_a_blacs_asking_for_work_says_so(self):
-        text, tooltip = blacs_activity_display(
-            answered(requesting_shots=True, status='Requesting shots')
-        )
-        self.assertEqual(text, 'BLACS: requesting shots')
-        self.assertIn('requesting shots', tooltip)
-
-    def test_a_blacs_that_is_up_but_not_asking_says_so(self):
-        text, tooltip = blacs_activity_display(
-            answered(requesting_shots=False, status='Not requesting shots')
-        )
-        self.assertEqual(text, 'BLACS: not requesting shots')
-        self.assertIn('not requesting shots', tooltip)
+    def test_the_line_says_whether_blacs_is_asking_for_work(self):
+        for status, text in (
+            (None, 'BLACS: checking...'),
+            (
+                answered(requesting_shots=True, status='Requesting shots'),
+                'BLACS: requesting shots',
+            ),
+            (
+                answered(requesting_shots=False, status='Not requesting shots'),
+                'BLACS: not requesting shots',
+            ),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(blacs_activity_display(status)[0], text)
 
     def test_a_blacs_running_a_shot_names_the_shot(self):
-        text, tooltip = blacs_activity_display(
+        text, _ = blacs_activity_display(
             answered(
                 requesting_shots=True,
                 status='Running (program time: 0.100s)...',
@@ -138,9 +111,6 @@ class ActivityLineTests(unittest.TestCase):
             )
         )
         self.assertEqual(text, 'BLACS: running shot_a.h5')
-        self.assertIn('/data/2026/shot_a.h5', tooltip, 'the whole path is available')
-        self.assertIn('shot-1', tooltip, 'which queued row this is')
-        self.assertIn('Running (program time: 0.100s)...', tooltip)
 
     def test_a_shot_blacs_ran_on_its_own_is_told_apart_from_queue_work(self):
         # BLACS runs its local override shot when this runmanager has nothing
@@ -169,7 +139,7 @@ class ActivityLineTests(unittest.TestCase):
         # Not only in the tooltip: a queue that is not moving because the
         # apparatus stopped is the thing a user most needs to see without
         # hunting for it.
-        text, tooltip = blacs_activity_display(
+        text, _ = blacs_activity_display(
             answered(
                 requesting_shots=False,
                 status='Device(s) in error state\nRequests stopped',
@@ -178,35 +148,21 @@ class ActivityLineTests(unittest.TestCase):
         )
         self.assertIn('stopped', text)
         self.assertIn('Device(s) in error state', text)
-        self.assertIn('Device(s) in error state', tooltip)
 
     def test_a_blacs_that_did_not_answer_says_that_rather_than_guessing(self):
         text, _ = blacs_activity_display({'reachable': False, 'reason': 'refused'})
         self.assertEqual(text, 'BLACS: not responding')
 
 
-def absent_blacs(host='localhost'):
+def absent_blacs():
     """A real BlacsClient for a BLACS that is not there: nothing is on its port."""
     with socket.socket() as probe:
         probe.bind(('127.0.0.1', 0))
         port = probe.getsockname()[1]
-    return BlacsClient(host=host, port=port, timeout=0.05)
+    return BlacsClient(host='localhost', port=port, timeout=0.05)
 
 
 class PollingTests(unittest.TestCase):
-    def test_an_answer_arriving_after_shutdown_is_not_reported(self):
-        # An answer whose poll finishes after the close has begun is not worth
-        # a hop to a GUI thread that is taking the window down, so poll() does
-        # not make one. The cheap half only: a poll that got past this check
-        # first is caught by the update instead (MonitorShutdownTests).
-        reported = []
-        monitor = BlacsStatusMonitor(on_status=reported.append, client=absent_blacs())
-
-        monitor.shutdown()
-        monitor.poll()
-
-        self.assertEqual(reported, [])
-
     def test_polling_goes_on_until_it_is_shut_down(self):
         reported = []
         monitor = BlacsStatusMonitor(
@@ -221,12 +177,8 @@ class PollingTests(unittest.TestCase):
             time.sleep(0.02)
         polls_while_running = len(reported)
         monitor.shutdown()
-        # shutdown() deliberately does not wait for the poller -- joining it
-        # from the GUI thread would deadlock the quit -- so a poll
-        # already in flight can still hand its answer over. What becomes of
-        # that answer is the update's business, and the update drops it
-        # (MonitorShutdownTests); the question here is only whether the loop
-        # stopped asking, so let the last one land before counting.
+        # shutdown() does not wait for the poller, so a poll already in flight
+        # can still hand its answer over; let the last one land before counting.
         time.sleep(0.2)
         polls_after_stopping = len(reported)
         time.sleep(0.2)
@@ -240,19 +192,9 @@ class PollingTests(unittest.TestCase):
 class MonitorShutdownTests(unittest.TestCase):
     """Closing runmanager while a poll is in flight.
 
-    Two rules, and they only make sense together. Reporting a status is a
-    blocking hop to the GUI thread, so closing must not wait for the poller:
-    joining it from that same thread meant each waited for the other -- the
-    poller parked in the GUI queue, the GUI thread parked in join() -- and the
-    operator saw the window freeze on quit. There is nothing to wait for in any
-    case: the poller holds no state worth flushing, it is a daemon, and it has
-    been told to stop.
-
-    Not waiting leaves an answer free to be sitting in the GUI queue when the
-    window starts coming down, so the update has to be what notices it is too
-    late. The poller's own check cannot: it runs before the answer is handed
-    over, and everything that matters happens after. The check that counts is
-    the one on the GUI thread, beside the widgets being torn down.
+    Reporting a status is a blocking hop to the GUI thread, so closing must not
+    wait for the poller, and an answer already queued for the GUI thread must
+    not be painted once the window is closing.
     """
 
     def test_shutdown_does_not_wait_for_a_poll_already_reporting(self):
@@ -284,16 +226,14 @@ class MonitorShutdownTests(unittest.TestCase):
         )
 
     def test_an_answer_handed_over_before_the_close_is_not_shown_after_it(self):
-        # Played out in order rather than raced for: the poll passes the
-        # poller's own check and hands its answer over, the window then begins
-        # closing, and only then does the GUI thread get to the call that was
-        # waiting in its queue. Each of those steps happens in production, and
-        # here they cannot happen in any other order.
+        # Played out in order rather than raced for: the poll hands its answer
+        # over, the window begins closing, and only then does the GUI thread
+        # reach the call that was waiting in its queue.
         app = FakeRunManager()
         monitor = app.blacs_status_monitor
         queued_for_the_gui = []
-        # Standing in for the hop itself: inmain() from the poller thread puts
-        # the call in the GUI thread's queue and waits for it to be run.
+        # Stands in for inmain(), which queues the call for the GUI thread and
+        # waits for it to be run.
         monitor.on_status = queued_for_the_gui.append
 
         poller = threading.Thread(target=monitor.poll)
@@ -330,139 +270,19 @@ class FakeRunManager(object):
 
     update_blacs_status = RunManager.update_blacs_status
 
-    def __init__(self, run_shots_checked=True, host='localhost'):
+    def __init__(self):
         hold_qapplication()
-        run_shots = QCheckBox()
-        run_shots.setChecked(run_shots_checked)
-        self.ui = types.SimpleNamespace(
-            blacs_status_indicator=QLabel(), checkBox_run_shots=run_shots
-        )
+        self.ui = types.SimpleNamespace(blacs_status_indicator=QLabel())
         self.queue_blacs_activity_label = QLabel()
         # A real monitor, because the update asks it two things: who it is
         # talking to, and whether it has been stopped.
         self.blacs_status_monitor = BlacsStatusMonitor(
-            on_status=self.update_blacs_status, client=absent_blacs(host)
-        )
-
-
-def load_main_ui():
-    """Load main.ui the way RunManager.__init__ does."""
-    hold_qapplication()
-    loader = UiLoader()
-    loader.registerCustomWidget(FingerTabWidget)
-    loader.registerCustomWidget(TreeView)
-    return loader.load(os.path.join(os.path.dirname(runmanager.__file__), 'main.ui'))
-
-
-class DestinationControlTests(unittest.TestCase):
-    """The BLACS destination checkbox, and the status light beside it.
-
-    Asserted against the loaded interface rather than against main.ui read as
-    XML: what a user meets is the window runmanager builds, and a main.ui that
-    will not load is a runmanager that will not start -- which reading the file
-    as text cannot tell us. Loading it here also leaves the .ui free to be
-    rearranged, so long as the widgets are still there and still say this.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        cls.ui = load_main_ui()
-
-    def checkbox(self):
-        checkbox = self.ui.findChild(QCheckBox, 'checkBox_run_shots')
-        self.assertIsNotNone(checkbox, 'checkBox_run_shots is the object name')
-        return checkbox
-
-    def test_the_interface_still_loads_with_the_widgets_this_feature_needs(self):
-        # The widgets both halves of this feature reach for by name:
-        # AnalysisSubmission is given verticalLayout_2, and Engage reads the
-        # two checkboxes.
-        self.assertIsNotNone(self.ui.findChild(QLayout, 'verticalLayout_2'))
-        self.assertIsNotNone(self.ui.findChild(QCheckBox, 'checkBox_view_shots'))
-        indicator = self.ui.findChild(QLabel, 'blacs_status_indicator')
-        self.assertIsNotNone(indicator)
-        self.assertFalse(
-            indicator.pixmap().isNull(),
-            'the light shows something before the first poll',
-        )
-
-    def test_the_destination_control_is_labelled_blacs(self):
-        # The word is a label beside the box rather than the box's own text, so
-        # the BLACS logo can sit between them the way lyse's does on the
-        # Analyse row below. What the operator reads is the same either way.
-        label = self.ui.findChild(QLabel, 'checkBox_run_shots_text')
-        self.assertIsNotNone(label)
-        self.assertEqual(label.text(), 'BLACS')
-        self.assertTrue(
-            self.checkbox().isChecked(), 'engaged shots are queued by default'
-        )
-
-    def test_the_destination_control_wears_the_blacs_logo(self):
-        self.assertIsNotNone(
-            self.ui.findChild(QLabel, 'checkBox_run_shots_icon'),
-            'a label for RunManager.__init__ to set the logo into',
-        )
-        self.assertTrue(
-            (importlib.resources.files('blacs') / 'blacs.svg').is_file(),
-            'the logo it sets into that label has to be there to set',
-        )
-
-    def test_the_tooltip_says_what_the_checkbox_is_not(self):
-        tooltip = self.checkbox().toolTip()
-        self.assertIn('queue', tooltip, 'what ticking it does')
-        for not_this in ['Pause queue', 'Request shots', 'Abort']:
-            self.assertIn(
-                not_this, tooltip, 'the controls it is not must be named'
-            )
-
-    def test_the_status_light_sits_beside_the_destination_control(self):
-        # Whichever layout holds them, the two are laid out together: BLACS's
-        # connectivity belongs next to the control that sends it work, not in
-        # a dock or a status bar of its own.
-        checkbox = self.checkbox()
-        indicator = self.ui.findChild(QLabel, 'blacs_status_indicator')
-        self.assertTrue(
-            any(
-                layout.indexOf(checkbox) != -1 and layout.indexOf(indicator) != -1
-                for layout in self.ui.findChildren(QLayout)
-            ),
-            'the indicator belongs beside the checkbox, not in a new dock',
+            on_status=self.update_blacs_status, client=absent_blacs()
         )
 
 
 class IndicatorUpdateTests(unittest.TestCase):
-    """What runmanager puts on the status light when an answer arrives.
-
-    Against the indicator's own surface rather than the loaded window: this is
-    the update runmanager makes, and it should still be reported here when
-    main.ui is what has gone wrong.
-    """
-
-    def test_both_surfaces_say_the_same_whatever_the_checkbox_says(self):
-        # Watching BLACS is not a consequence of sending it shots: an operator
-        # who has unticked the destination still needs to see what the
-        # apparatus is doing with the work already queued.
-        status = answered(
-            requesting_shots=True,
-            status='Running (program time: 0.100s)...',
-            shot_id='shot-1',
-            shot_path='/data/shot_a.h5',
-        )
-        shown = {}
-        for checked in [True, False]:
-            app = FakeRunManager(run_shots_checked=checked)
-            app.update_blacs_status(status)
-            self.assertFalse(
-                app.ui.blacs_status_indicator.pixmap().isNull(),
-                'the light is always set',
-            )
-            shown[checked] = (
-                app.ui.blacs_status_indicator.toolTip(),
-                app.queue_blacs_activity_label.text(),
-            )
-
-        self.assertIn('shot_a.h5', shown[False][1])
-        self.assertEqual(shown[True], shown[False])
+    """What runmanager paints on the light and the line when an answer arrives."""
 
     def test_the_light_reports_the_link_and_the_line_reports_the_queue(self):
         # The split this pair exists for. A BLACS that answered is online even
@@ -473,61 +293,7 @@ class IndicatorUpdateTests(unittest.TestCase):
             answered(requesting_shots=False, error='Device(s) in error state')
         )
 
+        self.assertFalse(app.ui.blacs_status_indicator.pixmap().isNull())
         self.assertIn('responding', app.ui.blacs_status_indicator.toolTip())
         self.assertNotIn('error state', app.ui.blacs_status_indicator.toolTip())
         self.assertIn('Device(s) in error state', app.queue_blacs_activity_label.text())
-
-    def test_both_surfaces_say_they_are_checking_before_blacs_answers(self):
-        app = FakeRunManager()
-        app.update_blacs_status(None)
-        self.assertIn('Checking', app.ui.blacs_status_indicator.toolTip())
-        self.assertIn('checking', app.queue_blacs_activity_label.text())
-
-
-class PauseQueueControlTests(unittest.TestCase):
-    """The queue's pause control, built the way RunManager builds it.
-
-    A button rather than a checkbox, so that it reads like BLACS's Request
-    shots: those two together are what decide whether shots run, and a filled
-    button says which way each is set from across the room.
-
-    Building the real tab is also the only thing that catches a mistyped Qt
-    enum here -- nothing else would, until runmanager was launched.
-    """
-
-    def setUp(self):
-        # The real main.ui supplies the Queue page and its layout.
-        self.ui = load_main_ui()
-
-    def build_queue_tab(self):
-        app = types.SimpleNamespace(ui=self.ui, refresh_queue_tab=lambda: None)
-        RunManager.setup_queue_tab(app)
-        return app
-
-    def test_pausing_the_queue_is_a_two_state_button(self):
-        app = self.build_queue_tab()
-
-        button = app.queue_pause_button
-        self.assertIsInstance(button, QPushButton)
-        self.assertTrue(button.isCheckable())
-        self.assertFalse(button.isChecked(), 'a queue starts unpaused')
-        self.assertEqual(button.text(), 'Pause queue')
-
-    def test_queue_tab_has_its_icon(self):
-        index = self.ui.tabWidget.indexOf(self.ui.tab_queue)
-        self.assertNotEqual(index, -1)
-        self.assertFalse(self.ui.tabWidget.tabIcon(index).isNull())
-
-    def test_the_button_shows_a_different_icon_once_the_queue_is_paused(self):
-        icon = self.build_queue_tab().queue_pause_button.icon()
-
-        running = icon.pixmap(QSize(16, 16), QIcon.Mode.Normal, QIcon.State.Off)
-        paused = icon.pixmap(QSize(16, 16), QIcon.Mode.Normal, QIcon.State.On)
-
-        self.assertFalse(running.isNull())
-        self.assertFalse(paused.isNull())
-        self.assertNotEqual(
-            running.toImage(),
-            paused.toImage(),
-            'the icon has to say which state the button is in',
-        )

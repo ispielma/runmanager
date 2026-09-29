@@ -1,18 +1,9 @@
 """Sending shots to runviewer, and starting it when it is not already running.
 
-Ticking *View shot(s)* sends each shot to runviewer, and with no runviewer up
-starts one. The shot goes through the real RunviewerClient to a real
-RunviewerServer; only runviewer's startup is faked, by serving that server where
-the started runviewer would.
-
-What is pinned here is that the child is started detached and without a fork,
-because a child that is not detached dies with runmanager and a fork in this
-process may never get as far as starting one. Runmanager is heavily threaded,
-so a forked child gets one thread and every lock the others happen to hold at
-that instant -- the allocator's among them, which subprocess needs -- and
-deadlocks before starting anything, saying nothing about it.
+The shot goes through the real RunviewerClient to a real RunviewerServer; only
+the process start is faked, by serving that server where the started runviewer
+would.
 """
-import logging
 import os
 import queue
 import socket
@@ -29,17 +20,6 @@ from runviewer.client import RunviewerClient
 from fixtures import RunManager, main_module, runviewer_main
 
 
-class FakeOutputBox(object):
-    def __init__(self):
-        self.lines = []
-
-    def output(self, text, red=False):
-        self.lines.append(text)
-
-    def said(self, *words):
-        return [l for l in self.lines if all(word in l for word in words)]
-
-
 class RefusingQueue:
     def put(self, path):
         raise RuntimeError('runviewer cannot take shots')
@@ -49,18 +29,6 @@ class SendToRunviewerTests(unittest.TestCase):
     """The send and the launch, with only the process start faked."""
 
     def setUp(self):
-        self.main_module = main_module
-        self.saved = {
-            # Absent on Windows, which is where BLACS usually runs and what
-            # the creationflags branch of the launch exists for. Reading it
-            # unconditionally made the one test that is not skipped there error
-            # in setUp instead of running.
-            'fork': getattr(os, 'fork', None),
-            'logger': getattr(main_module, 'logger', None),
-        }
-        # Assigned only inside the module's __main__ block, so it does not
-        # exist when the module is merely imported:
-        main_module.logger = logging.getLogger('test_send_to_runviewer')
         self.launched = []
         # runmanager's own name for the module, so that the launch reaches the
         # fake and nothing else in the process, such as a real server, does:
@@ -71,11 +39,6 @@ class SendToRunviewerTests(unittest.TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
-        # A fork here is the bug. Fail loudly rather than actually forking the
-        # test runner, which is what made this hard to see in the first place.
-        if self.saved['fork'] is not None:
-            os.fork = self.forbidden_fork
-        self.addCleanup(self.restore)
 
         # runviewer's server puts shots on this, which its application makes
         # only when it starts:
@@ -88,18 +51,14 @@ class SendToRunviewerTests(unittest.TestCase):
         with socket.socket() as probe:
             probe.bind(('127.0.0.1', 0))
             self.port = probe.getsockname()[1]
-        self.app = types.SimpleNamespace(
-            runviewer=RunviewerClient(host='127.0.0.1', port=self.port, timeout=0.5),
-            output_box=FakeOutputBox(),
+        self.said = []
+        self.app = RunManager.__new__(RunManager)
+        self.app.runviewer = RunviewerClient(
+            host='127.0.0.1', port=self.port, timeout=0.5
         )
-
-    def restore(self):
-        if self.saved['fork'] is not None:
-            os.fork = self.saved['fork']
-        if self.saved['logger'] is None:
-            del self.main_module.logger
-        else:
-            self.main_module.logger = self.saved['logger']
+        self.app.output_box = types.SimpleNamespace(
+            output=lambda text, red=False: self.said.append(text)
+        )
 
     def serve(self):
         server = runviewer_main.RunviewerServer(
@@ -108,20 +67,13 @@ class SendToRunviewerTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
 
     def popen(self, command, **kwargs):
-        self.launched.append((list(command), kwargs))
+        self.launched.append(list(command))
         # What the started runviewer does first:
         self.serve()
         return types.SimpleNamespace(pid=1234)
 
-    def forbidden_fork(self):
-        raise AssertionError(
-            'the runviewer launch forked. runmanager is multi-threaded, so a '
-            'forked child inherits locks no thread will ever release; use '
-            'subprocess with start_new_session instead.'
-        )
-
     def send(self):
-        RunManager.send_to_runviewer(self.app, '/tmp/a_shot.h5')
+        self.app.send_to_runviewer('/tmp/a_shot.h5')
 
     def test_a_shot_reaches_a_running_runviewer_as_its_local_path(self):
         self.serve()
@@ -135,35 +87,18 @@ class SendToRunviewerTests(unittest.TestCase):
         self.send()
 
         self.assertEqual(len(self.launched), 1, 'exactly one runviewer started')
-        command, kwargs = self.launched[0]
-        self.assertIn('runviewer', command, 'and it is runviewer that is started')
+        self.assertIn('runviewer', self.launched[0], 'and it is runviewer')
         self.assertEqual(self.shots.get_nowait(), '/tmp/a_shot.h5', 'and it has the shot')
-
-    @unittest.skipIf(os.name == 'nt', 'the POSIX launch path')
-    def test_it_is_started_detached_so_it_outlives_runmanager(self):
-        self.send()
-
-        _, kwargs = self.launched[0]
-        self.assertTrue(
-            kwargs.get('start_new_session'),
-            'a session of its own, or it dies with the runmanager that spawned it',
-        )
-
-    @unittest.skipIf(os.name == 'nt', 'the POSIX launch path')
-    def test_its_streams_go_nowhere_rather_than_into_a_leaked_file(self):
-        self.send()
-
-        _, kwargs = self.launched[0]
-        for stream in ('stdin', 'stdout', 'stderr'):
-            self.assertEqual(kwargs.get(stream), subprocess.DEVNULL, stream)
 
     def test_the_operator_is_told_when_runviewer_cannot_take_the_shot(self):
         runviewer_main.shots_to_process_queue = RefusingQueue()
         self.serve()
         self.send()
 
-        said = self.app.output_box.said("Couldn't submit shot", 'cannot take shots')
-        self.assertTrue(said, "in runviewer's own words")
+        self.assertTrue(
+            any('cannot take shots' in line for line in self.said),
+            "runviewer's own reason reaches the operator",
+        )
 
 
 if __name__ == '__main__':

@@ -17,8 +17,8 @@ This module keeps queue state and background queue/compile work out of
 ``runmanager.__main__``. QueueManager owns the background compile loop used by
 Engage, and the queue edits that delete files or redraw the queue tab. Queue
 state is in QueueController, which the application holds.
-Queue items are stored internally as shot records, while the queue widget still
-shows only their filepaths.
+Queue items are stored as shot records. The queue widget shows each one's file
+name and compile mode, and reddens a row that needs an operator.
 """
 
 import os
@@ -88,9 +88,10 @@ REFUSED_STATES = {
     # it again would only be refused again, so it is held at the head until an
     # operator deletes it, and nothing behind it can be reached meanwhile.
     'rejected': True,
-    # claim_next_for_compile(): a failed compile leaves data in the shot file
-    # that stops labscript ever compiling into it, so this row can never
-    # compile however often it is asked for. It is held the same way.
+    # claim_next_for_compile(): the compile failed and is not tried again by
+    # itself, which would recompile a persistently bad shot for ever. It is
+    # held the same way, until an operator deletes it or asks for another
+    # compile: see retry_compile().
     'compile_failed': True,
     # offer_next(): the operator has said this shot is not to be sent. The
     # queue clears the row itself, at the next request from BLACS -- see
@@ -119,6 +120,7 @@ class RunmanagerQueueWidget(ShotQueueWidget):
     """Shot queue widget configured for runmanager-owned shot records."""
 
     deleteRowsRequested = Signal(list)
+    retryCompileRequested = Signal(list)
 
     def __init__(self, parent=None):
         ShotQueueWidget.__init__(
@@ -139,6 +141,11 @@ class RunmanagerQueueWidget(ShotQueueWidget):
         self.queue_view.setDragDropMode(QtWidgets.QAbstractItemView.NoDragDrop)
         self.add_button.hide()
         self.queue_view.deleteRequested.connect(self._emit_delete)
+        # This menu replaces the view's own, which offers Delete alone.
+        self.queue_view.setContextMenuPolicy(
+            QtCore.Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.queue_view.customContextMenuRequested.connect(self._show_row_menu)
 
     def _row_info(self, path_info):
         mode = path_info.get('mode', '')
@@ -217,6 +224,19 @@ class RunmanagerQueueWidget(ShotQueueWidget):
         self.set_row_infos(row_infos)
         self.select_ids(selected_ids)
 
+    def _show_row_menu(self, position):
+        shot_ids = self.selected_ids()
+        menu = QtWidgets.QMenu(self.queue_view)
+        retry = menu.addAction('Compile again')
+        delete = menu.addAction('Delete selected rows')
+        retry.setEnabled(bool(shot_ids))
+        delete.setEnabled(bool(shot_ids))
+        chosen = menu.exec(self.queue_view.viewport().mapToGlobal(position))
+        if chosen is retry:
+            self.retryCompileRequested.emit(shot_ids)
+        elif chosen is delete:
+            self._emit_delete()
+
     def _emit_delete(self):
         # By identity, not position. The queue moves on its own -- a shot
         # finishing removes a row while the operator has one selected -- so a
@@ -274,6 +294,9 @@ class QueueController(object):
         # sequence is the day's default one, which no batch joins, so it must
         # never become the anchor the next Engage batch is written alongside.
         record['default_shot'] = bool(record.get('default_shot', False))
+        # Whether View shot(s) was ticked when this shot was engaged. The
+        # compile reads it from here, not from the checkbox as it stands then.
+        record['send_to_runviewer'] = bool(record.get('send_to_runviewer', False))
         # A compile in progress belongs to this session only, so a restored
         # shot never starts out claimed:
         record['compiling'] = False
@@ -808,12 +831,8 @@ class QueueController(object):
                 return None, False
             if item['state'] in REFUSED_STATES:
                 # A row the queue will not hand over is not worth compiling.
-                # The one that gets here is compile_failed: already tried, and
-                # it went red. Not claimed again, and not merely to save the
-                # work -- a compile that fails partway leaves the devices and
-                # calibrations groups in the shot file, and labscript refuses
-                # to compile into a file that has them. Deleting the row --
-                # which takes its file with it -- is the way on.
+                # The one that gets here is compile_failed, which is not
+                # claimed again unless an operator asks: see retry_compile().
                 return None, False
             if item['compiling']:
                 return None, True
@@ -854,9 +873,9 @@ class QueueController(object):
         the queue draining normally — a queue emptying with no shot ever
         running is what one broken labscript file would then produce.
 
-        It is not compiled again, though. See claim_next_for_compile: the
-        failed compile leaves data in the shot file that stops labscript ever
-        compiling into it, so the row is a dead end until it is deleted.
+        It is not compiled again by itself, though: a shot that fails every
+        time would be recompiled for ever. An operator can ask for another
+        compile with retry_compile(), or delete the row.
 
         Returns ``(changed, still_queued)``: whether the queue changed, and
         whether the shot is still queued — it may have been deleted by the
@@ -876,11 +895,28 @@ class QueueController(object):
             else:
                 # Its own state, and not the one BLACS's failures use: this row
                 # never left runmanager, so nothing that asks whether BLACS has
-                # it should say yes. It is still red, still at the head, and
-                # still a dead end until deleted.
+                # it should say yes. It is still red and still at the head,
+                # until it is deleted or compiled again.
                 item['state'] = 'compile_failed'
                 item['message'] = str(message)
             return True, True
+
+    def retry_compile(self, shot_ids):
+        """Let the rows with these ids that failed to compile be claimed again.
+
+        Every compile rewrites its shot file from scratch, so a row that failed
+        once can succeed. Returns whether any row changed."""
+        wanted = set(shot_ids)
+        with self._lock:
+            failed = [
+                item
+                for item in self._items
+                if item['shot_id'] in wanted and item['state'] == 'compile_failed'
+            ]
+            for item in failed:
+                item['state'] = ''
+                item['message'] = ''
+            return bool(failed)
 
 
 class QueueManager(QtCore.QObject):
@@ -908,6 +944,10 @@ class QueueManager(QtCore.QObject):
         self.compile_run_file_callback = compile_run_file
         self.send_to_runviewer_callback = send_to_runviewer
         self.output = output
+        # A compile_shots batch is given the event that is current when it is
+        # submitted, and stopping replaces it, so an Engage after Empty queue is
+        # not stopped by the click that came before it.
+        self._compile_shots_stop = threading.Event()
         self.thread = threading.Thread(target=self.mainloop)
         self.thread.daemon = True
         self.thread.start()
@@ -921,15 +961,17 @@ class QueueManager(QtCore.QObject):
         self.controller.enqueue(list(items))
         self.queueChanged.emit()
 
-    def compile_ahead(self, send_to_runviewer):
+    def compile_ahead(self):
         """Ask the worker to compile the queued eager rows not yet compiled."""
-        self.command_queue.put(('compile_ahead', (send_to_runviewer,)))
+        self.command_queue.put(('compile_ahead', ()))
 
     def compile_shots(self, records, send_to_BLACS, send_to_runviewer):
         """Queue these records if send_to_BLACS, and compile them.
 
         Returns the records, each now carrying the identifier its row has, for
-        a caller that has to say which shots it submitted.
+        a caller that has to say which shots it submitted. Each also carries
+        ``send_to_runviewer``, the choice made with its batch, which is what
+        its compile reads.
 
         A batch bound for the queue is queued at once, so that its rows are
         there to show, to add to and to empty while they compile: the worker
@@ -945,22 +987,29 @@ class QueueManager(QtCore.QObject):
             record['shot_id'] = (
                 str(record['shot_id']) if record.get('shot_id') else new_shot_id()
             )
+            record['send_to_runviewer'] = send_to_runviewer
         if send_to_BLACS:
             self.enqueue(records)
-            self.compile_ahead(send_to_runviewer)
+            self.compile_ahead()
             return records
-        self.command_queue.put(('compile_shots', (records, send_to_runviewer)))
+        self.command_queue.put(('compile_shots', (records, self._compile_shots_stop)))
         return records
 
-    def compile_shot(self, item, send_to_runviewer=False, default_globals=False):
+    def stop_compile_shots(self):
+        """Stop the compile_shots batches submitted so far, after the shot each is on."""
+        self._compile_shots_stop.set()
+        self._compile_shots_stop = threading.Event()
+
+    def compile_shot(self, item, default_globals=False):
         """Write one shot's file, compile it, and send it to runviewer if asked.
 
-        With ``default_globals`` the file is written from the globals' defaults,
-        as a default shot is, rather than from the item's frozen globals.
+        The record's ``send_to_runviewer`` says whether it is asked. With
+        ``default_globals`` the file is written from the globals' defaults, as
+        a default shot is, rather than from the item's frozen globals.
         """
         self.prepare_run_file_callback(item, default_globals=default_globals)
         success = self.compile_run_file_callback(item['labscript_file'], item['path'])
-        if success and send_to_runviewer:
+        if success and item['send_to_runviewer']:
             self.send_to_runviewer_callback(item['path'])
         # Deliberately does not mark the record compiled. For a row already in
         # the queue that is the controller's to do, under its lock, in
@@ -970,15 +1019,11 @@ class QueueManager(QtCore.QObject):
         # and offered again afterwards as though it never had been.
         return success
 
-    def compile_next_in_background(self, send_to_runviewer):
+    def compile_next_in_background(self):
         """Start compiling the shot at the head of the queue if it is not ready.
 
         Returns True while a queued shot is pending, so the caller reports it
         as pending rather than falling back to the empty-queue policy.
-
-        ``send_to_runviewer`` is a callable, evaluated only when a compile is
-        actually started, so that a request with nothing to do does not reach
-        into the GUI.
 
         The compile runs on its own thread rather than through the worker's
         command queue, so that it is not held up behind an Engage batch. The
@@ -986,15 +1031,12 @@ class QueueManager(QtCore.QObject):
         boundary."""
         item, pending = self.controller.claim_next_for_compile()
         if item is not None:
-            thread = threading.Thread(
-                target=self._background_compile,
-                args=(item, bool(send_to_runviewer())),
-            )
+            thread = threading.Thread(target=self._background_compile, args=(item,))
             thread.daemon = True
             thread.start()
         return pending
 
-    def _background_compile(self, item, send_to_runviewer):
+    def _background_compile(self, item):
         success = False
         # What the row will say it went red for. A failure in the user's script
         # reaches us only as False, the compiler having written the traceback to
@@ -1003,7 +1045,7 @@ class QueueManager(QtCore.QObject):
         # what happened.
         message = 'Could not be compiled. See the output for the reason.'
         try:
-            success = self.compile_shot(item, send_to_runviewer=send_to_runviewer)
+            success = self.compile_shot(item)
         except Exception as exc:
             message = 'Could not be compiled: %s' % str(exc)
             self.output(
@@ -1019,7 +1061,8 @@ class QueueManager(QtCore.QObject):
         elif not success and changed:
             self.output(
                 'Queued shot %s could not be compiled. It holds the queue once it '
-                'is at the head; delete it to go on.\n'
+                'is at the head; delete it, or right-click it and choose Compile '
+                'again, to go on.\n'
                 % os.path.basename(item['path']),
                 red=True,
             )
@@ -1108,6 +1151,13 @@ class QueueManager(QtCore.QObject):
     def delete_rows(self, rows):
         return self._remove_from_queue(*self.controller.delete_rows(list(rows)))
 
+    def retry_compile(self, shot_ids):
+        if self.controller.retry_compile(shot_ids):
+            # A lazy row is compiled when BLACS next asks for it; the worker
+            # picks up an eager one:
+            self.compile_ahead()
+            self.queueChanged.emit()
+
     def clear(self):
         return self._remove_from_queue(*self.controller.clear())
 
@@ -1170,16 +1220,15 @@ class QueueManager(QtCore.QObject):
                     return
 
                 if command == 'compile_ahead':
-                    (send_to_runviewer,) = args
                     item = self.controller.claim_next_to_compile_ahead()
                     while item is not None:
-                        self._background_compile(item, send_to_runviewer)
+                        self._background_compile(item)
                         item = self.controller.claim_next_to_compile_ahead()
                     self.output('Ready.\n\n')
                 elif command == 'compile_shots':
-                    records, send_to_runviewer = args
+                    records, stop = args
                     for item in records:
-                        if not self.compile_shot(item, send_to_runviewer=send_to_runviewer):
+                        if stop.is_set() or not self.compile_shot(item):
                             self.output('Compilation aborted.\n\n', red=True)
                             break
                     else:
