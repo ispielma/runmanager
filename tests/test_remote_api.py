@@ -464,10 +464,12 @@ class SubmitShotsTests(RemoteCommandTestCase):
         # A joined shot is named from the sequence's formats and its own
         # globals, not after the shot before it.
         self.app.exp_config = labconfig(
-            self.directory, filename_prefix_format='{globals[x]}_{script_basename}'
+            self.directory,
+            output_folder_format='{globals[x]}',
+            filename_prefix_format='{globals[x]}_{script_basename}',
         )
-        folder = os.path.join(self.directory, '{globals[x]}')
-        self.app.ui.lineEdit_shot_output_folder.text = lambda: folder
+        # The window shows the default folder, the one the folder format makes.
+        self.app.previous_default_output_folder = self.directory
         first = self.submit({'x': 1})
 
         second = self.submit(
@@ -476,8 +478,13 @@ class SubmitShotsTests(RemoteCommandTestCase):
             sequence_index=first[0]['sequence_index'],
         )
 
+        folder = os.path.join(self.directory, 'experiment')
         self.assertEqual(
-            second[0]['path'], os.path.join(self.directory, '5', '5_experiment_1.h5')
+            [first[0]['path'], second[0]['path']],
+            [
+                os.path.join(folder, '1', '1_experiment_0.h5'),
+                os.path.join(folder, '5', '5_experiment_1.h5'),
+            ],
         )
 
     def test_a_join_is_refused_once_the_labscript_file_has_changed(self):

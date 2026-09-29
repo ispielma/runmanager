@@ -714,6 +714,7 @@ def new_sequence_details(
     increment_sequence_index=True,
     default=False,
     format_globals=None,
+    subdirectory_in_prefix=False,
 ):
     """Generate the details for a new sequence: the toplevel attrs sequence_date,
     sequence_index, sequence_id; and the the output directory and filename prefix for
@@ -727,7 +728,11 @@ def new_sequence_details(
 
     With default=True these are the details of the day's default sequence, which every
     default shot made that day shares: dated from the start of the day, it has
-    sequence_index -1 and claims no index."""
+    sequence_index -1 and claims no index.
+
+    With subdirectory_in_prefix=True the output directory is the storage folder alone,
+    and the subdirectory the folder format makes leads the filename prefix, so that
+    make_run_files formats it with each shot's globals and never formats the folder."""
     if config is None:
         config = LabConfig()
     script_basename = os.path.splitext(os.path.basename(script_path))[0]
@@ -775,6 +780,8 @@ def new_sequence_details(
         filename_prefix_format, context, dt=now, preserve_unresolved_roots=('globals',)
     )
 
+    if subdirectory_in_prefix:
+        return sequence_attrs, shot_basedir, os.path.join(subdir, filename_prefix)
     return sequence_attrs, shot_output_dir, filename_prefix
 
 
@@ -796,7 +803,9 @@ def make_run_files(
     shot files will be output to, as well as their filenames (this function will
     generate filenames with the shot number and .h5 extension appended to
     filename_prefix). Sensible defaults for these are also returned by
-    new_sequence_details(), so preferably these should be used.
+    new_sequence_details(), so preferably these should be used. output_folder is used
+    as it is; filename_prefix, which may name subdirectories, is formatted with each
+    shot's globals.
 
     Shuffle will randomise the order that the run files are generated in with respect to
     which element of shots they come from. Shuffled or not, what is yielded comes in run
@@ -819,7 +828,7 @@ def make_run_files(
         random.shuffle(indexed_shots)
     for run_no, (_, shot_globals) in enumerate(indexed_shots):
         basename = os.path.join(
-            format_lookup_string(output_folder, {'globals': shot_globals}),
+            output_folder,
             format_lookup_string(filename_prefix, {'globals': shot_globals}),
         )
         runfilename = ('%s_%0' + str(ndigits) + 'd.h5') % (basename, run_no)

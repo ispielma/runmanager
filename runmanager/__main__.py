@@ -2783,9 +2783,10 @@ class RunManager(LabscriptApplication):
         """Name and number a batch after the shot it is being added to.
 
         ``indexed_path_base`` is the shot whose sequence this batch is joining.
-        With ``name_format``, that sequence's ``(folder, prefix)`` with any
-        globals unresolved, each shot is named from it and its own globals, as
-        make_run_files names them; otherwise after ``indexed_path_base``."""
+        With ``name_format``, that sequence's ``(folder, prefix)``, the prefix
+        with any globals unresolved, each shot is named from it and its own
+        globals, as make_run_files names them; otherwise after
+        ``indexed_path_base``."""
         if not run_file_infos:
             return run_file_infos
         candidate_stem = os.path.splitext(os.path.basename(indexed_path_base))[0]
@@ -2811,10 +2812,9 @@ class RunManager(LabscriptApplication):
                         start=next_index + 1,
                     )
             else:
+                folder, prefix = name_format
                 shot_globals = {'globals': run_file_info['shot_globals']}
-                basename = os.path.join(
-                    *(format_lookup_string(part, shot_globals) for part in name_format)
-                )
+                basename = os.path.join(folder, format_lookup_string(prefix, shot_globals))
                 run_file = '%s_%0*d.h5' % (basename, width, next_index)
                 while os.path.exists(run_file) or os.path.abspath(run_file) in compiling:
                     next_index += 1
@@ -4822,14 +4822,18 @@ class RunManager(LabscriptApplication):
                     )
                 run_files = [run_file_info['path'] for run_file_info in run_files]
         else:
+            using_default = output_folder == self.previous_default_output_folder
+            # A folder the user chose is used as it is. Only the default one has
+            # a subdirectory that is a template, so that is the one it separates.
             sequence_attrs, default_output_dir, filename_prefix = (
                 runmanager.new_sequence_details(
                     labscript_file,
                     config=self.exp_config,
                     increment_sequence_index=True,
+                    subdirectory_in_prefix=using_default,
                 )
             )
-            if output_folder == self.previous_default_output_folder:
+            if using_default:
                 # The user is using the default output folder. Just in case the
                 # sequence index has been updated or the date has changed, use the
                 # default_output dir obtained from new_sequence_details, as it is
