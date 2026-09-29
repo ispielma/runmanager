@@ -349,7 +349,9 @@ def get_frozen_globals(globals_details, shot):
             if record['jit_enabled']:
                 continue
             if record['scan_enabled']:
-                expression = repr(shot[global_name])
+                # numpy's default repr rounds to 8 digits and elides long arrays
+                with np.printoptions(threshold=sys.maxsize, floatmode='unique'):
+                    expression = repr(shot[global_name])
             else:
                 expression = record['default']
             frozen_globals[global_name] = expression
