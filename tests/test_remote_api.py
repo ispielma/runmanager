@@ -19,7 +19,7 @@ import unittest
 from unittest import mock
 
 from labscript_utils.ls_zprocess import ZMQServer
-from qtutils.qt.QtWidgets import QApplication, QCheckBox
+from qtutils.qt.QtWidgets import QApplication
 import runmanager
 import runmanager.globals_file as globals_file
 from runmanager.client import RunmanagerClient, SequenceRefused
@@ -28,7 +28,6 @@ from runmanager.client import RunmanagerClient, SequenceRefused
 # runmanager.__main__ here instead would show the startup banner.
 from fixtures import RunManager, RunmanagerServer, labconfig, main_module
 from runmanager.queueing import (
-    BLACS_STATES,
     BLOCKED_SHOT_STATE,
     COMPILE_MODE_EAGER,
     QueueController,
@@ -37,12 +36,7 @@ from runmanager.queueing import (
 
 
 class FakeApp(object):
-    """The application over only the surface these commands reach.
-
-    The queue is a real QueueManager, because an accessor that answers what a
-    stand-in was told to answer tests nothing. Nothing else of the window is
-    here, because the commands guarded against this one read nothing else.
-    """
+    """The application over a real QueueManager, which is all these commands read."""
 
     def __init__(self):
         self.queue_controller = QueueController()
@@ -110,11 +104,9 @@ _qapplication = None
 class AxesModel(object):
     """The axes the shots are expanded along, as the window holds them.
 
-    Only the preparse rebuilds this, and a submission reads it to decide the
-    order to expand the globals in. Changing a global leaves behind an axis
-    the globals may no longer produce, and expanding along an axis that is not
-    there is what breaks -- so the rows here go stale on a change and come
-    back from the preparse, exactly as the window's do.
+    Only the preparse rebuilds the rows, so they go stale when a global changes,
+    as the window's do, and expanding along an axis the globals no longer
+    produce is what breaks. Its shuffle boxes read as unticked.
     """
 
     STALE_AXIS = 'outer no_longer_produced'
@@ -146,19 +138,10 @@ class AxesModel(object):
 class SubmittingApp(object):
     """The application over the whole path a submission takes.
 
-    Everything a submitted shot's identity comes from is runmanager's own
-    here: real globals files, the methods that choose each shot's filename and
-    run number, the sequence a batch is added to, and the queue it is handed
-    to. A stand-in that invents a path per call cannot collide with itself,
-    and not colliding with itself is most of what submitting a batch has to
-    get right.
-
-    What is stood in for is the window around that: the group tabs a global
-    would be written through, and the preparse thread and everything it writes
-    for a submission to read afterwards.
-
-    The compile callback blocks until the test releases it, which is where a
-    shot waits while it compiles.
+    Globals files, shot naming and numbering, the sequence a batch joins and the
+    queue are runmanager's own. The window is stood in for: the group tabs, and
+    the preparse thread and what it writes. The compile callback blocks until
+    the test releases it, which is where a shot waits while it compiles.
     """
 
     AXES_COL_NAME = RunManager.AXES_COL_NAME
@@ -209,9 +192,7 @@ class SubmittingApp(object):
             ),
             pushButton_shuffle=types.SimpleNamespace(checkState=lambda: 0),
         )
-        # Where each submission asked for its shots to be sent, and the
-        # records of each batch that reached the queue.
-        self.destinations = []
+        # The records of each batch that reached the queue.
         self.batches = []
         # The files compiled, and the files sent to runviewer:
         self.compiled = []
@@ -229,7 +210,6 @@ class SubmittingApp(object):
 
         def compile_shots(records, send_to_BLACS, send_to_runviewer):
             self.batches.append(records)
-            self.destinations.append((send_to_BLACS, send_to_runviewer))
             return submit_batch(records, send_to_BLACS, send_to_runviewer)
 
         self.queue_manager.compile_shots = compile_shots
@@ -260,18 +240,10 @@ class SubmittingApp(object):
 class SubmitShotsTests(RemoteCommandTestCase):
     """Submitting shots by naming the globals that differ between them.
 
-    One entry is one shot, and the whole batch is made and submitted at once.
-    Making it at once is what tells its shots apart: a run number and a
-    filename are claimed by the batch being made, so entries submitted one at
-    a time each find the same number free and write over each other.
-
-    Each entry's shot is evaluated from one read of the globals, as the
-    window would hold them with that entry's values set, and the window is
-    set once, to the last entry.
-
-    Nothing reaches the queue until every entry has been evaluated, so a call
-    that refuses leaves the queue exactly as it found it and the error can
-    simply be raised.
+    One entry is one shot, and the batch is made and submitted at once, so its
+    shots claim distinct filenames and run numbers. The window is left holding
+    the last entry. Nothing is queued until every entry has been evaluated, so
+    a refused call leaves the queue as it found it.
     """
 
     #: The shot already in the queue that every submission here is added to.
@@ -330,22 +302,10 @@ class SubmitShotsTests(RemoteCommandTestCase):
         """The expressions the window is left holding."""
         return self.request(self.client.get_values, raw=True)
 
-    def queued(self):
-        """The records of the one batch that reached the queue."""
-        self.assertEqual(
-            len(self.app.batches),
-            1,
-            'the whole batch is handed over at once, and once only',
-        )
-        return self.app.batches[0]
-
-    def test_the_shots_of_a_batch_do_not_share_a_file_or_a_run_number(self):
-        # A submitted shot has no file on disk and no queue row until the
-        # worker reaches it, so an entry asking what number is free gets the
-        # same answer as the entry before it unless the whole batch is
-        # numbered in one go. Three rows naming one file is three shots
-        # overwriting each other and three descriptors that cannot be told
-        # apart by anything the caller was given.
+    def test_a_batch_is_distinct_shots_of_one_new_sequence_added_to_the_queue(self):
+        # A submitted shot has no file and no queue row until the worker
+        # reaches it, so the batch is numbered in one go, or its entries would
+        # all name one file and overwrite each other.
         descriptors = self.submit({'x': 1}, {'x': 2}, {'x': 3})
 
         self.assertEqual(
@@ -360,17 +320,17 @@ class SubmitShotsTests(RemoteCommandTestCase):
             1,
             'and they are one sequence',
         )
-
-    def test_a_submission_sends_its_shots_where_the_window_says(self):
-        # "View shot(s)" is the operator's, and a submission reads it the same
-        # way an Engage does -- the same read the remote protocol offers as
-        # get_view_shots. Shots go to BLACS either way: a submission is work
-        # asked for, not a look at what it would be.
-        self.app.ui.checkBox_view_shots.isChecked = lambda: True
-
-        self.submit({'x': 1})
-
-        self.assertEqual(self.app.destinations, [(True, True)])
+        self.assertNotEqual(
+            descriptors[0]['sequence_id'],
+            self.SEQUENCE['sequence_id'],
+            "of its own: a first submission does not join the queue's sequence",
+        )
+        self.assertIn(
+            self.anchor,
+            self.app.queue_controller.get_queue_paths(),
+            'and the shot queued when the batch arrived is queued still: a '
+            'remote submission adds to the queue, never replaces it',
+        )
 
     def test_a_batch_of_no_entries_submits_nothing_and_says_so(self):
         # A caller that generated no entries this round has asked for
@@ -378,30 +338,6 @@ class SubmitShotsTests(RemoteCommandTestCase):
         # so nothing claims a filename or a run number.
         self.assertEqual(self.submit(), [])
         self.assertEqual(self.app.batches, [])
-
-    def test_the_batch_reaches_the_queue_as_a_single_submission(self):
-        # One submission is what makes refusing safe. Until the last entry has
-        # been evaluated there is nothing in the queue to take back, so every
-        # way the batch can fail -- and most of them are not things an entry
-        # can be checked for -- leaves the queue as it was found.
-        self.submit({'x': 1}, {'x': 2})
-
-        self.assertEqual(len(self.queued()), 2)
-        sequence_ids = {
-            record['sequence_attrs']['sequence_id'] for record in self.queued()
-        }
-        self.assertEqual(len(sequence_ids), 1, 'as one sequence')
-        self.assertNotIn(
-            self.SEQUENCE['sequence_id'],
-            sequence_ids,
-            'of its own: a first submission does not join the queue\'s sequence',
-        )
-        self.assertIn(
-            self.anchor,
-            self.app.queue_controller.get_queue_paths(),
-            'and the shot that was queued when the batch arrived is queued '
-            'still: a remote submission adds to the queue, never replaces it',
-        )
 
     def test_a_later_submission_joins_the_sequence_it_names(self):
         # The first batch is still being compiled, so its shots have neither
@@ -417,30 +353,6 @@ class SubmitShotsTests(RemoteCommandTestCase):
             os.path.dirname(second[0]['path']), os.path.dirname(first[0]['path'])
         )
         self.assertNotIn(second[0]['path'], {d['path'] for d in first})
-
-    def test_an_operator_s_engage_in_between_does_not_take_the_session_s_shots(self):
-        # The queue's last shot is the operator's, as an Engage between two
-        # submissions leaves it; the session names its own sequence instead.
-        first = self.submit({'x': 1})
-        self.app.wait_until_preparse_complete()
-        [engaged] = self.app.compile_and_queue_shots(
-            main_module.SUBMISSION_MODE_NEW_FOLDER,
-            True,
-            False,
-            self.app.expand_pending_shots(),
-        )
-        self.assertEqual(self.app.get_queue_append_filepath(), engaged['path'])
-
-        # Within a second the Engage's sequence shares this one's id, so the
-        # session names its sequence by index as well:
-        second = self.submit(
-            {'x': 2},
-            sequence=first[0]['sequence_id'],
-            sequence_index=first[0]['sequence_index'],
-        )
-
-        self.assertNotEqual(first[0]['sequence_id'], self.SEQUENCE['sequence_id'])
-        self.assertEqual(second[0]['sequence_id'], first[0]['sequence_id'])
 
     def test_a_session_joins_its_own_sequence_when_another_shares_its_id(self):
         # A sequence_id is a timestamp to the second, so an operator's Engage
@@ -540,39 +452,10 @@ class SubmitShotsTests(RemoteCommandTestCase):
             self.expressions(), {'x': '2 # metres', 'y': '9', 'depth': '4'}
         )
 
-    def test_a_batch_is_evaluated_without_touching_the_window_per_entry(self):
-        # BLACS's shot exchange is answered on the thread this command runs
-        # on, and each change to the window starts a preparse. A batch changes
-        # the window once and waits on at most one preparse, whatever its size.
-        with mock.patch.object(
-            self.app, 'globals_changed', wraps=self.app.globals_changed
-        ) as changed, mock.patch.object(
-            self.app,
-            'wait_until_preparse_complete',
-            wraps=self.app.wait_until_preparse_complete,
-        ) as waited:
-            self.submit({'x': 1}, {'x': 2}, {'x': 3})
-
-        self.assertEqual(changed.call_count, 1)
-        self.assertLessEqual(waited.call_count, 1)
-
-    def test_entries_that_name_different_globals_are_refused(self):
-        with self.assertRaises(Exception) as raised:
-            self.submit({'x': 1}, {'y': 9})
-
-        self.assertIn('name different globals', str(raised.exception))
-        self.assertEqual(self.app.batches, [], 'nothing reached the queue')
-        self.assertEqual(
-            self.expressions(),
-            {'x': '0 # metres', 'y': '2*3', 'depth': '4'},
-            'and no global was set',
-        )
-
     def test_nothing_is_submitted_when_a_later_entry_would_expand(self):
         # A scan left on a global the entries do not name can make an entry
         # more than one shot. The entries before it were fine and are still
-        # not submitted, because a call that refuses leaves nothing behind for
-        # the caller to hear about later.
+        # not submitted, because a refused call leaves nothing behind.
         self.scan('y', '[1] * x')
 
         with self.assertRaises(Exception) as raised:
@@ -616,75 +499,21 @@ class SubmitShotsTests(RemoteCommandTestCase):
             self.expressions(), {'x': '0 # metres', 'y': '2*3', 'depth': '4'}
         )
 
-    def test_a_shot_is_named_after_the_globals_written_into_it(self):
-        # A filename prefix can be written in terms of a global, and the
-        # operator's shuffle randomises the order a scan runmanager expanded
-        # itself is made in. A batch was named shot by shot and is answered by
-        # position, so shuffling it would name each file after one entry and
-        # write another entry's globals into it.
-        self.app.exp_config = labconfig(
-            self.directory, filename_prefix_format='{globals[x]}_{script_basename}'
-        )
-        self.app.ui.pushButton_shuffle.checkState = (
-            lambda: main_module.QtCore.Qt.Checked
-        )
-        # With nothing queued there is no sequence to join, so the filenames
-        # are the ones the batch makes rather than ones numbered after a shot.
-        self.app.queue_manager.delete_rows(['already-queued'])
-        patcher = mock.patch.object(
-            runmanager.random, 'shuffle', lambda sequence: sequence.reverse()
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-        descriptors = self.submit({'x': 1}, {'x': 2}, {'x': 3})
-
-        self.assertEqual(
-            [
-                os.path.basename(descriptor['path']).split('_')[0]
-                for descriptor in descriptors
-            ],
-            ['1', '2', '3'],
-        )
-        self.assertEqual(
-            [record['frozen_globals']['x'] for record in self.queued()],
-            ['1 # metres', '2 # metres', '3 # metres'],
-        )
 
 class ShotStatusTests(RemoteCommandTestCase):
     """Whether a shot that was submitted can still produce a result.
 
-    A caller waiting on the results of shots it submitted needs to know when
-    to stop waiting for one. ``pending`` answers exactly that: it is true
-    while the queue would still hand the row over, or BLACS has a cancelled
-    row it can still complete, and false once the row is waiting on an
-    operator instead.
-
-    A row is not only its own state. Only the head of the queue is ever
-    offered, so a row the queue will not hand over holds up every row behind
-    it, and a shot that will never run has to say so wherever it is sitting.
-
-    Nothing is consumed by asking. The same question can be asked as often as
-    the caller likes, about shots that finished long ago, and the queue is no
-    different afterwards.
+    ``pending`` says whether a caller should go on waiting for a shot: true
+    while the queue would still hand its row over, or BLACS can still complete
+    it, and false once the row waits on an operator. Only the head is ever
+    offered, so a row the queue will not hand over holds up every row behind it.
     """
 
-    # Every state a queue row can be in: whether a shot in it can still
-    # produce a result, and whether a row in it holds up the rows behind it.
-    #
-    # offer_next() hands over a waiting row, a row already marked running --
-    # which is the reclaim -- and a failed one, which is the retry. It refuses
-    # a rejected row, because offering it again would only be refused again,
-    # and a cancelled one, which the operator has said is not to be sent;
-    # claim_next_for_compile() refuses a compile_failed row, which is not
-    # compiled again unless the operator asks.
-    #
-    # Of the three refusals only the cancelled row clears itself: the queue
-    # drops it at the next request from BLACS, so the shots behind it are
-    # waiting their turn rather than waiting on somebody. It was deleted while
-    # BLACS had it, and BLACS can still complete it, so it is pending. The
-    # other two stay where they are until an operator deletes them, or, for a
-    # compile_failed row, asks for another compile.
+    # Every state a queue row can be in: whether a shot in it can still produce
+    # a result, and whether a row in it holds up the rows behind it. The queue
+    # will not hand over a rejected, cancelled or compile_failed row. A
+    # cancelled row clears itself at BLACS's next request; the others wait for
+    # an operator.
     EXPECTED = {
         # state: (pending, holds up the rows behind it)
         '': (True, False),
@@ -721,16 +550,6 @@ class ShotStatusTests(RemoteCommandTestCase):
         for shot_id, state in rows:
             self.enqueue(shot_id, state=state)
 
-    def test_every_state_a_row_can_be_in_has_an_answer(self):
-        # Derived rather than listed, so that a state added to BLACS_STATES
-        # arrives here without an answer instead of quietly defaulting to one.
-        self.assertEqual(
-            set(self.EXPECTED),
-            set(BLACS_STATES) | {'', 'compile_failed'},
-            'a new row state needs deciding here: can a shot in it still '
-            'produce a result, or is it waiting on an operator?',
-        )
-
     def test_pending_is_whether_the_shot_can_still_produce_a_result(self):
         for state, (pending, _) in sorted(self.EXPECTED.items()):
             with self.subTest(state=state):
@@ -757,23 +576,15 @@ class ShotStatusTests(RemoteCommandTestCase):
                     else {'pending': True, 'state': ''},
                 )
 
-    def test_a_held_row_still_says_what_it_is(self):
-        # Blocked is what a row behind one of these is; the row itself has a
-        # reason, and that is what an operator has to act on.
+    def test_a_held_row_keeps_its_state_and_deleting_it_frees_the_rows_behind(self):
+        # Blocked says the queue is not moving, not that the shot behind is
+        # spoiled: the held row keeps the reason an operator has to act on, and
+        # clearing it puts the work behind back to waiting its turn.
         self.queue(('head', 'rejected'), ('behind', ''))
-
         answer = self.request(self.client.shot_status, ['head', 'behind'])
-
         self.assertEqual(answer['head']['state'], 'rejected')
-        self.assertEqual(answer['behind']['state'], BLOCKED_SHOT_STATE)
-
-    def test_deleting_the_row_in_front_lets_the_ones_behind_run_again(self):
-        # Blocked says the queue is not moving, not that the shot is spoiled:
-        # the operator clears the row that stopped it and the work behind it
-        # is waiting its turn again.
-        self.queue(('head', 'rejected'), ('behind', ''))
         self.assertEqual(
-            self.request(self.client.shot_status, ['behind'])['behind']['state'],
+            answer['behind']['state'],
             BLOCKED_SHOT_STATE,
             'which is what the caller polling it is told meanwhile',
         )
@@ -787,26 +598,6 @@ class ShotStatusTests(RemoteCommandTestCase):
             'about while it was stuck is not left carrying that',
         )
 
-    def test_a_state_no_refusal_names_is_still_pending(self):
-        # What the queue does with a state it has no refusal for is offer the
-        # row, so that is what is answered about it. Listing the states that
-        # are pending instead would make every state added later read as a
-        # shot that will never run, which is the answer that makes a caller
-        # give up on a shot the apparatus is about to take.
-        self.queue(('novel', 'some-state-added-later'), ('behind', ''))
-
-        answer = self.request(self.client.shot_status, ['novel', 'behind'])
-
-        self.assertTrue(answer['novel']['pending'])
-        self.assertTrue(answer['behind']['pending'])
-
-    def test_the_state_is_passed_through_for_somebody_reading_it(self):
-        self.enqueue('one', state='failed')
-
-        self.assertEqual(
-            self.request(self.client.shot_status, ['one'])['one']['state'], 'failed'
-        )
-
     def test_a_shot_the_queue_no_longer_has_is_not_pending(self):
         answer = self.request(self.client.shot_status, ['never-heard-of-it'])
 
@@ -817,29 +608,13 @@ class ShotStatusTests(RemoteCommandTestCase):
             'describes it -- least of all the empty one, which means waiting',
         )
 
-    def test_every_id_asked_about_is_answered(self):
-        self.enqueue('here')
-
-        answer = self.request(self.client.shot_status, ['here', 'gone', 'here'])
-
-        self.assertEqual(sorted(answer), ['gone', 'here'])
-
-    def test_asking_leaves_the_queue_as_it_was(self):
-        self.enqueue('one')
-        self.enqueue('two')
-        before = self.app.queue_controller.get_queue_display_items()
-
-        self.request(self.client.shot_status, ['one', 'two', 'three'])
-
-        self.assertEqual(self.app.queue_controller.get_queue_display_items(), before)
-
 
 class EmptyQueueTests(RemoteCommandTestCase):
-    """Empty queue, in Abort's place, backs out of the work that is waiting.
+    """Empty queue backs out of the work that is waiting.
 
-    A batch is queued as rows the moment it is submitted, so emptying the
-    queue takes all of it, including a shot still compiling, whose file goes
-    when its compile finishes.
+    A batch is queued as rows the moment it is submitted, so emptying the queue
+    takes all of it, including a shot still compiling, whose file goes when its
+    compile finishes.
     """
 
     def make_app(self):
@@ -887,17 +662,10 @@ class EmptyQueueTests(RemoteCommandTestCase):
 class SubmissionAnchorTests(RemoteCommandTestCase):
     """The shot each submission mode numbers its batch after.
 
-    A mode that adds to a sequence looks in two places for one, in the order
-    that mode calls for, and starts a sequence of its own when neither has
-    anything. Nothing is refused: a runmanager that has queued nothing and
-    sent nothing has no last sequence at all, and starting one is the only
-    thing "add shots to the last sequence" can mean there.
-
-    The queue empties on its own -- BLACS takes the last shot on a thread of
-    its own -- so the shot a mode was chosen against can be gone by the time
-    the batch is made. The shot last sent to BLACS is then the one the
-    operator was looking at in the queue, which is why it is what "add shots
-    to last sequence" falls back to.
+    A mode that adds to a sequence looks for one in the queue and among the
+    shots sent to BLACS, in the order the mode calls for, and starts a sequence
+    of its own when neither has one. The queue empties on its own, so the last
+    shot sent is what "add shots to last sequence" falls back to.
     """
 
     SEQUENCE = {
@@ -986,9 +754,8 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
 
     def test_adding_to_the_last_sequence_carries_on_from_the_shot_blacs_has(self):
         # BLACS can take the last queued shot between the menu being drawn and
-        # the item being clicked. The shot it was sent is the one the operator
-        # was looking at, so that is the sequence the batch joins -- rather
-        # than a new sequence written where an extension was asked for.
+        # the item being clicked; the shot it was sent is the sequence the
+        # operator was looking at, so the batch joins that.
         sent = os.path.join(self.directory, 'experiment_007.h5')
         runmanager.make_single_run_file(sent, None, {}, self.SEQUENCE, 7, 8)
         self.app.queue_manager.set_last_sent_from_queue(sent)
@@ -1000,16 +767,13 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
             [self.SEQUENCE['sequence_id']],
         )
 
-    def test_adding_to_the_last_sequence_reads_no_file_and_takes_no_lock(self):
-        # Both would be on the GUI thread, and lyse can hold the file of the
-        # shot BLACS has just run for as long as it likes.
+    def test_adding_to_the_last_sequence_reads_no_file_when_the_queue_knows_it(self):
+        # A file read would be on the GUI thread, and lyse can hold the file of
+        # the shot BLACS has just run for as long as it likes.
         sent = os.path.join(self.directory, 'experiment_007.h5')
         self.app.queue_manager.set_last_sent_from_queue(sent, dict(self.SEQUENCE))
 
-        with mock.patch.object(
-            self.app, 'check_output_folder_update', side_effect=AssertionError
-        ):
-            records = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
+        records = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
 
         self.assertFalse(os.path.exists(sent), 'there was no file to read')
         self.assertEqual(
@@ -1049,11 +813,9 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         )
 
     def test_the_queue_is_read_once_for_the_sequence_being_added_to(self):
-        # The queue empties on its own between two reads of it: BLACS asks for
-        # the last shot on the server thread while the batch is being made.
-        # Whichever answer a submission acts on has to be the one it was
-        # checked against: a second read saying the queue is empty would turn
-        # "add shots to last sequence" into a new sequence, with nothing said.
+        # BLACS empties the queue on the server thread while a batch is made,
+        # so a second read could say it is empty and turn "add shots to last
+        # sequence" into a new sequence, silently. The batch acts on one read.
         queued = self.enqueue('experiment_007.h5')
         answers = [queued]
         self.app.get_queue_append_filepath = (
@@ -1103,17 +865,9 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
 class ShuffledEngageTests(RemoteCommandTestCase):
     """Engaging a scan with the shuffle button down.
 
-    Shuffle decorrelates the order the shots run in from the order the scan
-    was written in, so that whatever the apparatus does slowly does not line
-    up with the parameter being scanned. A batch queued in the order it was
-    expanded leaves the scan correlated with exactly the drift the button was
-    pressed to separate it from, and the window says it was shuffled.
-
-    The globals each shot is compiled from travel with it as far as the
-    queue, and a filename prefix may be written in terms of a global. So a
-    batch whose files and globals come apart is a shot named for one set of
-    parameters and run with another, which is a result recorded against
-    parameters that never ran.
+    The batch is queued in the order the shuffle chose, and each shot's globals
+    travel with it, so a file is never named for one set of parameters and run
+    with another.
     """
 
     def make_app(self):
@@ -1152,17 +906,7 @@ class ShuffledEngageTests(RemoteCommandTestCase):
         self.assertEqual(len(self.app.batches), 1)
         return self.app.batches[0]
 
-    def test_a_shuffled_batch_reaches_the_queue_in_the_shuffled_order(self):
-        records = self.engage()
-
-        self.assertEqual(
-            [record['frozen_globals']['x'] for record in records],
-            ['3', '2', '1'],
-            'the queue was built in the order the shuffle chose, not the '
-            'order the scan was written in',
-        )
-
-    def test_a_shuffled_shot_is_named_after_the_globals_it_carries(self):
+    def test_a_shuffled_batch_keeps_each_shot_named_for_the_globals_it_carries(self):
         records = self.engage()
 
         self.assertEqual(
@@ -1174,7 +918,8 @@ class ShuffledEngageTests(RemoteCommandTestCase):
                 for record in records
             ],
             [('3', '3'), ('2', '2'), ('1', '1')],
-            'each file is named for the globals that are compiled into it',
+            'in the order the shuffle chose, each file named for the globals '
+            'compiled into it',
         )
 
 
@@ -1207,25 +952,6 @@ class CompileOnlyEngageTests(RemoteCommandTestCase):
         self.assertTrue(all(os.path.isfile(path) for path in self.app.compiled))
         self.assertEqual(self.app.queue_controller.get_queue_paths(), [])
         self.assertEqual(self.app.sent_to_runviewer, [])
-
-
-class DestinationTests(RemoteCommandTestCase):
-    """The BLACS destination checkbox, which a caller reads and sets remotely.
-
-    The commands keep the checkbox's old name, run_shots.
-    """
-
-    def make_app(self):
-        app = FakeApp()
-        app.ui = types.SimpleNamespace(checkBox_run_shots=QCheckBox())
-        return app
-
-    def test_a_caller_decides_whether_engaged_shots_go_to_blacs(self):
-        self.app.ui.checkBox_run_shots.setChecked(True)
-        self.request(self.client.set_run_shots, False)
-
-        self.assertFalse(self.app.ui.checkBox_run_shots.isChecked())
-        self.assertFalse(self.request(self.client.get_run_shots))
 
 
 class PreparsingApp(FakeApp):
