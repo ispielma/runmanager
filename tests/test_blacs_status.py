@@ -5,6 +5,7 @@ so they are tested against snapshots rather than against a running apparatus or
 a constructed RunManager. The poller runs here with a real BlacsClient and no
 BLACS behind it; BLACS's own tests run it against a real BlacsServer.
 """
+import importlib.resources
 import os
 import socket
 import threading
@@ -35,7 +36,6 @@ from fixtures import (
     RunManager,
     TreeView,
 )
-from runmanager.analysis_submission import art_dir
 from runmanager.blacs_status import (
     BlacsStatusMonitor,
     blacs_activity_display,
@@ -403,7 +403,7 @@ class DestinationControlTests(unittest.TestCase):
             'a label for RunManager.__init__ to set the logo into',
         )
         self.assertTrue(
-            (art_dir / 'blacs_22x22.png').is_file(),
+            (importlib.resources.files('blacs') / 'blacs.svg').is_file(),
             'the logo it sets into that label has to be there to set',
         )
 

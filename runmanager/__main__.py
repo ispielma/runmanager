@@ -44,6 +44,7 @@ import ast
 import pprint
 import signal
 import unicodedata
+import importlib.resources
 from pathlib import Path
 
 splash.update_text('importing matplotlib')
@@ -84,7 +85,6 @@ from runmanager.client import (
 )
 from runmanager.analysis_submission import (
     AnalysisSubmission,
-    art_dir,
     set_icon_label_pixmap,
 )
 from runmanager.blacs_status import (
@@ -2148,7 +2148,7 @@ class RunManager(LabscriptApplication):
         # three different applications are told apart by their logos faster
         # than by reading them.
         set_icon_label_pixmap(
-            self.ui.checkBox_run_shots_icon, art_dir / 'blacs_22x22.png'
+            self.ui.checkBox_run_shots_icon, importlib.resources.files('blacs') / 'blacs.svg'
         )
         self.blacs_status_monitor = BlacsStatusMonitor(
             on_status=self.update_blacs_status
