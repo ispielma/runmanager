@@ -57,10 +57,6 @@ class RunmanagerClient(ZMQClient):
         """Set Default expressions for active globals."""
         return self.request('set_values', globals, raw=raw)
 
-    def set_globals(self, globals, raw=False):
-        """Alias for set_values(): writes the value field, whatever Scan? is."""
-        return self.set_values(globals, raw=raw)
-
     def get_scans(self, raw=False):
         """Return all active globals' Scan values.
 

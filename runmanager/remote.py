@@ -10,7 +10,6 @@ get_version = _default_client.get_version
 get_values = _default_client.get_values
 get_globals = _default_client.get_globals
 set_values = _default_client.set_values
-set_globals = _default_client.set_globals
 get_scans = _default_client.get_scans
 set_scans = _default_client.set_scans
 get_scan_enabled = _default_client.get_scan_enabled

@@ -5425,9 +5425,6 @@ class RunmanagerServer(ZMQServer):
             raw=raw,
         )
 
-    def handle_set_globals(self, globals, raw=False):
-        return self.handle_set_values(globals, raw=raw)
-
     def handle_set_scans(self, globals, raw=False):
         return self._set_expression_field_values(
             runmanager.get_scan,
