@@ -5070,19 +5070,9 @@ class RunManager(LabscriptApplication):
                 return no_shot
             return self.offer_shot()
         except Exception as exc:
-            # Answered rather than raised, for the same reason an unreadable
-            # outcome is. RunmanagerServer.handler hands an exception back to
-            # BLACS, which cannot tell it from not having reached runmanager,
-            # so it would hold the outcome it has already delivered here and
-            # send it again for ever -- once a second, showing "Runmanager
-            # unavailable" the whole time, for what is a fault on this side.
-            # Report it where an operator will see it and answer normally.
-            #
-            # This covers applying the outcome as well as choosing the offer.
-            # Covering only the offer would be the wrong half: by the time
-            # applying an outcome can raise, the row it retired is already
-            # gone, so the resend it provokes could never put the analysis
-            # submission back.
+            # Answered rather than raised: the server hands a raised exception
+            # back to BLACS, which takes it for an unreachable runmanager and
+            # would resend the outcome for ever over a fault on this side.
             self.output_box.output(
                 'Runmanager could not answer BLACS: %s\n' % str(exc), red=True
             )
@@ -5111,13 +5101,9 @@ class RunManager(LabscriptApplication):
         shot_id = str(fields.get('shot_id') or '')
         status = str(fields.get('status', ''))
         if not shot_id or status not in SHOT_OUTCOME_STATUSES:
-            # Refused rather than raised. RunmanagerServer.handler hands an
-            # exception back to BLACS, which cannot tell it apart from not
-            # having reached runmanager at all -- and BLACS holds an outcome
-            # until it knows runmanager took it, so it would send the same
-            # unreadable message for ever. Saying so and answering the exchange
-            # normally lets BLACS move on, and no row is reddened on the
-            # strength of a message runmanager did not understand.
+            # Refused rather than raised: the server hands a raised exception
+            # back to BLACS, which takes it for an unreachable runmanager and
+            # would resend this unreadable outcome for ever.
             self.output_box.output(
                 'BLACS sent a shot outcome runmanager could not read: %s\n'
                 % (outcome,),
