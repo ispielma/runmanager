@@ -256,7 +256,7 @@ class FingerTabBarWidget(QtWidgets.QTabBar):
                 return index
 
     def mousePressEvent(self, event):
-        index = self.indexAtPos(event.pos())
+        index = self.indexAtPos(event.position().toPoint())
         if not self.tab_movable.get(index, self.isMovable()):
             QtWidgets.QTabBar.setMovable(self, False)  # disable dragging until they release the mouse
         return QtWidgets.QTabBar.mousePressEvent(self, event)
@@ -443,9 +443,9 @@ class ItemView(object):
 
     def mousePressEvent(self, event):
         result = super(ItemView, self).mousePressEvent(event)
-        index = self.indexAt(event.pos())
+        index = self.indexAt(event.position().toPoint())
         if event.button() == QtCore.Qt.LeftButton and index.isValid():
-            self._pressed_index = self.indexAt(event.pos())
+            self._pressed_index = self.indexAt(event.position().toPoint())
         return result
 
     def leaveEvent(self, event):
@@ -458,15 +458,15 @@ class ItemView(object):
         # Ensure our left click event occurs regardless of whether it is the
         # second click in a double click or not
         result = super(ItemView, self).mouseDoubleClickEvent(event)
-        index = self.indexAt(event.pos())
+        index = self.indexAt(event.position().toPoint())
         if event.button() == QtCore.Qt.LeftButton and index.isValid():
-            self._pressed_index = self.indexAt(event.pos())
+            self._pressed_index = self.indexAt(event.position().toPoint())
             self._double_click = True
         return result
 
     def mouseReleaseEvent(self, event):
         result = super(ItemView, self).mouseReleaseEvent(event)
-        index = self.indexAt(event.pos())
+        index = self.indexAt(event.position().toPoint())
         if event.button() == QtCore.Qt.LeftButton and index.isValid() and index == self._pressed_index:
             self.leftClicked.emit(index)
             if self._double_click:
