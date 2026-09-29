@@ -102,12 +102,7 @@ class BlacsStatusMonitor(object):
         except Exception as exc:
             status = {'reachable': False, 'reason': str(exc)}
         else:
-            if isinstance(status, dict):
-                status = dict(status, reachable=True)
-            else:
-                # A BLACS old enough not to know the question answers it with a
-                # string. Reached, but nothing to show.
-                status = {'reachable': False, 'reason': str(status)}
+            status = dict(status, reachable=True)
         if self.stopped.is_set():
             # Runmanager is closing: no sense paying for a hop to a GUI thread
             # that is busy taking the window down. A saving, not a guarantee --
