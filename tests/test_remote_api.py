@@ -1,8 +1,7 @@
 """What runmanager's server answers a remote caller.
 
-These are the commands a plugin or an optimizer sends, and the refusal of the
-BLACS commands that queue_exchange replaced. BLACS's side of the handover is
-tested in blacs.
+These are the commands a plugin or an optimizer sends. BLACS's side of the
+handover, queue_exchange, is tested in blacs.
 
 Each is sent by the real RunmanagerClient to a real RunmanagerServer on a free
 port, so a command reaches its handler under the name the client sends it by,
@@ -1230,27 +1229,6 @@ class DestinationTests(RemoteCommandTestCase):
 
         self.assertFalse(self.app.ui.checkBox_run_shots.isChecked())
         self.assertFalse(self.request(self.client.get_run_shots))
-
-
-class SupersededCommandTests(RemoteCommandTestCase):
-    """The four commands queue_exchange replaced stay gone from the server.
-
-    One exchange applies an outcome before choosing the next shot, which is
-    what makes the offer, the reclaim and the retry sound; a handler for any
-    of these would be a second route around that ordering.
-    """
-
-    def test_each_superseded_command_is_refused(self):
-        for command in (
-            'queue_request_next',
-            'shot_accepted',
-            'shot_rejected',
-            'notify_shot_complete',
-        ):
-            # Sent under its own name, since the client has no method for it,
-            # and answered without the main thread, since no handler has it:
-            with self.subTest(command=command), self.assertRaises(AttributeError):
-                self.client.request(command)
 
 
 class PreparsingApp(FakeApp):
