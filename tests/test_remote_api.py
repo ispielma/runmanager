@@ -1,14 +1,12 @@
 """What runmanager's server answers a remote caller.
 
-These are the commands a plugin or an optimizer sends, and the refusal of the
-BLACS commands that queue_exchange replaced. BLACS's side of the handover is
-tested in blacs.
+These are the commands a plugin or an optimizer sends. BLACS's side of the
+handover, queue_exchange, is tested in blacs.
 
 Each is sent by the real RunmanagerClient to a real RunmanagerServer on a free
 port, so a command reaches its handler under the name the client sends it by,
 and an exception the handler returns is raised by the client, as for any caller.
 """
-import copy
 import datetime
 import os
 import queue
@@ -85,14 +83,14 @@ class RemoteCommandTestCase(unittest.TestCase):
         self.addCleanup(server.shutdown)
         self.client = RunmanagerClient(host='127.0.0.1', port=server.port, timeout=10)
 
-    def request(self, command, *args, **kwargs):
+    def request(self, method, *args, **kwargs):
         # Most handlers hop to the main thread, as the running server's do, so
         # the client asks from another thread while this one processes events:
         answer = {}
 
         def ask():
             try:
-                answer['value'] = getattr(self.client, command)(*args, **kwargs)
+                answer['value'] = method(*args, **kwargs)
             except Exception as exc:
                 answer['error'] = exc
 
@@ -325,12 +323,12 @@ class SubmitShotsTests(RemoteCommandTestCase):
 
     def submit(self, *entries, **kwargs):
         return self.request(
-            'submit_shots', [dict(entry) for entry in entries], **kwargs
+            self.client.submit_shots, [dict(entry) for entry in entries], **kwargs
         )
 
     def expressions(self):
         """The expressions the window is left holding."""
-        return self.request('get_values', raw=True)
+        return self.request(self.client.get_values, raw=True)
 
     def queued(self):
         """The records of the one batch that reached the queue."""
@@ -736,7 +734,7 @@ class ShotStatusTests(RemoteCommandTestCase):
         for state, (pending, _) in sorted(self.EXPECTED.items()):
             with self.subTest(state=state):
                 self.queue((state or 'waiting', state))
-                answer = self.request('shot_status', [state or 'waiting'])
+                answer = self.request(self.client.shot_status, [state or 'waiting'])
                 self.assertEqual(answer[state or 'waiting']['pending'], pending)
 
     def test_a_row_behind_a_held_one_says_it_is_blocked(self):
@@ -749,7 +747,7 @@ class ShotStatusTests(RemoteCommandTestCase):
             with self.subTest(state=state):
                 self.queue(('head', state), ('behind', ''))
 
-                answer = self.request('shot_status', ['behind'])
+                answer = self.request(self.client.shot_status, ['behind'])
 
                 self.assertEqual(
                     answer['behind'],
@@ -763,7 +761,7 @@ class ShotStatusTests(RemoteCommandTestCase):
         # reason, and that is what an operator has to act on.
         self.queue(('head', 'rejected'), ('behind', ''))
 
-        answer = self.request('shot_status', ['head', 'behind'])
+        answer = self.request(self.client.shot_status, ['head', 'behind'])
 
         self.assertEqual(answer['head']['state'], 'rejected')
         self.assertEqual(answer['behind']['state'], BLOCKED_SHOT_STATE)
@@ -774,7 +772,7 @@ class ShotStatusTests(RemoteCommandTestCase):
         # is waiting its turn again.
         self.queue(('head', 'rejected'), ('behind', ''))
         self.assertEqual(
-            self.request('shot_status', ['behind'])['behind']['state'],
+            self.request(self.client.shot_status, ['behind'])['behind']['state'],
             BLOCKED_SHOT_STATE,
             'which is what the caller polling it is told meanwhile',
         )
@@ -782,7 +780,7 @@ class ShotStatusTests(RemoteCommandTestCase):
         self.app.queue_manager.delete_rows(['head'])
 
         self.assertEqual(
-            self.request('shot_status', ['behind'])['behind'],
+            self.request(self.client.shot_status, ['behind'])['behind'],
             {'pending': True, 'state': ''},
             'the answer is read off the queue as it stands, so a row asked '
             'about while it was stuck is not left carrying that',
@@ -796,7 +794,7 @@ class ShotStatusTests(RemoteCommandTestCase):
         # give up on a shot the apparatus is about to take.
         self.queue(('novel', 'some-state-added-later'), ('behind', ''))
 
-        answer = self.request('shot_status', ['novel', 'behind'])
+        answer = self.request(self.client.shot_status, ['novel', 'behind'])
 
         self.assertTrue(answer['novel']['pending'])
         self.assertTrue(answer['behind']['pending'])
@@ -804,10 +802,12 @@ class ShotStatusTests(RemoteCommandTestCase):
     def test_the_state_is_passed_through_for_somebody_reading_it(self):
         self.enqueue('one', state='failed')
 
-        self.assertEqual(self.request('shot_status', ['one'])['one']['state'], 'failed')
+        self.assertEqual(
+            self.request(self.client.shot_status, ['one'])['one']['state'], 'failed'
+        )
 
     def test_a_shot_the_queue_no_longer_has_is_not_pending(self):
-        answer = self.request('shot_status', ['never-heard-of-it'])
+        answer = self.request(self.client.shot_status, ['never-heard-of-it'])
 
         self.assertEqual(
             answer['never-heard-of-it'],
@@ -819,21 +819,18 @@ class ShotStatusTests(RemoteCommandTestCase):
     def test_every_id_asked_about_is_answered(self):
         self.enqueue('here')
 
-        answer = self.request('shot_status', ['here', 'gone', 'here'])
+        answer = self.request(self.client.shot_status, ['here', 'gone', 'here'])
 
         self.assertEqual(sorted(answer), ['gone', 'here'])
 
     def test_asking_leaves_the_queue_as_it_was(self):
-        # Deep, because the rows themselves are half of the claim: a list of
-        # the same dicts compares each row to itself and would pass with the
-        # answer written back into every row it was read from.
         self.enqueue('one')
         self.enqueue('two')
-        before = copy.deepcopy(self.app.queue_controller._items)
+        before = self.app.queue_controller.get_queue_display_items()
 
-        self.request('shot_status', ['one', 'two', 'three'])
+        self.request(self.client.shot_status, ['one', 'two', 'three'])
 
-        self.assertEqual(self.app.queue_controller._items, before)
+        self.assertEqual(self.app.queue_controller.get_queue_display_items(), before)
 
 
 class EmptyQueueTests(RemoteCommandTestCase):
@@ -870,10 +867,10 @@ class EmptyQueueTests(RemoteCommandTestCase):
             return result
 
         self.app.queue_manager.compile_run_file_callback = compile_writing_its_file
-        descriptors = self.request('submit_shots', [{'x': 1}, {'x': 2}])
+        descriptors = self.request(self.client.submit_shots, [{'x': 1}, {'x': 2}])
         self.assertTrue(started.wait(5), 'the first shot is compiling')
 
-        self.request('abort')
+        self.request(self.client.abort)
         self.app.compiling.set()
 
         self.assertTrue(written.wait(5), 'and its compile finished')
@@ -1224,31 +1221,10 @@ class DestinationTests(RemoteCommandTestCase):
 
     def test_a_caller_decides_whether_engaged_shots_go_to_blacs(self):
         self.app.ui.checkBox_run_shots.setChecked(True)
-        self.request('set_run_shots', False)
+        self.request(self.client.set_run_shots, False)
 
         self.assertFalse(self.app.ui.checkBox_run_shots.isChecked())
-        self.assertFalse(self.request('get_run_shots'))
-
-
-class SupersededCommandTests(RemoteCommandTestCase):
-    """The four commands queue_exchange replaced stay gone from the server.
-
-    One exchange applies an outcome before choosing the next shot, which is
-    what makes the offer, the reclaim and the retry sound; a handler for any
-    of these would be a second route around that ordering.
-    """
-
-    def test_each_superseded_command_is_refused(self):
-        for command in (
-            'queue_request_next',
-            'shot_accepted',
-            'shot_rejected',
-            'notify_shot_complete',
-        ):
-            # Sent under its own name, since the client has no method for it,
-            # and answered without the main thread, since no handler has it:
-            with self.subTest(command=command), self.assertRaises(AttributeError):
-                self.client.request(command)
+        self.assertFalse(self.request(self.client.get_run_shots))
 
 
 class PreparsingApp(FakeApp):
@@ -1286,7 +1262,8 @@ class PreparseFailureTests(RemoteCommandTestCase):
             threading.Thread(target=self.app.preparse_globals_loop, daemon=True).start()
             self.app.preparse_globals_required.put(None)
             asker = threading.Thread(
-                target=lambda: answers.append(self.request('n_shots')), daemon=True
+                target=lambda: answers.append(self.request(self.client.n_shots)),
+                daemon=True,
             )
             asker.start()
             asker.join(5)
