@@ -216,19 +216,6 @@ def _details_to_sequence_globals(globals_details, defaults_only=False, overrides
     return sequence_globals
 
 
-def get_default_shot_globals(groups):
-    globals_details = globals_file.get_globals_details(groups)
-    sequence_globals = _details_to_sequence_globals(globals_details, defaults_only=True)
-    evaled_globals, _, _ = evaluate_globals(sequence_globals, raise_exceptions=True)
-    shots = expand_globals(sequence_globals, evaled_globals)
-    if len(shots) != 1:
-        raise ValueError(
-            'Default-only compilation must produce exactly one shot, got %d.'
-            % len(shots)
-        )
-    return sequence_globals, shots[0]
-
-
 def get_frozen_globals(globals_details, shot):
     frozen_globals = {}
     for group_name, globals_data in globals_details.items():
@@ -245,10 +232,17 @@ def get_frozen_globals(globals_details, shot):
     return frozen_globals
 
 
-def get_queue_compile_globals(groups, frozen_globals):
+def get_queue_compile_globals(groups, frozen_globals=None, default_globals=False):
+    """The globals a queued shot's file is written from.
+
+    Returns the sequence globals and the one shot's globals. ``frozen_globals``
+    replaces the expressions of the globals it names. With ``default_globals``
+    the rest are taken at their defaults even where a scan is set, as a default
+    shot's are.
+    """
     globals_details = globals_file.get_globals_details(groups)
     sequence_globals = _details_to_sequence_globals(
-        globals_details, defaults_only=False, overrides=frozen_globals
+        globals_details, defaults_only=default_globals, overrides=frozen_globals
     )
     evaled_globals, _, _ = evaluate_globals(sequence_globals, raise_exceptions=True)
     shots = expand_globals(sequence_globals, evaled_globals)

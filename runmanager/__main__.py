@@ -4878,14 +4878,9 @@ class RunManager(LabscriptApplication):
         )
         if active_groups is None:
             raise RuntimeError('No active globals groups available for queued compilation.')
-        if default_globals:
-            sequence_globals, runglobals = runmanager.get_default_shot_globals(
-                active_groups
-            )
-        else:
-            sequence_globals, runglobals = runmanager.get_queue_compile_globals(
-                active_groups, item['frozen_globals']
-            )
+        sequence_globals, runglobals = runmanager.get_queue_compile_globals(
+            active_groups, item.get('frozen_globals'), default_globals=default_globals
+        )
         runmanager.make_single_run_file(
             item['path'],
             sequence_globals,
@@ -4994,7 +4989,9 @@ class RunManager(LabscriptApplication):
         run_file = None
         try:
             active_groups = inmain(self.get_active_groups, interactive=False)
-            _, runglobals = runmanager.get_default_shot_globals(active_groups)
+            _, runglobals = runmanager.get_queue_compile_globals(
+                active_groups, default_globals=True
+            )
             sequence_attrs, output_folder, filename_prefix = (
                 runmanager.new_sequence_details(
                     labscript_file,
