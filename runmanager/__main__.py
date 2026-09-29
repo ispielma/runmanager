@@ -414,6 +414,21 @@ class FingerTabWidget(QtWidgets.QTabWidget):
                 break
 
 
+def set_selection_highlight(widget):
+    palette = widget.palette()
+    for group in [QtGui.QPalette.Active, QtGui.QPalette.Inactive]:
+        palette.setColor(
+            group,
+            QtGui.QPalette.Highlight,
+            QtGui.QColor(ItemView.COLOR_HIGHLIGHT))
+        palette.setColor(
+            group,
+            QtGui.QPalette.HighlightedText,
+            palette.color(QtGui.QPalette.Active, QtGui.QPalette.WindowText)
+        )
+    widget.setPalette(palette)
+
+
 class ItemView(object):
     """Mixin for QTableView and QTreeView that emits a custom signal leftClicked(index)
     after a left click on a valid index, and doubleLeftClicked(index) (in addition) on
@@ -429,18 +444,7 @@ class ItemView(object):
         self._pressed_index = None
         self._double_click = False
         self.setAutoScroll(False)
-        p = self.palette()
-        for group in [QtGui.QPalette.Active, QtGui.QPalette.Inactive]:
-            p.setColor(
-                group,
-                QtGui.QPalette.Highlight,
-                QtGui.QColor(self.COLOR_HIGHLIGHT))
-            p.setColor(
-                group,
-                QtGui.QPalette.HighlightedText,
-                p.color(QtGui.QPalette.Active, QtGui.QPalette.WindowText)
-            )
-        self.setPalette(p)
+        set_selection_highlight(self)
 
     def mousePressEvent(self, event):
         result = super(ItemView, self).mousePressEvent(event)
@@ -626,6 +630,7 @@ class Editor(QtWidgets.QTextEdit):
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.textChanged.connect(self.update_size)
         self.initial_height = None
+        set_selection_highlight(self)
 
     def update_size(self):
         if self.initial_height is not None:
