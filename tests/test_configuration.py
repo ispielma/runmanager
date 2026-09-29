@@ -57,7 +57,7 @@ class QueueInConfigurationTests(unittest.TestCase):
             get_configuration_data=dict, restore_configuration_data=lambda data: None
         )
         app.queue_manager = QueueManager(
-            lambda item: None,
+            lambda item, default_globals: None,
             lambda labscript_file, path: True,
             lambda path: None,
             lambda *args, **kwargs: None,

@@ -7,6 +7,7 @@ written but not read is dropped from the added shots, and a name read but not
 written raises the first time a sequence is extended.
 """
 import datetime
+import functools
 import os
 import shutil
 import tempfile
@@ -23,6 +24,7 @@ import h5py
 import runmanager
 import runmanager.globals_file as globals_file
 from fixtures import RunManager, labconfig
+from runmanager.queueing import QueueManager
 
 
 def sequence_attrs(**overrides):
@@ -138,18 +140,25 @@ class DefaultSequenceTests(unittest.TestCase):
     def default_shot_app(self, **runmanager_settings):
         """A runmanager just started, over the globals file in the directory."""
         said = []
-        return types.SimpleNamespace(
+        app = types.SimpleNamespace(
             exp_config=labconfig(self.directory, **runmanager_settings),
             sequences={},
             said=said,
             _default_shot_lock=threading.Lock(),
             get_active_groups=lambda interactive=True: {'group': self.globals_file},
-            compile_run_file=lambda labscript_file, run_file: True,
-            send_to_runviewer=lambda run_file: None,
             output_box=types.SimpleNamespace(
                 output=lambda text, red=False: said.append(text)
             ),
         )
+        app.prepare_queue_shot = functools.partial(RunManager.prepare_queue_shot, app)
+        app.queue_manager = QueueManager(
+            app.prepare_queue_shot,
+            lambda labscript_file, run_file: True,
+            lambda run_file: None,
+            app.output_box.output,
+        )
+        self.addCleanup(app.queue_manager.shutdown)
+        return app
 
     def test_each_default_shot_takes_the_next_run_number_of_that_sequence(self):
         # Every one of them run 0 would be one run number for many shots of

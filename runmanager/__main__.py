@@ -4872,15 +4872,20 @@ class RunManager(LabscriptApplication):
         logger.debug(run_files)
         return labscript_file, run_files
 
-    def prepare_queue_shot(self, item):
+    def prepare_queue_shot(self, item, default_globals=False):
         active_groups = item.get('active_groups') or inmain(
             self.get_active_groups, interactive=False
         )
         if active_groups is None:
             raise RuntimeError('No active globals groups available for queued compilation.')
-        sequence_globals, runglobals = runmanager.get_queue_compile_globals(
-            active_groups, item['frozen_globals']
-        )
+        if default_globals:
+            sequence_globals, runglobals = runmanager.get_default_shot_globals(
+                active_groups
+            )
+        else:
+            sequence_globals, runglobals = runmanager.get_queue_compile_globals(
+                active_groups, item['frozen_globals']
+            )
         runmanager.make_single_run_file(
             item['path'],
             sequence_globals,
@@ -4989,9 +4994,7 @@ class RunManager(LabscriptApplication):
         run_file = None
         try:
             active_groups = inmain(self.get_active_groups, interactive=False)
-            sequence_globals, runglobals = runmanager.get_default_shot_globals(
-                active_groups
-            )
+            _, runglobals = runmanager.get_default_shot_globals(active_groups)
             sequence_attrs, output_folder, filename_prefix = (
                 runmanager.new_sequence_details(
                     labscript_file,
@@ -5022,35 +5025,24 @@ class RunManager(LabscriptApplication):
                 start=start,
             )
             self.sequences[key] = (run_file, sequence_attrs, default_index + 1, None)
-            # No shot_id, deliberately. A default shot is runmanager's own,
-            # produced to keep the apparatus busy, and it is written here --
-            # before it is a queue row and before it has an id. A file with no
-            # shot_id is visibly not a shot anybody submitted, which is the
-            # right answer for a caller matching results to what it asked for.
-            # Numbered by its place in the day's default sequence, which all of
-            # that day's default shots share.
-            runmanager.make_single_run_file(
-                run_file,
-                sequence_globals,
-                runglobals,
-                sequence_attrs,
-                default_index,
-                default_index + 1,
-            )
-            if not self.compile_run_file(labscript_file, run_file):
-                raise RuntimeError(
-                    'Compilation failed for %s' % os.path.basename(run_file)
-                )
-            if send_to_runviewer:
-                self.send_to_runviewer(run_file)
-            row = {
+            # No shot_id, deliberately: a file without one is visibly not a shot
+            # anybody submitted, which is what a caller matching results to what
+            # it asked for needs. Numbered within the day's default sequence.
+            shot = {
                 'path': run_file,
-                'compiled': True,
-                'default_shot': True,
+                'labscript_file': labscript_file,
+                'active_groups': active_groups,
                 'sequence_attrs': sequence_attrs,
                 'run_no': default_index,
                 'n_runs': default_index + 1,
             }
+            if not self.queue_manager.compile_shot(
+                shot, send_to_runviewer, default_globals=True
+            ):
+                raise RuntimeError(
+                    'Compilation failed for %s' % os.path.basename(run_file)
+                )
+            row = dict(shot, compiled=True, default_shot=True)
         except Exception as e:
             self.output_box.output(
                 'Could not produce a default shot: %s\n' % str(e), red=True

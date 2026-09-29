@@ -946,9 +946,13 @@ class QueueManager(QtCore.QObject):
         self.command_queue.put(('compile_shots', (records, send_to_runviewer)))
         return records
 
-    def _compile_shot(self, item, send_to_runviewer=False):
-        if 'frozen_globals' in item:
-            self.prepare_run_file_callback(item)
+    def compile_shot(self, item, send_to_runviewer=False, default_globals=False):
+        """Write one shot's file, compile it, and send it to runviewer if asked.
+
+        With ``default_globals`` the file is written from the globals' defaults,
+        as a default shot is, rather than from the item's frozen globals.
+        """
+        self.prepare_run_file_callback(item, default_globals=default_globals)
         success = self.compile_run_file_callback(item['labscript_file'], item['path'])
         if success and send_to_runviewer:
             self.send_to_runviewer_callback(item['path'])
@@ -993,7 +997,7 @@ class QueueManager(QtCore.QObject):
         # what happened.
         message = 'Could not be compiled. See the output for the reason.'
         try:
-            success = self._compile_shot(item, send_to_runviewer=send_to_runviewer)
+            success = self.compile_shot(item, send_to_runviewer=send_to_runviewer)
         except Exception as exc:
             message = 'Could not be compiled: %s' % str(exc)
             self.output(
@@ -1190,7 +1194,7 @@ class QueueManager(QtCore.QObject):
                 elif command == 'compile_shots':
                     records, send_to_runviewer = args
                     for item in records:
-                        if not self._compile_shot(item, send_to_runviewer=send_to_runviewer):
+                        if not self.compile_shot(item, send_to_runviewer=send_to_runviewer):
                             self.output('Compilation aborted.\n\n', red=True)
                             break
                     else:

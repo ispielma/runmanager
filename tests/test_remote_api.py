@@ -47,7 +47,7 @@ class FakeApp(object):
 
     def __init__(self):
         self.queue_manager = QueueManager(
-            lambda item: None,
+            lambda item, default_globals: None,
             lambda labscript_file, path: True,
             lambda path: None,
             lambda *args, **kwargs: None,

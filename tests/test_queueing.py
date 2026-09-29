@@ -533,7 +533,7 @@ class FakeRunManager(object):
         self.compiles = compiles
         self.compiled = []
         self.queue_manager = QueueManager(
-            lambda item: None,
+            lambda item, default_globals: None,
             self.compile_run_file,
             lambda path: None,
             self.output_box.output,
@@ -1111,7 +1111,7 @@ class CompiledFlagOwnershipTests(unittest.TestCase):
         item, _pending = controller.claim_next_for_compile()
         self.assertIsNotNone(item, 'the row is there to be compiled')
 
-        app.queue_manager._compile_shot(item)
+        app.queue_manager.compile_shot(item)
 
         self.assertIsNone(
             controller.offer_next(),
@@ -1144,7 +1144,7 @@ class SubmittedShotTests(unittest.TestCase):
         self.release.set()
         self.hold_from = 1
         self.manager = QueueManager(
-            lambda item: None,
+            lambda item, default_globals: None,
             self.compile_run_file,
             lambda path: None,
             lambda *args, **kwargs: None,
@@ -1403,7 +1403,7 @@ class ShotIdBeforeCompileTests(unittest.TestCase):
         app = FakeRunManager(self)
         self.addCleanup(app.queue_manager.shutdown)
         prepared = []
-        app.queue_manager.prepare_run_file_callback = lambda item: prepared.append(
+        app.queue_manager.prepare_run_file_callback = lambda item, default_globals: prepared.append(
             dict(item)
         )
 
@@ -3279,7 +3279,7 @@ class CallerChosenShotIdTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.directory, True)
         self.written = []
         self.manager = QueueManager(
-            lambda item: self.written.append(item['shot_id']),
+            lambda item, default_globals: self.written.append(item['shot_id']),
             lambda labscript_file, path: True,
             lambda path: None,
             lambda *args, **kwargs: None,
