@@ -3624,8 +3624,9 @@ class RunManager(LabscriptApplication):
         self.on_groups_model_active_changed_recursion_depth += 1
         try:
             check_state = item.checkState()
-            # Ensure sort data matches active state:
-            item.setData(check_state, self.GROUPS_ROLE_SORT_DATA)
+            # Ensure sort data matches active state. The number orders rows by
+            # state, where the enum itself would order them by its name.
+            item.setData(check_state.value, self.GROUPS_ROLE_SORT_DATA)
             if self.on_groups_model_active_changed_recursion_depth > 1:
                 # Prevent all below code from running in response to data changes
                 # initiated from within this method itself. The code above this
@@ -4038,7 +4039,7 @@ class RunManager(LabscriptApplication):
         file_active_item = QtGui.QStandardItem()
         file_active_item.setCheckState(QtCore.Qt.Unchecked)
         # Sort column by CheckState - must keep this updated when checkstate changes:
-        file_active_item.setData(QtCore.Qt.Unchecked, self.GROUPS_ROLE_SORT_DATA)
+        file_active_item.setData(QtCore.Qt.CheckState.Unchecked.value, self.GROUPS_ROLE_SORT_DATA)
         file_active_item.setEditable(False)
         file_active_item.setToolTip('Check to set all the file\'s groups as active.')
 
@@ -4107,7 +4108,7 @@ class RunManager(LabscriptApplication):
         group_active_item.setCheckState(QtCore.Qt.Unchecked)
         # Sort column by CheckState - must keep this updated whenever the
         # checkstate changes:
-        group_active_item.setData(QtCore.Qt.Unchecked, self.GROUPS_ROLE_SORT_DATA)
+        group_active_item.setData(QtCore.Qt.CheckState.Unchecked.value, self.GROUPS_ROLE_SORT_DATA)
         group_active_item.setEditable(False)
         group_active_item.setToolTip(
             'Whether or not the globals within this group should be used by runmanager for compilation.')
