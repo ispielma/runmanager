@@ -2316,6 +2316,8 @@ class RunManager(LabscriptApplication):
 
 
     def on_master_shuffle_clicked(self, state):
+        # stateChanged delivers an int, which never equals a Qt.CheckState member.
+        state = QtCore.Qt.CheckState(state)
         if state in [QtCore.Qt.Checked, QtCore.Qt.Unchecked]:
             self.ui.pushButton_shuffle.setTristate(False)
             for i in range(self.axes_model.rowCount()):
