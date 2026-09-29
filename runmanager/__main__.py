@@ -5386,14 +5386,14 @@ class RunmanagerServer(ZMQServer):
         finally:
             app.globals_changed()
 
-    def handle_get_default_globals(self, raw=False):
+    def handle_get_values(self, raw=False):
         return self._get_expression_field_values('default', raw=raw)
 
     def handle_get_globals(self, raw=False):
         active_groups = inmain(app.get_active_groups, interactive=False)
         return self._merge_groups(runmanager.get_globals(active_groups), raw)
 
-    def handle_get_scan_globals(self, raw=False):
+    def handle_get_scans(self, raw=False):
         return self._get_expression_field_values('scan', raw=raw)
 
     def handle_get_scan_enabled(self):
@@ -5402,7 +5402,7 @@ class RunmanagerServer(ZMQServer):
     def handle_get_jit_enabled(self):
         return self._get_global_field_values('jit_enabled')
 
-    def handle_set_default_globals(self, globals, raw=False):
+    def handle_set_values(self, globals, raw=False):
         return self._set_expression_field_values(
             runmanager.get_value,
             runmanager.set_value,
@@ -5412,9 +5412,9 @@ class RunmanagerServer(ZMQServer):
         )
 
     def handle_set_globals(self, globals, raw=False):
-        return self.handle_set_default_globals(globals, raw=raw)
+        return self.handle_set_values(globals, raw=raw)
 
-    def handle_set_scan_globals(self, globals, raw=False):
+    def handle_set_scans(self, globals, raw=False):
         return self._set_expression_field_values(
             runmanager.get_scan,
             runmanager.set_scan,
@@ -5594,7 +5594,7 @@ class RunmanagerServer(ZMQServer):
                     % (entry, len(shots), ', '.join(expanding) or 'none')
                 )
             batch.append((shots[0], runmanager.get_frozen_globals(details, shots[0])))
-        self.handle_set_globals(entries[-1])
+        self.handle_set_values(entries[-1])
         # Joined by id, not by the queue's last shot, which is whoever
         # submitted last: an operator's Engage in between would otherwise take
         # the session's later shots into the operator's sequence.

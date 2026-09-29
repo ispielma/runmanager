@@ -37,12 +37,12 @@ class RunmanagerClient(ZMQClient):
         """Return the version of runmanager the server is running in"""
         return self.request('get_version')
 
-    def get_default_globals(self, raw=False):
+    def get_values(self, raw=False):
         """Return all active globals' Default values.
 
         If raw=True, return the stored Default expression strings. Otherwise return
         the evaluated Python values."""
-        return self.request('get_default_globals', raw=raw)
+        return self.request('get_values', raw=raw)
 
     def get_globals(self, raw=False):
         """Return all active globals' effective values.
@@ -51,24 +51,24 @@ class RunmanagerClient(ZMQClient):
         the evaluated Python values."""
         return self.request('get_globals', raw=raw)
 
-    def set_default_globals(self, globals, raw=False):
+    def set_values(self, globals, raw=False):
         """Set Default expressions for active globals."""
-        return self.request('set_default_globals', globals, raw=raw)
+        return self.request('set_values', globals, raw=raw)
 
     def set_globals(self, globals, raw=False):
-        """Alias for set_default_globals()."""
-        return self.set_default_globals(globals, raw=raw)
+        """Alias for set_values(): writes the value field, whatever Scan? is."""
+        return self.set_values(globals, raw=raw)
 
-    def get_scan_globals(self, raw=False):
+    def get_scans(self, raw=False):
         """Return all active globals' Scan values.
 
         If raw=True, return the stored Scan expression strings. Otherwise return the
         evaluated Python values."""
-        return self.request('get_scan_globals', raw=raw)
+        return self.request('get_scans', raw=raw)
 
-    def set_scan_globals(self, globals, raw=False):
+    def set_scans(self, globals, raw=False):
         """Set Scan expressions for active globals."""
-        return self.request('set_scan_globals', globals, raw=raw)
+        return self.request('set_scans', globals, raw=raw)
 
     def get_scan_enabled(self):
         """Return all active globals' Scan? state."""

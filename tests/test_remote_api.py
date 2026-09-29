@@ -320,7 +320,7 @@ class SubmitShotsTests(RemoteCommandTestCase):
 
     def expressions(self):
         """The expressions the window is left holding."""
-        return self.request('get_default_globals', raw=True)
+        return self.request('get_values', raw=True)
 
     def queued(self):
         """The records of the one batch that reached the queue."""
