@@ -23,3 +23,5 @@ runmanager can be run on any host with network access to the hardware supervisor
 ## Installation
 
 runmanager is distributed as a Python package on [PyPI](https://pypi.org/user/labscript-suite) and [Anaconda Cloud](https://anaconda.org/labscript-suite), and should be installed with other components of the _labscript suite_. Please see the [installation guide](https://docs.labscriptsuite.org/en/latest/installation) for details.
+
+Install runmanager together with the other packages of the suite, not on its own. runmanager imports APIs from `labscript_utils`, `blacs`, `lyse` and `runviewer` that the version pins in `pyproject.toml` do not guarantee.
