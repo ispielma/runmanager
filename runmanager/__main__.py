@@ -5278,6 +5278,10 @@ class RunmanagerServer(ZMQServer):
         for global_name, (_, group_name) in locations.items():
             expression = globals_details[group_name][global_name][field]
             sequence_globals[group_name][global_name] = (expression, '', '')
+        return self._merge_groups(sequence_globals, raw)
+
+    @staticmethod
+    def _merge_groups(sequence_globals, raw):
         if raw:
             values = {}
             for group_globals in sequence_globals.values():
@@ -5387,21 +5391,7 @@ class RunmanagerServer(ZMQServer):
 
     def handle_get_globals(self, raw=False):
         active_groups = inmain(app.get_active_groups, interactive=False)
-        sequence_globals = runmanager.get_globals(active_groups)
-        if raw:
-            values = {}
-            for group_globals in sequence_globals.values():
-                values.update(
-                    {name: expression for name, (expression, _, _) in group_globals.items()}
-                )
-            return values
-        evaled_globals, _, _ = runmanager.evaluate_globals(
-            sequence_globals, raise_exceptions=False
-        )
-        values = {}
-        for group_globals in evaled_globals.values():
-            values.update(group_globals)
-        return values
+        return self._merge_groups(runmanager.get_globals(active_groups), raw)
 
     def handle_get_scan_globals(self, raw=False):
         return self._get_expression_field_values('scan', raw=raw)
