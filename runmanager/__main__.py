@@ -1655,7 +1655,7 @@ class GroupTab(object):
             )
             self.ui.treeView_globals.setCurrentIndex(default_item.index())
             self.ui.treeView_globals.edit(default_item.index())
-            self.globals_changed()
+            app.globals_changed()
         finally:
             item.setText(self.GLOBALS_DUMMY_ROW_TEXT)
 
@@ -1683,7 +1683,7 @@ class GroupTab(object):
             item.setData(new_global_name, self.GLOBALS_ROLE_SORT_DATA)
             self.do_model_sort()
             item.setToolTip(new_global_name)
-            self.globals_changed()
+            app.globals_changed()
             default_item = self.get_global_expression_item(new_global_name, 'default')
             if (
                 not default_item.text()
@@ -1749,7 +1749,7 @@ class GroupTab(object):
             self.do_model_sort()
             self.update_expression_item_metadata(item, 'Evaluating...')
             self._update_boolean_state(global_name)
-            self.globals_changed()
+            app.globals_changed()
             if not interactive:
                 return
             units_item = self.get_global_item_by_name(global_name, self.GLOBALS_COL_UNITS)
@@ -1836,7 +1836,7 @@ class GroupTab(object):
                     self.get_global_item_by_name(global_name, self.GLOBALS_COL_EXPANSION)
                 )
             self.do_model_sort()
-            self.globals_changed()
+            app.globals_changed()
             if not interactive:
                 return
             active_item = self.get_active_value_item(global_name)
@@ -1887,7 +1887,7 @@ class GroupTab(object):
                     scan_item.setData(False, self.GLOBALS_ROLE_SORT_DATA)
             self.update_scan_controls(global_name)
             self.do_model_sort()
-            self.globals_changed()
+            app.globals_changed()
             if not interactive:
                 return
             scroll_view_to_row_if_current(self.ui.treeView_globals, item)
@@ -1923,7 +1923,7 @@ class GroupTab(object):
             self.do_model_sort()
             self.update_expression_item_metadata(item, 'Evaluating...')
             self._update_boolean_state(global_name)
-            self.globals_changed()
+            app.globals_changed()
             if not interactive:
                 return
             scroll_view_to_row_if_current(self.ui.treeView_globals, item)
@@ -1950,11 +1950,8 @@ class GroupTab(object):
             item.setData(new_expansion, self.GLOBALS_ROLE_PREVIOUS_TEXT)
             item.setData(new_expansion, self.GLOBALS_ROLE_SORT_DATA)
             self.do_model_sort()
-            self.globals_changed()
+            app.globals_changed()
             scroll_view_to_row_if_current(self.ui.treeView_globals, item)
-
-    def globals_changed(self):
-        app.globals_changed()
 
     def delete_global(self, global_name, confirm=True):
         logger.info('%s:%s - delete global: %s', self.globals_file, self.group_name, global_name)
@@ -1965,7 +1962,7 @@ class GroupTab(object):
         self.globals_model.removeRow(
             self.get_global_item_by_name(global_name, self.GLOBALS_COL_NAME).row()
         )
-        self.globals_changed()
+        app.globals_changed()
 
     def update_parse_indication(self, active_groups, sequence_globals, evaled_globals):
         if self.group_name in active_groups and active_groups[self.group_name] == self.globals_file:
@@ -2451,8 +2448,8 @@ class RunManager(LabscriptApplication):
         self.queue_empty_policy_combo.currentIndexChanged.connect(
             self.on_queue_empty_policy_changed
         )
-        self.queue_pause_button.toggled.connect(self.on_queue_paused_changed)
-        self.queue_widget.deleteRowsRequested.connect(self.on_queue_delete_rows_requested)
+        self.queue_pause_button.toggled.connect(self.queue_manager.set_paused)
+        self.queue_widget.deleteRowsRequested.connect(self.queue_manager.delete_rows)
         
         # Keyboard shortcuts:
         engage_shortcut = QtWidgets.QShortcut('F5', self.ui,
@@ -2492,9 +2489,6 @@ class RunManager(LabscriptApplication):
         new_index = (current_index + change) % n_tabs
         self.ui.tabWidget.setCurrentIndex(new_index)
 
-    def on_queue_delete_rows_requested(self, shot_ids):
-        self.queue_manager.delete_rows(shot_ids)
-
     def on_queue_empty_policy_changed(self, index):
         empty_queue_policy = self.queue_empty_policy_combo.itemData(index)
         if empty_queue_policy is None:
@@ -2506,9 +2500,6 @@ class RunManager(LabscriptApplication):
         if compile_mode is None:
             return
         self.queue_manager.set_compile_mode(compile_mode)
-
-    def on_queue_paused_changed(self, checked):
-        self.queue_manager.set_paused(checked)
 
     @inmain_decorator()
     def update_blacs_status(self, status):
