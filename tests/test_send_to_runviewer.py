@@ -12,7 +12,6 @@ so a forked child gets one thread and every lock the others happen to hold at
 that instant -- the allocator's among them, which subprocess needs -- and
 deadlocks before starting anything, saying nothing about it.
 """
-import logging
 import os
 import queue
 import socket
@@ -49,18 +48,13 @@ class SendToRunviewerTests(unittest.TestCase):
     """The send and the launch, with only the process start faked."""
 
     def setUp(self):
-        self.main_module = main_module
         self.saved = {
             # Absent on Windows, which is where BLACS usually runs and what
             # the creationflags branch of the launch exists for. Reading it
             # unconditionally made the one test that is not skipped there error
             # in setUp instead of running.
             'fork': getattr(os, 'fork', None),
-            'logger': getattr(main_module, 'logger', None),
         }
-        # Assigned only inside the module's __main__ block, so it does not
-        # exist when the module is merely imported:
-        main_module.logger = logging.getLogger('test_send_to_runviewer')
         self.launched = []
         # runmanager's own name for the module, so that the launch reaches the
         # fake and nothing else in the process, such as a real server, does:
@@ -96,10 +90,6 @@ class SendToRunviewerTests(unittest.TestCase):
     def restore(self):
         if self.saved['fork'] is not None:
             os.fork = self.saved['fork']
-        if self.saved['logger'] is None:
-            del self.main_module.logger
-        else:
-            self.main_module.logger = self.saved['logger']
 
     def serve(self):
         server = runviewer_main.RunviewerServer(
