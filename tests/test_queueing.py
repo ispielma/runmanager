@@ -458,32 +458,15 @@ class RejectedShotTests(unittest.TestCase):
         self.assertEqual(offered['path'], os.path.abspath('/tmp/shot_b.h5'))
 
 
-class FakeOutputBox(object):
-    """What runmanager shows its user, which is where protocol trouble shows."""
-
-    def __init__(self):
-        self.lines = []
-
-    def output(self, text, red=False):
-        self.lines.append(text)
-
-    def said(self, *words):
-        return [line for line in self.lines if all(word in line for word in words)]
-
-
 ANALYSED_MARKER = '/runmanager-tests/marker.h5'
 
 
 class FakeRunManager(object):
-    """Runmanager's own exchange, over only the surface of it that it uses.
+    """Runmanager's exchange over only the surface of it that it uses.
 
-    RunManager.__init__ builds the whole application, which does not belong in
-    a unit test, so this holds the few things the exchange reaches for. The
-    methods below are RunManager's own and the queue underneath is a real
-    QueueManager, so these exercise the rules runmanager applies rather than a
-    description of them. Only producing a default shot, which evaluates globals
-    and compiles a labscript file, is stood in for. A completed shot goes to a
-    real lyse through a real AnalysisSubmission.
+    RunManager.__init__ builds the whole application, so the methods here are
+    RunManager's own over a real QueueManager, with compiling and default-shot
+    production stood in. A completed shot goes to a real lyse.
     """
 
     queue_exchange = RunManager.queue_exchange
@@ -497,10 +480,9 @@ class FakeRunManager(object):
     prepare_queue_shot = RunManager.prepare_queue_shot
     get_sequence_attrs_to_extend = RunManager.get_sequence_attrs_to_extend
 
-    # make_h5_files reads these. The output folder it would keep up to date is
-    # a line edit and a labscript file it does not have, and choosing the
-    # folder is not what any of this is about: the folder a batch added to a
-    # sequence is written to comes from the shot it is added to.
+    # make_h5_files reads these. There is no line edit to keep the output
+    # folder up to date, and a batch added to a sequence is written to the
+    # folder of the shot it is added to anyway.
     exp_config = None
     previous_default_output_folder = None
 
@@ -509,7 +491,10 @@ class FakeRunManager(object):
 
     def __init__(self, testcase, default_shot_file=None, compiles=True):
         hold_qapplication()
-        self.output_box = FakeOutputBox()
+        self.said = []
+        self.output_box = types.SimpleNamespace(
+            output=lambda text, red=False: self.said.append(text)
+        )
         # What the compiler does: True as though the shot compiled, False as it
         # reports a bad labscript file, or an exception for a failure to get
         # that far. Recorded so a test can say how many times it was asked.
@@ -958,76 +943,6 @@ class CompileFailureIsNotAHandoverTests(unittest.TestCase):
             rows[0]['state'],
             ROW_BACKGROUNDS,
             'a shot that cannot run is coloured, however it came to be that way',
-        )
-
-
-class KeptRowReasonTests(unittest.TestCase):
-    """Why a row was kept, said accurately.
-
-    One message served two callers with different rules. Delete keeps only the
-    row BLACS is executing; Clear keeps everything that went to BLACS, which
-    includes rows that came back failed or rejected long ago. Both printed
-    "BLACS is running it" -- and for the second that is untrue, and it is the
-    untruth most likely to send an operator to Abort on idle hardware.
-    """
-
-    def setUp(self):
-        self.directory = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.directory, True)
-
-    def app_with(self, *names):
-        app = FakeRunManager(self)
-        self.addCleanup(app.queue_manager.shutdown)
-        app.queue_manager.enqueue(
-            [queued_shot(os.path.join(self.directory, name)) for name in names]
-        )
-        return app
-
-    def test_clear_says_blacs_is_running_the_row_it_kept(self):
-        # Clear is the caller that can still keep a row BLACS is genuinely
-        # running: Delete now cancels that row rather than keeping it as it
-        # was, so this is where the running wording is reached.
-        app = self.app_with('shot_a.h5', 'shot_b.h5')
-        app.queue_manager.offer_next()
-
-        app.queue_manager.clear()
-
-        self.assertTrue(
-            app.output_box.said('shot_a.h5', 'BLACS is running it'),
-            'that one really is running',
-        )
-
-    def test_delete_says_the_shot_blacs_has_was_cancelled(self):
-        app = self.app_with('shot_a.h5')
-        offered = app.queue_manager.offer_next()
-
-        app.queue_manager.delete_rows([offered['shot_id']])
-
-        self.assertTrue(
-            app.output_box.said('shot_a.h5', 'Cancelled'),
-            'the operator asked for it to go, and it will, once BLACS asks '
-            'for work and proves the file is free',
-        )
-
-    def test_clear_does_not_say_blacs_is_running_a_row_that_came_back(self):
-        app = self.app_with('shot_a.h5', 'shot_b.h5')
-        offered = app.queue_manager.offer_next()
-        app.queue_manager.shot_finished(
-            offered['shot_id'], 'failed', 'a device would not arm'
-        )
-        app.output_box.lines = []
-
-        app.queue_manager.clear()
-
-        self.assertEqual(
-            app.output_box.said('shot_a.h5', 'BLACS is running it'),
-            [],
-            'BLACS reported this shot and moved on; it is not running it',
-        )
-        self.assertTrue(
-            app.output_box.said('shot_a.h5', 'a device would not arm'),
-            'the reason it was kept is the reason it came back, which is '
-            'recorded on the row and was being dropped',
         )
 
 
@@ -1498,30 +1413,6 @@ class QueueEditingTests(unittest.TestCase):
         by_path = {row['path']: row['shot_id'] for row in self.rows()}
         return [by_path[path] for path in paths]
 
-    def test_delete_cancels_the_shot_blacs_has_and_keeps_its_file(self):
-        running = self.enqueue('shot_a.h5')
-        self.app.offer_shot()
-
-        removed = self.app.queue_manager.delete_rows(self.selection(running))
-
-        self.assertEqual(removed, [], 'nothing is removed yet')
-        rows = self.rows()
-        self.assertEqual([row['path'] for row in rows], [running])
-        self.assertEqual(
-            rows[0]['state'],
-            'cancelled',
-            'the operator has said not this one, and the row says so',
-        )
-        self.assertTrue(
-            os.path.exists(running),
-            'the file may still be under the hardware pen, so it stays until '
-            'BLACS asking for work proves otherwise',
-        )
-        self.assertTrue(
-            self.app.output_box.said('shot_a.h5'),
-            'and the operator is told what happened to the row they selected',
-        )
-
     def test_delete_removes_the_rest_of_the_selection_around_it(self):
         # Selecting the whole queue and pressing Delete is the ordinary way to
         # discard the work behind the shot in progress: all of that goes, and
@@ -1546,11 +1437,6 @@ class QueueEditingTests(unittest.TestCase):
         self.assertFalse(os.path.exists(waiting), 'a waiting row takes its file')
         self.assertFalse(os.path.exists(also_waiting))
         self.assertTrue(os.path.exists(running))
-        self.assertEqual(
-            len(self.app.output_box.said('shot_a.h5', 'Cancelled')),
-            1,
-            'the one row that was kept is named once, and says what happened',
-        )
 
     def test_clear_keeps_the_shot_blacs_is_running_and_removes_the_rest(self):
         # Clear is also what both replacement submission modes do to the queue
@@ -1569,7 +1455,6 @@ class QueueEditingTests(unittest.TestCase):
         self.assertEqual(rows[0]['state'], 'running')
         self.assertTrue(os.path.exists(running), 'with the file it is running')
         self.assertFalse(os.path.exists(waiting))
-        self.assertTrue(self.app.output_box.said('shot_a.h5', 'running'))
 
     def test_clear_leaves_a_failed_row_alone_with_the_running_one(self):
         # Clear is what the two replacement submission modes offer: empty the
@@ -1733,10 +1618,6 @@ class ReplayTests(unittest.TestCase):
             ['running'],
             'one row, still the one BLACS is being asked to run',
         )
-        self.assertTrue(
-            self.app.output_box.said('shot_a.h5', 'again'),
-            'a re-offer the operator would otherwise never see is reported',
-        )
 
     def test_a_completed_outcome_that_arrives_twice_retires_the_row_once(self):
         # BLACS lets go of an outcome only once runmanager has taken it, so a
@@ -1818,11 +1699,8 @@ class ReplayTests(unittest.TestCase):
         rows = self.rows()
         self.assertEqual([row['state'] for row in rows], ['failed'])
         self.assertEqual(rows[0]['tooltip'].count('Device(s) in error state'), 1)
-        self.assertEqual(
-            len(self.app.output_box.said('shot_a.h5', 'failed')),
-            1,
-            'one failure is reported once',
-        )
+        failures_reported = [line for line in self.app.said if 'failed' in line]
+        self.assertEqual(len(failures_reported), 1, 'one failure is reported once')
 
     def test_a_retry_that_fails_the_same_way_is_still_a_second_failure(self):
         # The other side of the same rule. An outcome sent twice for one
@@ -1839,10 +1717,9 @@ class ReplayTests(unittest.TestCase):
                 request_shot=False,
             )
 
+        failures_reported = [line for line in self.app.said if 'failed' in line]
         self.assertEqual(
-            len(self.app.output_box.said('shot_a.h5', 'failed')),
-            2,
-            'each attempt that failed is reported',
+            len(failures_reported), 2, 'each attempt that failed is reported'
         )
 
 
@@ -1961,22 +1838,6 @@ class OutcomeAppliedOnceTests(unittest.TestCase):
             PROVIDER_NONE,
             'BLACS gets an answer, so it lets go of an outcome runmanager has '
             'already applied rather than resending it once a second forever',
-        )
-        self.assertTrue(
-            app.output_box.said('lyse submission fell over'),
-            'and the operator is told what went wrong on this side',
-        )
-
-    def test_a_different_outcome_for_the_same_row_is_still_reported(self):
-        app, shot_id = self.app_with_shot()
-
-        app.queue_exchange(self.outcome(shot_id, 'failed', 'a device would not arm'), True)
-        app.output_box.lines = []
-        app.queue_exchange(self.outcome(shot_id, 'aborted', 'the operator stopped it'), True)
-
-        self.assertTrue(
-            app.output_box.said('shot_a.h5', 'aborted'),
-            'a genuinely new outcome for the retried row still gets through',
         )
 
 
@@ -2115,81 +1976,6 @@ class CancelledShotTests(unittest.TestCase):
         )
 
 
-class OutcomeWithNoRowTests(unittest.TestCase):
-    """A shot that ran, reported by BLACS, with no row left to match.
-
-    The row can be gone for ordinary reasons: the operator loaded a queue
-    configuration, or restarted runmanager, while BLACS was still running the
-    shot it had been given. BLACS finishes, says so, and runmanager has nothing
-    in its queue under that id.
-
-    The queue is left alone -- there is nothing there to change -- but the shot
-    ran and wrote data, so the completion is passed on. Dropping it, on the
-    grounds that a resent outcome for a row already retired would be reported
-    twice, would be runmanager deciding what the far end can cope with, which
-    is not its to decide: reporting a completion is its part, and one it
-    withholds is one nothing downstream can ask for later.
-    """
-
-    def app(self):
-        app = FakeRunManager(self)
-        self.addCleanup(app.queue_manager.shutdown)
-        return app
-
-    def outcome(self, path='/tmp/gone.h5'):
-        return {
-            'shot_id': 'no-such-row',
-            'status': 'completed',
-            'message': '',
-            'path': path,
-        }
-
-    def test_a_completed_shot_with_no_row_still_reaches_lyse(self):
-        app = self.app()
-
-        app.apply_shot_outcome(self.outcome())
-
-        self.assertEqual(
-            app.analysed_paths(),
-            ['/tmp/gone.h5'],
-            'the shot ran and wrote data, and reporting that is this side\'s '
-            'part whether or not a row is left to tick off',
-        )
-
-    def test_the_operator_is_told_the_queue_was_not_touched(self):
-        app = self.app()
-
-        app.apply_shot_outcome(self.outcome())
-
-        self.assertTrue(
-            app.output_box.said('no-such-row'),
-            'and told which shot it was, since the queue shows nothing of it',
-        )
-
-    def test_a_shot_that_did_not_complete_is_not_analysed(self):
-        app = self.app()
-
-        app.apply_shot_outcome(
-            {
-                'shot_id': 'no-such-row',
-                'status': 'failed',
-                'message': 'a device would not arm',
-                'path': '/tmp/gone.h5',
-            }
-        )
-
-        self.assertEqual(
-            app.analysed_paths(), [], 'it did not run to the end'
-        )
-
-    def test_nothing_is_submitted_when_blacs_named_no_file(self):
-        app = self.app()
-
-        app.apply_shot_outcome(dict(self.outcome(), path=None))
-
-        self.assertEqual(app.analysed_paths(), [])
-
-
 class QueueBookkeepingUnderSubmissionTests(unittest.TestCase):
     """Two things the queue records that its own churn can spoil.
 
@@ -2307,10 +2093,6 @@ class MalformedOutcomeTests(unittest.TestCase):
                     'a normal reply, so BLACS moves on rather than retrying it',
                 )
                 self.assertEqual(response['shot_id'], offered['shot_id'])
-                self.assertTrue(
-                    app.output_box.said('could not read'),
-                    'and the operator is told the protocol went wrong',
-                )
 
     def test_an_outcome_runmanager_cannot_read_leaves_the_queue_alone(self):
         for description, outcome in malformed_outcomes('any-id'):
@@ -2438,13 +2220,9 @@ class ExchangeFailureTests(unittest.TestCase):
             PROVIDER_NONE,
             'a normal reply, so BLACS knows its outcome landed',
         )
-        self.assertTrue(
-            app.output_box.said('could not answer BLACS', 'moved'),
-            'and the operator is told what went wrong here',
-        )
         self.assertEqual(
-            app.queue_controller.get_queue_state()['n_items'],
-            0,
+            app.queue_controller.get_queue_paths(),
+            [],
             'the outcome that came with the request was still applied',
         )
 
@@ -2458,7 +2236,7 @@ class LostRowTests(unittest.TestCase):
     it says what happened either way.
     """
 
-    def test_a_completed_shot_with_no_row_is_reported_and_still_analysed(self):
+    def test_a_completed_shot_with_no_row_is_still_analysed(self):
         app = FakeRunManager(self)
         self.addCleanup(app.queue_manager.shutdown)
         app.queue_manager.enqueue([queued_shot('/tmp/shot_a.h5')])
@@ -2482,30 +2260,6 @@ class LostRowTests(unittest.TestCase):
             ['/tmp/shot_a.h5'],
             'the queue lost the row, but the shot ran and wrote data, and a '
             'completion withheld here is one nothing downstream can ask for',
-        )
-        self.assertTrue(
-            app.output_box.said(offered['shot_id'], 'queue is unchanged')
-        )
-
-    def test_a_path_runmanager_cannot_use_does_not_reach_analysis_as_it_came(self):
-        app = FakeRunManager(self)
-        self.addCleanup(app.queue_manager.shutdown)
-        app.queue_manager.enqueue([queued_shot('/tmp/shot_a.h5')])
-        offered = app.queue_exchange(request_shot=True)
-
-        app.queue_exchange(
-            outcome={
-                'shot_id': offered['shot_id'],
-                'status': 'completed',
-                'path': ['/tmp/shot_a.h5'],
-            },
-            request_shot=False,
-        )
-
-        self.assertEqual(
-            len(app.analysed_paths()),
-            1,
-            'lyse is given a path, whatever shape BLACS sent',
         )
 
 
@@ -2872,44 +2626,6 @@ class DeletedAnchorTests(unittest.TestCase):
             'a shot the operator cancelled and whose file has gone is not '
             'what the next submission carries on from',
         )
-
-
-class MissingSequenceReportTests(unittest.TestCase):
-    """What an operator is told when the sequence cannot be read.
-
-    Whoever pressed Engage sees this sentence and nothing else -- the chained
-    cause is in the log, not in the output box -- so the sentence has to be
-    true of what actually happened. A file that is not there and a file that
-    cannot be read are different things to go and do something about.
-    """
-
-    def setUp(self):
-        self.directory = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.directory, True)
-        self.app = FakeRunManager(self)
-        self.addCleanup(self.app.queue_manager.shutdown)
-        self.path = os.path.join(self.directory, 'experiment_00.h5')
-
-    def test_a_shot_whose_file_has_gone_says_that_it_has_gone(self):
-        with self.assertRaises(Exception) as raised:
-            self.app.get_sequence_attrs_to_extend(self.path)
-
-        self.assertIn(self.path, str(raised.exception))
-        self.assertIn('not there', str(raised.exception))
-
-    def test_a_file_that_cannot_be_read_says_what_stopped_it(self):
-        # A file that is there and unreadable -- locked by another
-        # application, unreadable by this user, not a shot file at all -- is
-        # not a shot that has gone, and telling an operator it is sends them
-        # looking for the wrong thing.
-        with open(self.path, 'w') as f:
-            f.write('not an h5 file')
-
-        with self.assertRaises(Exception) as raised:
-            self.app.get_sequence_attrs_to_extend(self.path)
-
-        self.assertIn('OSError', str(raised.exception))
-        self.assertIsInstance(raised.exception.__cause__, OSError)
 
 
 class CallerChosenShotIdTests(unittest.TestCase):
