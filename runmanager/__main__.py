@@ -2896,7 +2896,7 @@ class RunManager(LabscriptApplication):
             item = self.axes_model.item(i, self.AXES_COL_NAME)
             shuffle_item = self.axes_model.item(i, self.AXES_COL_SHUFFLE)
             name = item.data(self.AXES_ROLE_NAME)
-            expansion_order[name] = {'order':i, 'shuffle':shuffle_item.checkState()}
+            expansion_order[name] = {'order':i, 'shuffle':shuffle_item.checkState() == QtCore.Qt.CheckState.Checked}
         logger.info('Parsing globals...')
         try:
             _, shots, _, _, _ = self.parse_globals(
