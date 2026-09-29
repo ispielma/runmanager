@@ -239,9 +239,6 @@ class SubmittingApp(object):
     def globals_changed(self):
         self.axes_model.go_stale()
 
-    def ensure_editable_globals_file(self, globals_file, parent=None):
-        return globals_file
-
     def wait_until_preparse_complete(self):
         """Do what the preparse does to what a submission reads afterwards."""
         _, shots, _, _, expansions = self.parse_globals(
