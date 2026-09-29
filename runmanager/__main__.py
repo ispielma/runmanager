@@ -5101,9 +5101,9 @@ class RunManager(LabscriptApplication):
         shot_id = str(fields.get('shot_id') or '')
         status = str(fields.get('status', ''))
         if not shot_id or status not in SHOT_OUTCOME_STATUSES:
-            # Refused rather than raised: the server hands a raised exception
-            # back to BLACS, which takes it for an unreachable runmanager and
-            # would resend this unreadable outcome for ever.
+            # Refused rather than raised: a refusal returns normally, so the
+            # exchange goes on to offer_shot. A raise would end it at
+            # queue_exchange's guard, offering nothing until BLACS asks again.
             self.output_box.output(
                 'BLACS sent a shot outcome runmanager could not read: %s\n'
                 % (outcome,),
