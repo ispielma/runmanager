@@ -853,7 +853,7 @@ class GroupTab(object):
 
         dummy_scan_enabled_item = QtGui.QStandardItem()
         dummy_scan_enabled_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
-        dummy_scan_enabled_item.setFlags(QtCore.Qt.NoItemFlags)
+        dummy_scan_enabled_item.setFlags(QtCore.Qt.ItemIsEnabled)
         dummy_scan_enabled_item.setToolTip('Click to add global')
 
         dummy_name_item = QtGui.QStandardItem(self.GLOBALS_DUMMY_ROW_TEXT)
@@ -865,22 +865,22 @@ class GroupTab(object):
 
         dummy_default_item = QtGui.QStandardItem()
         dummy_default_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
-        dummy_default_item.setFlags(QtCore.Qt.NoItemFlags)
+        dummy_default_item.setFlags(QtCore.Qt.ItemIsEnabled)
         dummy_default_item.setToolTip('Click to add global')
 
         dummy_scan_item = QtGui.QStandardItem()
         dummy_scan_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
-        dummy_scan_item.setFlags(QtCore.Qt.NoItemFlags)
+        dummy_scan_item.setFlags(QtCore.Qt.ItemIsEnabled)
         dummy_scan_item.setToolTip('Click to add global')
 
         dummy_units_item = QtGui.QStandardItem()
         dummy_units_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
-        dummy_units_item.setFlags(QtCore.Qt.NoItemFlags)
+        dummy_units_item.setFlags(QtCore.Qt.ItemIsEnabled)
         dummy_units_item.setToolTip('Click to add global')
 
         dummy_expansion_item = QtGui.QStandardItem()
         dummy_expansion_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
-        dummy_expansion_item.setFlags(QtCore.Qt.NoItemFlags)
+        dummy_expansion_item.setFlags(QtCore.Qt.ItemIsEnabled)
         dummy_expansion_item.setToolTip('Click to add global')
 
         self.globals_model.appendRow(
@@ -3142,15 +3142,15 @@ class RunManager(LabscriptApplication):
 
         dummy_active_item = QtGui.QStandardItem()
         dummy_active_item.setData(True, self.GROUPS_ROLE_IS_DUMMY_ROW)
-        dummy_active_item.setFlags(QtCore.Qt.NoItemFlags)
+        dummy_active_item.setFlags(QtCore.Qt.ItemIsEnabled)
 
-        dummy_delete_item = QtGui.QStandardItem()
+        dummy_delete_item = QtGui.QStandardItem('')
         dummy_delete_item.setData(True, self.GROUPS_ROLE_IS_DUMMY_ROW)
-        dummy_delete_item.setFlags(QtCore.Qt.NoItemFlags)
+        dummy_delete_item.setFlags(QtCore.Qt.ItemIsEnabled)
 
         dummy_open_close_item = QtGui.QStandardItem()
         dummy_open_close_item.setData(True, self.GROUPS_ROLE_IS_DUMMY_ROW)
-        dummy_open_close_item.setFlags(QtCore.Qt.NoItemFlags)
+        dummy_open_close_item.setFlags(QtCore.Qt.ItemIsEnabled)
 
         # Not setting anything as the above items' sort role has the effect of
         # ensuring this row is always sorted to the end of the list, without
