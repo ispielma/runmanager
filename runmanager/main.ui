@@ -579,10 +579,7 @@ and not Abort, which stops the shot BLACS is running.</string>
             <bool>false</bool>
            </property>
            <property name="styleSheet">
-            <string notr="true">QToolButton{
-    background: rgb(224,224,224);
-    padding: 3px;
-}</string>
+            <string notr="true"/>
            </property>
            <property name="frameShape">
             <enum>QFrame::StyledPanel</enum>
@@ -629,21 +626,7 @@ and not Abort, which stops the shot BLACS is running.</string>
                <string>Select a file ...</string>
               </property>
               <property name="styleSheet">
-               <string notr="true">QToolButton{
-    border: none;
-    background: white;
-    padding: 2px;
-}
-
-QToolButton:hover {
-     background-color: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                                       stop: 0 #f6f7fa, stop: 1 #dadbde);
- }
-
- QToolButton:pressed {
-     background-color: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                                       stop: 0 #dadbde, stop: 1 #f6f7fa);
- }</string>
+               <string notr="true"/>
               </property>
               <property name="text">
                <string>...</string>
