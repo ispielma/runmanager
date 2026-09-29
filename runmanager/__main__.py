@@ -4504,6 +4504,12 @@ class RunManager(LabscriptApplication):
             # during a session applies the queue's settings and leaves its shots:
             self.queue_manager.restore_state(queue_state, restore_rows=at_startup)
             restored_queue_state = self.queue_manager.get_queue_state()
+            if at_startup and restored_queue_state['n_items']:
+                # Restored rows that were not compiled yet are compiled ahead,
+                # as they would have been after an Engage:
+                self.queue_manager.command_queue.put(
+                    ('compile_ahead', (self.ui.checkBox_view_shots.isChecked(),))
+                )
             self.ui.lineEdit_default_labscript_file.setText(
                 restored_queue_state['default_labscript_file']
             )
