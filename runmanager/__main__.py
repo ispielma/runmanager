@@ -4993,20 +4993,23 @@ class RunManager(LabscriptApplication):
                     labscript_file,
                     config=self.exp_config,
                     default=True,
-                    format_globals=runglobals,
+                    subdirectory_in_prefix=True,
                 )
             )
+            # The prefix is a template, as make_run_files receives it. Formatting
+            # it with the shot's globals is the pass that undoes its brace escaping.
             run_file_base = os.path.join(
                 output_folder,
-                '{}.h5'.format(filename_prefix),
+                format_lookup_string(filename_prefix, {'globals': runglobals}) + '.h5',
             )
+            run_file_folder = os.path.dirname(run_file_base)
             key = (sequence_attrs['sequence_id'], sequence_attrs['sequence_index'])
             if key in self.sequences:
                 start = self.sequences[key][2]
             else:
                 # After a restart the day's files are counted from one listing
                 # of the folder, not a stat per number.
-                names = os.listdir(output_folder) if os.path.isdir(output_folder) else []
+                names = os.listdir(run_file_folder) if os.path.isdir(run_file_folder) else []
                 ends = [os.path.splitext(n)[0].rpartition('_')[2] for n in names]
                 start = 1 + max((int(end) for end in ends if end.isdigit()), default=-1)
             run_file, default_index = next_available_indexed_filepath(
