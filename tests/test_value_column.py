@@ -295,6 +295,38 @@ class ValueColumnTests(unittest.TestCase):
         self.qapplication.processEvents()
         self.assertTrue(self.record('power')['jit_enabled'])
 
+    def test_selected_row_highlight_spans_checkbox_cells(self):
+        name = self.tab.get_global_item_by_name('freq', self.tab.GLOBALS_COL_NAME)
+        checkboxes = [
+            self.tab.get_global_item_by_name('freq', column)
+            for column in (
+                self.tab.GLOBALS_COL_SCAN_ENABLED,
+                self.tab.GLOBALS_COL_JIT_ENABLED,
+            )
+        ]
+        self.view.clearSelection()
+        self.view.setCurrentIndex(QtCore.QModelIndex())
+        self.qapplication.processEvents()
+        unselected = self.view.viewport().grab().toImage()
+
+        self.view.selectionModel().select(
+            name.index(),
+            QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect
+            | QtCore.QItemSelectionModel.SelectionFlag.Rows,
+        )
+        self.qapplication.processEvents()
+        selected = self.view.viewport().grab().toImage()
+
+        name_rect = self.view.visualRect(name.index())
+        name_point = QtCore.QPoint(name_rect.right() - 4, name_rect.center().y())
+        unselected_name = unselected.pixelColor(name_point)
+        selected_name = selected.pixelColor(name_point)
+        self.assertNotEqual(unselected_name, selected_name)
+        for checkbox in checkboxes:
+            rect = self.view.visualRect(checkbox.index())
+            point = QtCore.QPoint(rect.right() - 4, rect.center().y())
+            self.assertNotEqual(unselected.pixelColor(point), selected.pixelColor(point))
+
     def test_child_selection_targets_the_global_for_bulk_changes(self):
         active, _ = self.value_rect('time')
         self.view.expand(active)

@@ -861,6 +861,12 @@ class CenteredCheckDelegate(ItemDelegate):
         if not index.flags() & QtCore.Qt.ItemFlag.ItemIsUserCheckable:
             return super().paint(painter, option, index)
         style = option.widget.style()
+        background_option = QtWidgets.QStyleOptionViewItem(option)
+        self.initStyleOption(background_option, index)
+        background_option.features &= ~(
+            QtWidgets.QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
+        )
+        background_option.checkState = QtCore.Qt.CheckState.Unchecked
         width = style.pixelMetric(QtWidgets.QStyle.PixelMetric.PM_IndicatorWidth)
         height = style.pixelMetric(QtWidgets.QStyle.PixelMetric.PM_IndicatorHeight)
         check = QtWidgets.QStyleOptionButton()
@@ -878,7 +884,12 @@ class CenteredCheckDelegate(ItemDelegate):
             else QtWidgets.QStyle.StateFlag.State_Off
         )
         painter.save()
-        painter.fillRect(option.rect, index.data(QtCore.Qt.ItemDataRole.BackgroundRole))
+        style.drawControl(
+            QtWidgets.QStyle.ControlElement.CE_ItemViewItem,
+            background_option,
+            painter,
+            option.widget,
+        )
         style.drawPrimitive(QtWidgets.QStyle.PrimitiveElement.PE_IndicatorCheckBox, check, painter)
         if index.column() > 0:
             painter.setPen(self._pen)
@@ -940,13 +951,18 @@ class ExpressionDelegate(ItemDelegate):
             if option.state & QtWidgets.QStyle.StateFlag.State_Selected
             else QtGui.QPalette.ColorRole.Text
         )
-        label_color = QtGui.QColor(option.palette.color(color_role))
+        label_palette = QtGui.QPalette(option.palette)
+        label_color = QtGui.QColor(label_palette.color(color_role))
         label_color.setAlpha(180)
-        painter.setPen(label_color)
-        painter.drawText(
+        label_palette.setColor(color_role, label_color)
+        option.widget.style().drawItemText(
+            painter,
             option.rect.adjusted(4, 0, -option.rect.width() + offset, 0),
-            QtCore.Qt.AlignmentFlag.AlignVCenter,
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
+            label_palette,
+            bool(option.state & QtWidgets.QStyle.StateFlag.State_Enabled),
             label,
+            color_role,
         )
         painter.setPen(self._pen)
         painter.drawLine(option.rect.topLeft(), option.rect.bottomLeft())
