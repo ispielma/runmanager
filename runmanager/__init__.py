@@ -674,7 +674,7 @@ def get_output_folder_format(config, default=False):
     """Return the configured output folder format, or the built-in fallback.
 
     If default=True, then the sequence-index placeholder is replaced with the literal
-    directory name ``default``. This is used for default-shot JIT submissions while
+    directory name ``default``. This is used for default-shot submissions while
     preserving the rest of the configured date/path structure."""
     try:
         subdir_format = config.get('runmanager', 'output_folder_format')
