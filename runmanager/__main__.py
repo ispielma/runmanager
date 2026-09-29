@@ -5314,6 +5314,14 @@ class RunmanagerServer(ZMQServer):
     @inmain_decorator()
     def _set_expression_field_values(self, getter, setter, changer_name, globals, raw=False):
         _, _, locations = self._get_active_global_locations(globals)
+        # Refused before any write: a batch must not be half applied, and the
+        # Convert dialog would stop the server answering.
+        for path in {locations[name][0] for name in globals if name in locations}:
+            if runmanager.globals_file_requires_conversion(path):
+                raise ValueError(
+                    f'{path} is a legacy HDF5 globals file. Convert it to TOML in '
+                    'runmanager first.'
+                )
         try:
             for global_name, new_value in globals.items():
                 if not raw:
@@ -5332,7 +5340,6 @@ class RunmanagerServer(ZMQServer):
                 try:
                     group_tab = app.currently_open_groups[globals_file, group_name]
                 except KeyError:
-                    globals_file = app.ensure_editable_globals_file(globals_file)
                     setter(globals_file, group_name, global_name, new_value)
                 else:
                     getattr(group_tab, changer_name)(
@@ -5344,6 +5351,14 @@ class RunmanagerServer(ZMQServer):
     @inmain_decorator()
     def _set_boolean_field_values(self, getter, setter, changer_name, globals):
         _, _, locations = self._get_active_global_locations(globals)
+        # Refused before any write: a batch must not be half applied, and the
+        # Convert dialog would stop the server answering.
+        for path in {locations[name][0] for name in globals if name in locations}:
+            if runmanager.globals_file_requires_conversion(path):
+                raise ValueError(
+                    f'{path} is a legacy HDF5 globals file. Convert it to TOML in '
+                    'runmanager first.'
+                )
         try:
             for global_name, new_value in globals.items():
                 new_value = self._coerce_remote_boolean(
@@ -5359,7 +5374,6 @@ class RunmanagerServer(ZMQServer):
                 try:
                     group_tab = app.currently_open_groups[globals_file, group_name]
                 except KeyError:
-                    globals_file = app.ensure_editable_globals_file(globals_file)
                     setter(globals_file, group_name, global_name, new_value)
                 else:
                     getattr(group_tab, changer_name)(
