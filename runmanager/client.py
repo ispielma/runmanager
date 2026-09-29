@@ -98,8 +98,7 @@ class RunmanagerClient(ZMQClient):
         """Get boolean state of the 'BLACS' checkbox.
 
         Whether shots compiled by Engage are put into the runmanager queue for
-        BLACS to run. The method name is from when that checkbox was labelled
-        'Run shot(s)'; only the label changed."""
+        BLACS to run."""
         return self.request('get_run_shots')
 
     def set_run_shots(self, value):
