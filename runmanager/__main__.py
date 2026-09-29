@@ -5248,10 +5248,10 @@ class RunmanagerServer(ZMQServer):
 
     def _get_active_global_locations(self, names=None):
         active_groups = inmain(app.get_active_groups, interactive=False)
-        sequence_globals = runmanager.get_globals(active_groups)
+        globals_details = runmanager.get_globals_details(active_groups)
         locations = {}
         groups_of = {}
-        for group_name, group_globals in sequence_globals.items():
+        for group_name, group_globals in globals_details.items():
             for global_name in group_globals:
                 groups_of.setdefault(global_name, []).append(group_name)
                 locations.setdefault(global_name, (active_groups[group_name], group_name))
@@ -5263,20 +5263,20 @@ class RunmanagerServer(ZMQServer):
                     'Global %s is defined in multiple active groups: %s'
                     % (global_name, ' and '.join(groups_of[global_name]))
                 )
-        return active_groups, sequence_globals, locations
+        return active_groups, globals_details, locations
 
-    def _get_global_field_values(self, getter):
-        _, _, locations = self._get_active_global_locations()
+    def _get_global_field_values(self, field):
+        _, globals_details, locations = self._get_active_global_locations()
         values = {}
-        for global_name, (globals_file, group_name) in locations.items():
-            values[global_name] = getter(globals_file, group_name, global_name)
+        for global_name, (_, group_name) in locations.items():
+            values[global_name] = globals_details[group_name][global_name][field]
         return values
 
-    def _get_expression_field_values(self, getter, raw=False):
-        active_groups, _, locations = self._get_active_global_locations()
+    def _get_expression_field_values(self, field, raw=False):
+        active_groups, globals_details, locations = self._get_active_global_locations()
         sequence_globals = {group_name: {} for group_name in active_groups}
-        for global_name, (globals_file, group_name) in locations.items():
-            expression = getter(globals_file, group_name, global_name)
+        for global_name, (_, group_name) in locations.items():
+            expression = globals_details[group_name][global_name][field]
             sequence_globals[group_name][global_name] = (expression, '', '')
         if raw:
             values = {}
@@ -5369,7 +5369,7 @@ class RunmanagerServer(ZMQServer):
             app.globals_changed()
 
     def handle_get_default_globals(self, raw=False):
-        return self._get_expression_field_values(runmanager.get_value, raw=raw)
+        return self._get_expression_field_values('default', raw=raw)
 
     def handle_get_globals(self, raw=False):
         active_groups = inmain(app.get_active_groups, interactive=False)
@@ -5390,13 +5390,13 @@ class RunmanagerServer(ZMQServer):
         return values
 
     def handle_get_scan_globals(self, raw=False):
-        return self._get_expression_field_values(runmanager.get_scan, raw=raw)
+        return self._get_expression_field_values('scan', raw=raw)
 
     def handle_get_scan_enabled(self):
-        return self._get_global_field_values(runmanager.get_scan_enabled)
+        return self._get_global_field_values('scan_enabled')
 
     def handle_get_jit_enabled(self):
-        return self._get_global_field_values(runmanager.get_jit_enabled)
+        return self._get_global_field_values('jit_enabled')
 
     def handle_set_default_globals(self, globals, raw=False):
         return self._set_expression_field_values(
