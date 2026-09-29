@@ -77,6 +77,7 @@ from runmanager.client import (
     DEFAULT_PORT,
     PROVIDER_NONE,
     PROVIDER_PAUSED,
+    PROVIDER_PENDING,
     PROVIDER_SHOT,
     SHOT_OUTCOME_STATUSES,
     SequenceRefused,
@@ -5191,7 +5192,9 @@ class RunManager(LabscriptApplication):
             if self.queue_manager.compile_next_in_background(
                 lambda: inmain(self.ui.checkBox_view_shots.isChecked)
             ):
-                return no_shot
+                # Pending rather than none, so that BLACS can wait for this shot
+                # instead of running its local override in the gap:
+                return dict(no_shot, state=PROVIDER_PENDING)
             queue_state = self.queue_manager.get_queue_state()
             labscript_file = queue_state['default_labscript_file']
             # No default shot is called for: the policy does not ask for one,

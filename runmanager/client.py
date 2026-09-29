@@ -3,11 +3,13 @@ DEFAULT_PORT = 42523
 from labscript_utils.ls_zprocess import ZMQClient
 
 # What an exchange tells BLACS about this runmanager: it offered a shot, its
-# queue is paused, or it has nothing to offer right now. Paused is told apart
-# from having nothing so that BLACS can show an operator why no queued work is
-# arriving; neither is a reason for BLACS to stop:
+# queue is paused, the shot it will offer next is still compiling, or it has
+# nothing to offer right now. Paused and pending are told apart from having
+# nothing so that BLACS can say why no queued work is arriving, or wait for it;
+# neither is a reason for BLACS to stop. Only a shot comes with a path:
 PROVIDER_SHOT = 'shot'
 PROVIDER_PAUSED = 'paused'
+PROVIDER_PENDING = 'pending'
 PROVIDER_NONE = 'none'
 # How BLACS may say a shot it was offered turned out. Every one but 'completed'
 # leaves the row at the head of the queue in red; see shot_finished() in
@@ -252,7 +254,7 @@ class RunmanagerClient(ZMQClient):
         that gets an answer has been heard, and must move on rather than
         sending the same outcome again.
 
-        Returns a dict: ``state`` is ``'shot'``, ``'paused'`` or ``'none'``,
-        and ``shot_id`` and ``path`` name the offered shot when there is
-        one."""
+        Returns a dict: ``state`` is ``'shot'``, ``'paused'``, ``'pending'``
+        (the next shot is still compiling) or ``'none'``, and ``shot_id`` and
+        ``path`` name the offered shot when there is one."""
         return self.request('queue_exchange', outcome, request_shot)

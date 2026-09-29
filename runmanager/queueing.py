@@ -962,9 +962,8 @@ class QueueManager(QtCore.QObject):
     def compile_next_in_background(self, send_to_runviewer):
         """Start compiling the shot at the head of the queue if it is not ready.
 
-        Returns True while a queued shot is pending, so the caller reports that
-        there is nothing to hand over yet rather than falling back to the
-        empty-queue policy.
+        Returns True while a queued shot is pending, so the caller reports it
+        as pending rather than falling back to the empty-queue policy.
 
         ``send_to_runviewer`` is a callable, evaluated only when a compile is
         actually started, so that a request with nothing to do does not reach

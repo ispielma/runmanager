@@ -38,6 +38,7 @@ from fixtures import (
     submit_to_lyse,
     wait_for,
 )
+from runmanager.client import PROVIDER_PENDING
 from runmanager.queueing import (
     COMPILE_MODE_EAGER,
     COMPILE_MODE_LAZY,
@@ -897,8 +898,9 @@ class LazyCompileFailureTests(unittest.TestCase):
 
         self.assertEqual(
             [response['state'] for response in responses],
-            [PROVIDER_NONE] * 3,
-            'the shot behind it waits rather than overtaking it',
+            [PROVIDER_PENDING, PROVIDER_NONE, PROVIDER_NONE],
+            'pending while it compiles, then nothing: the shot behind it waits '
+            'rather than overtaking it',
         )
 
     def test_deleting_it_lets_the_queue_go_on(self):
