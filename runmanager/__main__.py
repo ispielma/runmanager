@@ -44,6 +44,7 @@ import ast
 import pprint
 import signal
 import unicodedata
+import importlib.metadata
 import importlib.resources
 from pathlib import Path
 
@@ -55,7 +56,7 @@ splash.update_text('importing matplotlib')
 import matplotlib
 matplotlib.use('Agg')
 
-from qtutils.qt import QtCore, QtGui, QtWidgets
+from qtutils.qt import QtCore, QtGui, QtWidgets, QT_ENV
 from qtutils.qt.QtCore import pyqtSignal as Signal
 
 splash.update_text('importing labscript suite modules')
@@ -242,9 +243,13 @@ def expression_cell_colors(palette=None):
     text_color = palette.color(QtGui.QPalette.Text)
     active_candidates = [QtGui.QColor('#D7ECFF'), QtGui.QColor('#234A75')]
     error_candidates = [QtGui.QColor('#F79494'), QtGui.QColor('#8A2E2E')]
+    bool_on_candidates = [QtGui.QColor('#63F731'), QtGui.QColor('#29A300')]
+    bool_off_candidates = [QtGui.QColor('#608060'), QtGui.QColor('#003900')]
     active = max(active_candidates, key=lambda color: _contrast_ratio(text_color, color))
     error = max(error_candidates, key=lambda color: _contrast_ratio(text_color, color))
-    return error.name(), active.name()
+    bool_on = max(bool_on_candidates, key=lambda color: _contrast_ratio(text_color, color))
+    bool_off = max(bool_off_candidates, key=lambda color: _contrast_ratio(text_color, color))
+    return error.name(), active.name(), bool_on.name(), bool_off.name()
 
 
 def hidden_unicode_issues(text):
@@ -345,7 +350,7 @@ class FingerTabBarWidget(QtWidgets.QTabBar):
                 return index
 
     def mousePressEvent(self, event):
-        index = self.indexAtPos(event.pos())
+        index = self.indexAtPos(event.position().toPoint())
         if not self.tab_movable.get(index, self.isMovable()):
             QtWidgets.QTabBar.setMovable(self, False)  # disable dragging until they release the mouse
         return QtWidgets.QTabBar.mousePressEvent(self, event)
@@ -510,6 +515,21 @@ class FingerTabWidget(QtWidgets.QTabWidget):
                 break
 
 
+def set_selection_highlight(widget):
+    palette = widget.palette()
+    for group in [QtGui.QPalette.Active, QtGui.QPalette.Inactive]:
+        palette.setColor(
+            group,
+            QtGui.QPalette.Highlight,
+            QtGui.QColor(ItemView.COLOR_HIGHLIGHT))
+        palette.setColor(
+            group,
+            QtGui.QPalette.HighlightedText,
+            palette.color(QtGui.QPalette.Active, QtGui.QPalette.WindowText)
+        )
+    widget.setPalette(palette)
+
+
 class ItemView(object):
     """Mixin for QTableView and QTreeView that emits a custom signal leftClicked(index)
     after a left click on a valid index, and doubleLeftClicked(index) (in addition) on
@@ -525,22 +545,11 @@ class ItemView(object):
         self._pressed_index = None
         self._double_click = False
         self.setAutoScroll(False)
-        p = self.palette()
-        for group in [QtGui.QPalette.Active, QtGui.QPalette.Inactive]:
-            p.setColor(
-                group,
-                QtGui.QPalette.Highlight,
-                QtGui.QColor(self.COLOR_HIGHLIGHT))
-            p.setColor(
-                group,
-                QtGui.QPalette.HighlightedText,
-                p.color(QtGui.QPalette.Active, QtGui.QPalette.WindowText)
-            )
-        self.setPalette(p)
+        set_selection_highlight(self)
 
     def mousePressEvent(self, event):
         # Taken first, as a press can resize its row:
-        index = self.indexAt(event.pos())
+        index = self.indexAt(event.position().toPoint())
         result = super(ItemView, self).mousePressEvent(event)
         if event.button() == QtCore.Qt.LeftButton and index.isValid():
             self._pressed_index = index
@@ -556,15 +565,15 @@ class ItemView(object):
         # Ensure our left click event occurs regardless of whether it is the
         # second click in a double click or not
         result = super(ItemView, self).mouseDoubleClickEvent(event)
-        index = self.indexAt(event.pos())
+        index = self.indexAt(event.position().toPoint())
         if event.button() == QtCore.Qt.LeftButton and index.isValid():
-            self._pressed_index = self.indexAt(event.pos())
+            self._pressed_index = self.indexAt(event.position().toPoint())
             self._double_click = True
         return result
 
     def mouseReleaseEvent(self, event):
         result = super(ItemView, self).mouseReleaseEvent(event)
-        index = self.indexAt(event.pos())
+        index = self.indexAt(event.position().toPoint())
         if event.button() == QtCore.Qt.LeftButton and index.isValid() and index == self._pressed_index:
             self.leftClicked.emit(index)
             if self._double_click:
@@ -636,11 +645,11 @@ class GlobalsTreeView(TreeView):
         return QtWidgets.QTreeView.moveCursor(self, cursor_action, keyboard_modifiers)
 
     def mouseReleaseEvent(self, event):
-        index = self.indexAt(event.pos())
+        index = self.indexAt(event.position().toPoint())
         if (
             index.isValid()
             and index.column() == self.treePosition()
-            and event.pos().x() < self.visualRect(index).left()
+            and event.position().x() < self.visualRect(index).left()
         ):
             self._pressed_index = None
         return super().mouseReleaseEvent(event)
@@ -673,18 +682,7 @@ class AlternatingColorModel(QtGui.QStandardItemModel):
 
     def __init__(self, view):
         QtGui.QStandardItemModel.__init__(self)
-        # How much darker in each channel is the alternate base color compared
-        # to the base color?
         self.view = view
-        palette = view.palette()
-        self.normal_color = palette.color(QtGui.QPalette.Base)
-        self.alternate_color = palette.color(QtGui.QPalette.AlternateBase)
-        r, g, b, a = self.normal_color.getRgb()
-        alt_r, alt_g, alt_b, alt_a = self.alternate_color.getRgb()
-        self.delta_r = alt_r - r
-        self.delta_g = alt_g - g
-        self.delta_b = alt_b - b
-        self.delta_a = alt_a - a
 
         # A cache, store brushes so we don't have to recalculate them. Is faster.
         self.bg_brushes = {}
@@ -693,26 +691,35 @@ class AlternatingColorModel(QtGui.QStandardItemModel):
         """Get cell colour as a function of its ordinary colour, whether it is on an odd
         row, and whether it is selected."""
         normal_rgb = normal_brush.color().getRgb() if normal_brush is not None else None
+        # The palette is read on each call and is part of the cache key, so that
+        # brushes follow a change of theme. Clearing the cache on the window's
+        # PaletteChange would refill it before this view has the new palette.
+        palette = self.view.palette()
+        normal_color = palette.color(QtGui.QPalette.Base)
+        alternate_color = palette.color(QtGui.QPalette.AlternateBase)
+        key = normal_rgb, alternate, selected, normal_color.rgba(), alternate_color.rgba()
         try:
-            return self.bg_brushes[normal_rgb, alternate, selected]
+            return self.bg_brushes[key]
         except KeyError:
             pass
         # Get the colour of the cell with alternate row shading:
         if normal_rgb is None:
             # No colour has been set. Use palette colours:
             if alternate:
-                bg_color = self.alternate_color
+                bg_color = alternate_color
             else:
-                bg_color = self.normal_color
+                bg_color = normal_color
         else:
             bg_color = normal_brush.color()
             if alternate:
                 # Modify alternate rows:
                 r, g, b, a = normal_rgb
-                alt_r = min(max(r + self.delta_r, 0), 255)
-                alt_g = min(max(g + self.delta_g, 0), 255)
-                alt_b = min(max(b + self.delta_b, 0), 255)
-                alt_a = min(max(a + self.delta_a, 0), 255)
+                nr, ng, nb, na = normal_color.getRgb()
+                ar, ag, ab, aa = alternate_color.getRgb()
+                alt_r = min(max(r + ar - nr, 0), 255)
+                alt_g = min(max(g + ag - ng, 0), 255)
+                alt_b = min(max(b + ab - nb, 0), 255)
+                alt_a = min(max(a + aa - na, 0), 255)
                 bg_color = QtGui.QColor(alt_r, alt_g, alt_b, alt_a)
 
         # If parent is a TableView, we handle selection highlighting as part of the
@@ -725,7 +732,7 @@ class AlternatingColorModel(QtGui.QStandardItemModel):
             bg_color = QtGui.QColor(*rgb)
 
         brush = QtGui.QBrush(bg_color)
-        self.bg_brushes[normal_rgb, alternate, selected] = brush
+        self.bg_brushes[key] = brush
         return brush
 
     def data(self, index, role):
@@ -754,6 +761,7 @@ class Editor(QtWidgets.QTextEdit):
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.textChanged.connect(self.update_size)
         self.initial_height = None
+        set_selection_highlight(self)
 
     def update_size(self):
         if self.initial_height is not None:
@@ -1005,7 +1013,7 @@ class GroupTab(object):
         self.ui.gridLayout.setColumnStretch(1, 1)
         self.tabWidget.addTab(self.ui, group_name, closable=True)
 
-        self.color_error, self.color_active = expression_cell_colors()
+        self.set_colors()
         self.set_file_and_group_name(globals_file, group_name)
 
         self.globals_model = AlternatingColorModel(view=self.ui.treeView_globals)
@@ -1049,6 +1057,7 @@ class GroupTab(object):
         self.connect_signals()
 
         self.populate_model()
+        logger.info(f'Initial population of {self.group_name}')
         for col in range(self.globals_model.columnCount()):
             if col != self.GLOBALS_COL_VALUE:
                 self.ui.treeView_globals.resizeColumnToContents(col)
@@ -1083,7 +1092,7 @@ class GroupTab(object):
             self.globals_model.itemChanged, self.on_globals_model_item_changed
         )
         # Copy takes the expression at the selected index.
-        QtWidgets.QShortcut(
+        QtGui.QShortcut(
             QtGui.QKeySequence.StandardKey.Copy,
             self.ui.treeView_globals,
             self.on_globals_copy,
@@ -1127,7 +1136,7 @@ class GroupTab(object):
 
         dummy_scan_enabled_item = QtGui.QStandardItem()
         dummy_scan_enabled_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
-        dummy_scan_enabled_item.setFlags(QtCore.Qt.NoItemFlags)
+        dummy_scan_enabled_item.setFlags(QtCore.Qt.ItemIsEnabled)
         dummy_scan_enabled_item.setToolTip('Click to add global')
 
         dummy_name_item = QtGui.QStandardItem(self.GLOBALS_DUMMY_ROW_TEXT)
@@ -1139,22 +1148,22 @@ class GroupTab(object):
 
         dummy_jit_enabled_item = QtGui.QStandardItem()
         dummy_jit_enabled_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
-        dummy_jit_enabled_item.setFlags(QtCore.Qt.NoItemFlags)
+        dummy_jit_enabled_item.setFlags(QtCore.Qt.ItemIsEnabled)
         dummy_jit_enabled_item.setToolTip('Click to add global')
 
         dummy_default_item = QtGui.QStandardItem()
         dummy_default_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
-        dummy_default_item.setFlags(QtCore.Qt.NoItemFlags)
+        dummy_default_item.setFlags(QtCore.Qt.ItemIsEnabled)
         dummy_default_item.setToolTip('Click to add global')
 
         dummy_units_item = QtGui.QStandardItem()
         dummy_units_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
-        dummy_units_item.setFlags(QtCore.Qt.NoItemFlags)
+        dummy_units_item.setFlags(QtCore.Qt.ItemIsEnabled)
         dummy_units_item.setToolTip('Click to add global')
 
         dummy_expansion_item = QtGui.QStandardItem()
         dummy_expansion_item.setData(True, self.GLOBALS_ROLE_IS_DUMMY_ROW)
-        dummy_expansion_item.setFlags(QtCore.Qt.NoItemFlags)
+        dummy_expansion_item.setFlags(QtCore.Qt.ItemIsEnabled)
         dummy_expansion_item.setToolTip('Click to add global')
 
         self.globals_model.appendRow(
@@ -1486,14 +1495,14 @@ class GroupTab(object):
             units_item.setData('!1', self.GLOBALS_ROLE_SORT_DATA)
             units_item.setEditable(False)
             units_item.setCheckState(QtCore.Qt.Checked)
-            units_item.setBackground(QtGui.QBrush(QtGui.QColor('#63F731')))
+            units_item.setBackground(QtGui.QBrush(QtGui.QColor(self.color_bool_on)))
         elif value == 'False':
             units_item.setData(True, self.GLOBALS_ROLE_IS_BOOL)
             units_item.setText('Bool')
             units_item.setData('!0', self.GLOBALS_ROLE_SORT_DATA)
             units_item.setEditable(False)
             units_item.setCheckState(QtCore.Qt.Unchecked)
-            units_item.setBackground(QtGui.QBrush(QtGui.QColor('#608060')))
+            units_item.setBackground(QtGui.QBrush(QtGui.QColor(self.color_bool_off)))
         else:
             was_bool = units_item.data(self.GLOBALS_ROLE_IS_BOOL)
             units_item.setData(False, self.GLOBALS_ROLE_IS_BOOL)
@@ -1502,6 +1511,17 @@ class GroupTab(object):
             units_item.setData(None, QtCore.Qt.BackgroundRole)
             if was_bool and units_item.text() == 'Bool':
                 units_item.setText('')
+
+    def set_colors(self):
+        colors = expression_cell_colors()
+        self.color_error, self.color_active, self.color_bool_on, self.color_bool_off = colors
+
+    def redraw_colors(self):
+        self.set_colors()
+        for row in range(self.globals_model.rowCount()):
+            name_item = self.globals_model.item(row, self.GLOBALS_COL_NAME)
+            if not name_item.data(self.GLOBALS_ROLE_IS_DUMMY_ROW):
+                self._update_boolean_state(name_item.text())
 
     def update_scan_controls(self, global_name):
         scan_enabled_item = self.get_global_item_by_name(
@@ -2023,10 +2043,22 @@ class GroupTab(object):
 class RunmanagerMainWindow(QtWidgets.QMainWindow):
     # A signal to show that the window is shown and painted.
     firstPaint = Signal()
+    # A signal to show that the palette or style changed, as when the OS
+    # switches between light and dark.
+    themeChanged = Signal()
 
     def __init__(self, *args, **kwargs):
         QtWidgets.QMainWindow.__init__(self, *args, **kwargs)
         self._previously_painted = False
+
+    def changeEvent(self, event):
+        # A palette change reaches here as PaletteChange, not as
+        # ApplicationPaletteChange, and PyQt6 has no ThemeChange.
+        if event.type() in (
+            QtCore.QEvent.Type.PaletteChange, QtCore.QEvent.Type.StyleChange
+        ):
+            self.themeChanged.emit()
+        return QtWidgets.QMainWindow.changeEvent(self, event)
 
     def closeEvent(self, event):
         if app.on_close_event():
@@ -2071,6 +2103,14 @@ class RunManager(LabscriptApplication):
     GROUPS_DUMMY_ROW_TEXT = '<Click to add group>'
 
     def __init__(self):
+        logger.info(f'Python version: {sys.version}')
+        logger.info(f'Platform: {sys.platform}')
+        logger.info(f'Qt environment: {QT_ENV}')
+        logger.info(f'PySide/PyQt version: {importlib.metadata.version(QT_ENV)}')
+        logger.info(f'Qt version: {QtCore.qVersion()}')
+        logger.info(f"qtutils version: {importlib.metadata.version('qtutils')}")
+        logger.info(f'runmanager version: {runmanager.__version__}')
+
         splash.update_text('loading graphical interface')
         loader = UiLoader()
         loader.registerCustomWidget(FingerTabWidget)
@@ -2126,6 +2166,7 @@ class RunManager(LabscriptApplication):
             os.path.join(runmanager_dir, 'batch_compiler.py'),
             output_redirection_port=self.output_box.port,
         )
+        logger.info('compiler subprocess started')
         # Set while the subprocess can be sent work. Restarting it clears this
         # until the new one is up, so no compile is sent to the one quitting.
         self.child_ready = threading.Event()
@@ -2160,6 +2201,7 @@ class RunManager(LabscriptApplication):
         self.update_blacs_status(None)
         self.blacs_status_monitor.start()
         self.connect_signals()
+        logger.info('UI loaded')
 
         # The last location from which a labscript file was selected, defaults
         # to labscriptlib:
@@ -2252,6 +2294,7 @@ class RunManager(LabscriptApplication):
                                             ],
                                   }
         self.exp_config = LabConfig(required_params = required_config_params)
+        logger.info('LabConfig loaded')
 
     def setup_axes_tab(self):
         self.axes_model = QtGui.QStandardItemModel()
@@ -2372,6 +2415,9 @@ class RunManager(LabscriptApplication):
         # The button that pops the output box in and out:
         self.output_popout_button.clicked.connect(self.on_output_popout_button_clicked)
 
+        # The OS switching between light and dark:
+        self.ui.themeChanged.connect(self.on_theme_changed)
+
         # The menu items:
         self.ui.actionLoad_configuration.triggered.connect(self.on_load_configuration_triggered)
         self.ui.actionRevert_configuration.triggered.connect(self.on_revert_configuration_triggered)
@@ -2454,12 +2500,25 @@ class RunManager(LabscriptApplication):
         self.queue_widget.retryCompileRequested.connect(self.queue_manager.retry_compile)
         
         # Keyboard shortcuts:
-        engage_shortcut = QtWidgets.QShortcut('F5', self.ui,
+        engage_shortcut = QtGui.QShortcut('F5', self.ui,
             lambda: self.ui.pushButton_engage.clicked.emit(False))
         engage_shortcut.setAutoRepeat(False)
-        QtWidgets.QShortcut('ctrl+W', self.ui, self.close_current_tab)
-        QtWidgets.QShortcut('ctrl+Tab', self.ui, lambda: self.switch_tabs(+1))
-        QtWidgets.QShortcut('ctrl+shift+Tab', self.ui, lambda: self.switch_tabs(-1))
+        QtGui.QShortcut('ctrl+W', self.ui, self.close_current_tab)
+        QtGui.QShortcut('ctrl+Tab', self.ui, lambda: self.switch_tabs(+1))
+        QtGui.QShortcut('ctrl+shift+Tab', self.ui, lambda: self.switch_tabs(-1))
+        logger.info('Signals connected')
+
+    def on_theme_changed(self):
+        for widget in self.ui.findChildren(QtWidgets.QWidget):
+            # Views need their palette and style sheet applied again to follow
+            # the new theme:
+            widget.setPalette(widget.palette())
+            widget.setStyleSheet(widget.styleSheet())
+        for tab in self.currently_open_groups.values():
+            tab.redraw_colors()
+        # Parsing recolours the expression cells. Not globals_changed(), which
+        # would discard a prepared default shot:
+        self.preparse_globals_required.put(None)
 
     def on_close_event(self):
         save_data = self.get_save_data()
@@ -3117,7 +3176,7 @@ class RunManager(LabscriptApplication):
         # menu = QtWidgets.QMenu(self.ui)
         # menu.addAction(self.action_axes_check_selected)
         # menu.addAction(self.action_axes_uncheck_selected)
-        # menu.exec_(QtGui.QCursor.pos())
+        # menu.exec(QtGui.QCursor.pos())
         pass
 
     def on_axes_check_selected_triggered(self, *args):
@@ -3345,7 +3404,6 @@ class RunManager(LabscriptApplication):
                 # Exclude <add new group> item, which is not selectable
                 name_items += [child for child in children if child.isSelectable() ]
 
-        filenames = set(item.parent().text() for item in name_items)
         for item in name_items:
             globals_file = item.parent().text()
             group_name = item.text()
@@ -3724,7 +3782,7 @@ class RunManager(LabscriptApplication):
                 self.check_output_folder_update()
             except Exception as e:
                 # Don't stop the thread.
-                logger.exception("error checking default output folder")
+                logger.exception(f"error checking default output folder: {e}")
 
     @inmain_decorator()
     def check_output_folder_update(self):
@@ -3863,6 +3921,7 @@ class RunManager(LabscriptApplication):
                 break
         self.update_tabs_parsing_indication(active_groups, sequence_globals, evaled_globals, self.n_shots)
         self.update_axes_tab(expansions, dimensions)
+        logger.info('Globals parsed')
 
     def preparse_globals_loop(self):
         """Runs in a thread, waiting on a threading.Event that tells us when
@@ -3887,6 +3946,7 @@ class RunManager(LabscriptApplication):
                         except queue.Empty:
                             break
                 # Do some work:
+                logger.info(f'Pre-parsing globals with {n_requests:d} requests')
                 try:
                     self.preparse_globals()
                 finally:
@@ -4071,15 +4131,15 @@ class RunManager(LabscriptApplication):
 
         dummy_active_item = QtGui.QStandardItem()
         dummy_active_item.setData(True, self.GROUPS_ROLE_IS_DUMMY_ROW)
-        dummy_active_item.setFlags(QtCore.Qt.NoItemFlags)
+        dummy_active_item.setFlags(QtCore.Qt.ItemIsEnabled)
 
-        dummy_delete_item = QtGui.QStandardItem()
+        dummy_delete_item = QtGui.QStandardItem('')
         dummy_delete_item.setData(True, self.GROUPS_ROLE_IS_DUMMY_ROW)
-        dummy_delete_item.setFlags(QtCore.Qt.NoItemFlags)
+        dummy_delete_item.setFlags(QtCore.Qt.ItemIsEnabled)
 
         dummy_open_close_item = QtGui.QStandardItem()
         dummy_open_close_item.setData(True, self.GROUPS_ROLE_IS_DUMMY_ROW)
-        dummy_open_close_item.setFlags(QtCore.Qt.NoItemFlags)
+        dummy_open_close_item.setFlags(QtCore.Qt.ItemIsEnabled)
 
         # Not setting anything as the above items' sort role has the effect of
         # ensuring this row is always sorted to the end of the list, without
@@ -4926,7 +4986,7 @@ class RunManager(LabscriptApplication):
         agnostic_path = shared_drive.path_to_agnostic(run_file)
         try:
             self.runviewer.say_hello(timeout=1)
-        except Exception as e:
+        except Exception:
             logger.info('runviewer not running, attempting to start...')
             # Runviewer not running, start it:
             if os.name == 'nt':
