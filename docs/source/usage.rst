@@ -449,16 +449,19 @@ The queue is on runmanager's Queue tab, along with the *Compile mode* and *When
 queue is empty* settings and the checkable *Pause queue* button. Each queued shot is
 given one stable identifier when it enters the queue, which it keeps across a
 save and restore and across every retry. The shot BLACS is executing stays in the
-queue, coloured green, rather than disappearing while it runs. Only a completed
-shot leaves the queue; every other outcome leaves the row where it is, at the
-head, coloured red with the reason BLACS gave in its tooltip, and the next
-request from BLACS retries it. Deleting the row is the only way to discard it.
+queue, in a reserved first row without a running colour, rather than
+disappearing while it runs. A completed shot leaves the queue; aborted and
+failed outcomes leave the row at the head, coloured red with the reason BLACS
+gave in its tooltip, and the next request retries it. A rejected runmanager
+shot also stays red at the head, but is held rather than reoffered until it is
+deleted or runmanager is restarted. Deleting a running row cancels it and keeps
+its file until BLACS next requests work or reports an outcome; deleting a
+failed or rejected row removes it. Deleting an unsent row discards it.
 A shot that fails to compile stays where it is, coloured red, and holds back the
 shots behind it once it is at the head. Right-click it and choose *Compile again*,
 or delete it.
-Deleting rows, and the two *Empty queue, then add shots…* submission modes that
-clear the queue first, both skip the green running row and keep its file, so
-editing the queue can never take a shot file out from under the apparatus.
+Both *Empty queue, then add shots…* submission modes preserve every row already
+sent to BLACS, including failed or rejected rows.
 
 *Pause queue* stops this runmanager offering shots, including default shots. It
 does not stop BLACS: the shot already under way finishes normally, and BLACS
@@ -477,11 +480,13 @@ is selected with the queue tab's *When queue is empty* setting, and the
 labscript file it compiles is named in the *Default shot* field.
 
 A default shot appears as an ordinary queue row. It gets a stable identifier of
-its own, is green while BLACS runs it, goes red with its reason if it does not,
-is retried by the next request, can be deleted, and is removed and submitted to
-lyse when it completes — every rule that applies to a shot a user engaged. A
-failed default row therefore holds back the next one, because it is the head of
-the queue and is what the next request is offered. Default rows are left out of
+its own, occupies the reserved first row while BLACS runs it, and goes red with
+its reason after an unsuccessful outcome. Aborted and failed default shots are
+retried by the next request; a rejected one is held until deleted or runmanager
+is restarted. A default shot can be deleted and is removed and submitted to
+lyse when it completes. An aborted or failed default row holds back the next
+one, because it is the head of the queue and is what the next request is
+offered. Default rows are left out of
 a saved queue configuration: their globals were read when they were produced,
 and their files live in the default directory for the day they were made, so
 restoring one in a later session would offer BLACS a stale shot ahead of real
