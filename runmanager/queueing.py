@@ -364,21 +364,17 @@ class QueueController(object):
         exists, and nothing afterwards, so an id that has gone deletes nothing
         rather than deleting whatever took its place.
 
-        The row BLACS is running is skipped, and its file is kept:
-        deleting either would take the shot file out from under hardware that
-        is executing it, and editing the queue is not a way to interfere with
-        the apparatus. Nothing else is protected -- a red failed row is
-        deletable, which is the only way to discard one.
+        Deleting a row marked running cancels it instead of removing its file,
+        because BLACS may still be using that file. The cancelled row stays
+        struck through until BLACS's next request or an outcome proves the file
+        is free. A cancelled row cannot be deleted again. Waiting, failed and
+        rejected rows are removed with their files when explicitly selected.
 
-        So a row stuck marked running cannot be deleted. Ordinarily none needs
-        to be: the next request from BLACS is offered that row again under the
-        same id, so the state clears itself (see offer_next). If BLACS stays
-        unavailable, restarting runmanager clears it without losing the queue,
-        because export_state never writes 'running' out and restore_state gives
-        every row back waiting.
+        Restarting runmanager restores queued rows without their session-only
+        running or cancelled state.
 
-        Returns ``(removed_paths, protected)``: the shots that were
-        removed, and the running one that was selected and kept."""
+        Returns ``(removed_paths, protected)``: removed paths and selected
+        running rows that were cancelled and kept."""
         wanted = set(shot_ids)
         removed_paths = []
         protected = []
@@ -711,8 +707,10 @@ class QueueController(object):
         being compiled. The offered shot stays in the queue too, marked
         running: the row is what BLACS is executing, so it remains visible. A
         failed row is offered again as well as a waiting one -- that is the
-        retry, and it is why a shot stays at the head until it completes or the
-        operator deletes it. Returns a copy of the record, or None.
+        retry. A rejected row is held at the head until it is deleted or
+        runmanager is restarted. The exchange path removes a cancelled head
+        before calling this method, once the request proves BLACS is no longer
+        using its file. Returns a copy of the offered record, or None.
 
         A row already marked running is offered again too, which is what stops
         a lost reply stranding the queue behind it. That rests on an ordering
@@ -736,9 +734,9 @@ class QueueController(object):
         the rest of the multi-provider work.
 
         Note that running means offered and not yet reported on, not that this
-        particular shot is on the hardware: if the head changes while BLACS is
-        running the old one -- the operator deletes it -- it is the new head
-        that is offered next.
+        particular shot is on the hardware. If the operator deletes the running
+        row, it becomes cancelled; the exchange path drops it on the next
+        request before this method offers a later row.
 
         The returned copy says in ``reclaimed`` whether it was a row still
         marked running, so that the caller can report a re-offer that the
@@ -768,19 +766,18 @@ class QueueController(object):
         """Record how BLACS says the shot it was offered turned out.
 
         The outcome names the row by its stable id, so it applies to the row
-        that was offered whichever file BLACS actually ran. A completed shot is
-        finished with and leaves the queue; anything else stays where it is,
-        which is the head of the queue, since that is the only row that can be
-        offered. It keeps its id and gains the reason it did not run, so that
-        the same shot is retried when BLACS asks for work again, and until then
-        the operator can see which shot needs attention and why. Deleting the
-        row is the only way to discard it.
+        that was offered whichever file BLACS actually ran. Completion removes
+        the row. An aborted or failed shot stays red at the head and is offered
+        again on the next request. A rejected shot stays red but is held until
+        deleted or runmanager is restarted. If the row was cancelled, any
+        outcome removes it; the caller still handles a completed shot for
+        analysis.
 
-        Returns the record if the outcome changed a row, and None if it changed
-        nothing. BLACS lets go of an outcome only once runmanager has taken it,
-        so a lost reply makes it send the same one again; the repeat finds the
-        row gone, or already carrying that same failure, and None is how the
-        caller knows there is nothing to report and nothing to analyse."""
+        Returns the row when an outcome changes queue state, or None when it
+        does not. An identical repeated rejection is ignored while the row is
+        still rejected. After a failed or aborted row is reoffered, a later
+        identical failure can be a genuine retry outcome and is reported
+        again."""
         message = str(message)
         with self._lock:
             for index, item in enumerate(self._items):
