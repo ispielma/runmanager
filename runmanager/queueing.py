@@ -294,7 +294,7 @@ class QueueController(object):
         # sequence is the day's default one, which no batch joins, so it must
         # never become the anchor the next Engage batch is written alongside.
         record['default_shot'] = bool(record.get('default_shot', False))
-        # Whether View shot(s) was ticked when this shot was engaged. The
+        # Whether runviewer was ticked when this shot was engaged. The
         # compile reads it from here, not from the checkbox as it stands then.
         record['send_to_runviewer'] = bool(record.get('send_to_runviewer', False))
         # A compile in progress belongs to this session only, so a restored

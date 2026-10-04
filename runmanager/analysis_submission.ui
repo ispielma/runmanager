@@ -49,7 +49,7 @@
       <string>Send completed shot files for analysis</string>
      </property>
      <property name="text">
-      <string>Analyse</string>
+      <string>lyse</string>
      </property>
     </widget>
    </item>

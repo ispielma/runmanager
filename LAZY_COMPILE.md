@@ -12,7 +12,7 @@ becomes a record, but Engage writes no shot file. A record holds:
 - the frozen globals: every global not marked JIT, a scanned one at that shot's
   own value and the others as their default expressions;
 - the compile mode;
-- whether *View shot(s)* was ticked, which is that shot's own choice.
+- whether *runviewer* was ticked, which is that shot's own choice.
 
 With the BLACS checkbox ticked the records join the queue at once, as rows. With
 it unticked they are not queued: the batch is compiled in order, for runviewer if

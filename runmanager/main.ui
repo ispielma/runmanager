@@ -323,7 +323,24 @@ and not Abort, which stops the shot BLACS is running.</string>
               <string>Open the shot files in runviewer after compilation</string>
              </property>
              <property name="text">
-              <string>View shot(s)</string>
+              <string/>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QLabel" name="checkBox_view_shots_icon">
+             <property name="text">
+              <string/>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QLabel" name="checkBox_view_shots_text">
+             <property name="toolTip">
+              <string>Open the shot files in runviewer after compilation</string>
+             </property>
+             <property name="text">
+              <string>runviewer</string>
              </property>
             </widget>
            </item>
