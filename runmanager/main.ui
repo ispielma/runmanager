@@ -296,17 +296,21 @@ and not Abort, which stops the shot BLACS is running.</string>
            </item>
            <item>
             <widget class="QLabel" name="blacs_status_indicator">
-             <property name="toolTip">
-              <string>Checking BLACS...</string>
-             </property>
              <property name="text">
               <string/>
              </property>
-             <property name="pixmap">
-              <pixmap>:/qtutils/fugue/hourglass.png</pixmap>
-             </property>
              <property name="scaledContents">
               <bool>false</bool>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QLabel" name="blacs_status_text">
+             <property name="text">
+              <string/>
+             </property>
+             <property name="textInteractionFlags">
+              <set>Qt::TextSelectableByMouse</set>
              </property>
             </widget>
            </item>
@@ -753,16 +757,6 @@ is, so resuming offers the same shot at its head.</string>
             </property>
             <property name="checkable">
              <bool>true</bool>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QLabel" name="queue_blacs_activity_label">
-            <property name="text">
-             <string/>
-            </property>
-            <property name="textInteractionFlags">
-             <set>Qt::TextSelectableByMouse</set>
             </property>
            </widget>
           </item>

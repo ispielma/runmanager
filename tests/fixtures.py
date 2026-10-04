@@ -21,8 +21,8 @@ the application. Tests import those names from here and never from
 ``blacs/tests/fixtures.py``.
 
 Tests that need a ``QApplication`` build their own; ``test_queueing`` and
-``test_blacs_status`` both already do. Nothing here creates one, and nothing
-here shows a widget.
+``test_analysis_submission`` both already do. Nothing here creates one, and
+nothing here shows a widget.
 
 The tests that hand shots to lyse share the few functions at the end, which
 serve a real lyse and submit to it through a real ``AnalysisSubmission``.

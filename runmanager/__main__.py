@@ -72,6 +72,8 @@ from labscript_utils.lookup_format import format_lookup_string, unescape_braces
 from labscript_utils.setup_logging import setup_logging
 import labscript_utils.shared_drive as shared_drive
 from labscript_utils import dedent
+from labscript_utils.qtwidgets.link_indicator import LinkIndicator, LinkMonitor
+from blacs.client import BlacsClient
 from runviewer.client import RunviewerClient
 from zprocess import Interruptor, raise_exception_in_thread
 import runmanager
@@ -88,12 +90,7 @@ from runmanager.analysis_submission import (
     AnalysisSubmission,
     set_icon_label_pixmap,
 )
-from runmanager.blacs_status import (
-    LINK_ICONS,
-    BlacsStatusMonitor,
-    blacs_activity_display,
-    blacs_link_display,
-)
+from runmanager.blacs_status import blacs_state
 from runmanager.queueing import (
     COMPILE_MODE_EAGER,
     COMPILE_MODE_LAZY,
@@ -2191,15 +2188,15 @@ class RunManager(LabscriptApplication):
         set_icon_label_pixmap(
             self.ui.checkBox_run_shots_icon, importlib.resources.files('blacs') / 'blacs.svg'
         )
-        # Watching BLACS runs on its own thread, independently of the shot
-        # exchange and of the destination checkbox it reports beside, so that
-        # the indicator is live whether or not shots are being queued and a
-        # BLACS that has stopped answering cannot hold up this GUI:
-        self.blacs_status_monitor = BlacsStatusMonitor(
-            on_status=self.update_blacs_status
+        blacs = BlacsClient(timeout=1)
+        self.blacs_link = LinkIndicator(
+            self.ui.blacs_status_indicator,
+            'BLACS',
+            text_label=self.ui.blacs_status_text,
+            host=blacs.host,
         )
-        self.update_blacs_status(None)
-        self.blacs_status_monitor.start()
+        self.blacs_link_monitor = LinkMonitor(blacs.get_status, self.update_blacs_status)
+        self.blacs_link_monitor.start()
         self.connect_signals()
         logger.info('UI loaded')
 
@@ -2402,7 +2399,6 @@ class RunManager(LabscriptApplication):
             QtGui.QIcon.State.On,
         )
         self.queue_pause_button.setIcon(pause_icon)
-        self.queue_blacs_activity_label = self.ui.queue_blacs_activity_label
         self.queue_widget = RunmanagerQueueWidget(self.tab_queue)
         self.queue_widget.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
@@ -2532,7 +2528,7 @@ class RunManager(LabscriptApplication):
             if reply == QtWidgets.QMessageBox.Yes:
                 self.save_configuration(self.last_save_config_file)
         self.analysis_submission.shutdown()
-        self.blacs_status_monitor.shutdown()
+        self.blacs_link_monitor.shutdown()
         self.queue_manager.shutdown()
         self.to_child.put(['quit', None])
         self.output_box.shutdown()
@@ -2562,39 +2558,12 @@ class RunManager(LabscriptApplication):
             return
         self.queue_manager.set_compile_mode(compile_mode)
 
-    @inmain_decorator()
-    def update_blacs_status(self, status):
-        """Show what BLACS last said, in the two places it belongs.
-
-        Whether BLACS is answering goes beside the destination checkbox, where
-        it means what the lyse light on the row below means and nothing more.
-        What BLACS is doing with the queue goes beside Pause queue, in words,
-        because that is the control it is about and none of it is a yes or a
-        no.
-
-        Both are independent of the destination checkbox: what the apparatus
-        is doing with work already queued is worth seeing whether or not newly
-        engaged shots are being added to it. Informational only -- there is
-        nothing here to enable BLACS, clear what stopped it, or abort a shot;
-        those stay with the operator standing at the apparatus."""
-        if self.blacs_status_monitor.stopped.is_set():
-            # Runmanager is closing. The poller checks this too, but it checks
-            # before handing the answer over, and this body is what runs after
-            # -- on the GUI thread, once the queued call comes up. An answer
-            # that passed that check can still be sitting here when the window
-            # starts coming down, and painting a QLabel that has been deleted
-            # raises, which the operator meets as a dialog on the way out.
-            return
-        state, tooltip = blacs_link_display(
-            status, host=self.blacs_status_monitor.client.host
-        )
-        icon = QtGui.QIcon(LINK_ICONS.get(state, ':/qtutils/fugue/exclamation-red'))
-        self.ui.blacs_status_indicator.setPixmap(icon.pixmap(QtCore.QSize(16, 16)))
-        self.ui.blacs_status_indicator.setToolTip(tooltip)
-
-        activity, activity_tooltip = blacs_activity_display(status)
-        self.queue_blacs_activity_label.setText(activity)
-        self.queue_blacs_activity_label.setToolTip(activity_tooltip)
+    def update_blacs_status(self, reachable, answer):
+        if reachable:
+            self.blacs_link.show_link(True)
+            self.blacs_link.show_state(*blacs_state(answer))
+        else:
+            self.blacs_link.show_link(False, answer)
 
     @inmain_decorator()
     def refresh_queue_tab(self):
