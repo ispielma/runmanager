@@ -263,12 +263,14 @@ class AnalysisSubmission(object):
             try:
                 self.lyse.add_shot(labscript_utils.shared_drive.path_to_agnostic(path))
                 self.failure_reason = None
+                self.lyse_link.show_state(None)
             except (TimeoutError, OSError, AuthenticationFailure) as e:
                 success = False
                 self.failure_reason = str(e)
-            except Exception:
+            except Exception as e:
                 # lyse answered and refused the shot, which a retry would not change:
                 self._mainloop_logger.exception('lyse refused %s', path)
+                self.lyse_link.show_state(None, [str(e)])
             if not success:
                 break
             try:
