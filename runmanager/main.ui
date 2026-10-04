@@ -330,14 +330,51 @@ and not Abort, which stops the shot BLACS is running.</string>
           </layout>
          </item>
          <item>
-          <widget class="QCheckBox" name="checkBox_view_shots">
-           <property name="toolTip">
-            <string>Open the shot files in runviewer after compilation</string>
+          <layout class="QHBoxLayout" name="horizontalLayout_runviewer">
+           <property name="spacing">
+            <number>4</number>
            </property>
-           <property name="text">
-            <string>View shot(s)</string>
-           </property>
-          </widget>
+           <item>
+            <widget class="QCheckBox" name="checkBox_view_shots">
+             <property name="toolTip">
+              <string>Open the shot files in runviewer after compilation</string>
+             </property>
+             <property name="text">
+              <string>View shot(s)</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QLabel" name="runviewer_status_indicator">
+             <property name="text">
+              <string/>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QLabel" name="runviewer_status_text">
+             <property name="text">
+              <string/>
+             </property>
+             <property name="textInteractionFlags">
+              <set>Qt::TextSelectableByMouse</set>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <spacer name="horizontalSpacer_runviewer">
+             <property name="orientation">
+              <enum>Qt::Horizontal</enum>
+             </property>
+             <property name="sizeHint" stdset="0">
+              <size>
+               <width>0</width>
+               <height>0</height>
+              </size>
+             </property>
+            </spacer>
+           </item>
+          </layout>
          </item>
         </layout>
        </widget>

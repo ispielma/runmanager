@@ -2197,6 +2197,17 @@ class RunManager(LabscriptApplication):
         )
         self.blacs_link_monitor = LinkMonitor(blacs.get_status, self.update_blacs_status)
         self.blacs_link_monitor.start()
+        self.runviewer_link = LinkIndicator(
+            self.ui.runviewer_status_indicator,
+            'runviewer',
+            text_label=self.ui.runviewer_status_text,
+            host=self.runviewer.host,
+        )
+        self.runviewer_link_monitor = LinkMonitor(
+            lambda: self.runviewer.say_hello(timeout=1),
+            lambda ok, answer: self.runviewer_link.show_link(ok, None if ok else answer),
+        )
+        self.runviewer_link_monitor.start()
         self.connect_signals()
         logger.info('UI loaded')
 
@@ -2529,6 +2540,7 @@ class RunManager(LabscriptApplication):
                 self.save_configuration(self.last_save_config_file)
         self.analysis_submission.shutdown()
         self.blacs_link_monitor.shutdown()
+        self.runviewer_link_monitor.shutdown()
         self.queue_manager.shutdown()
         self.to_child.put(['quit', None])
         self.output_box.shutdown()
