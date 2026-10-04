@@ -2179,8 +2179,7 @@ class RunManager(LabscriptApplication):
             output=self.output_box.output,
         )
         self.setup_queue_tab()
-        run_view_layout = self.ui.findChild(QtWidgets.QLayout, 'verticalLayout_2')
-        self.analysis_submission = AnalysisSubmission(run_view_layout)
+        self.analysis_submission = AnalysisSubmission(self.ui)
         # The three destination checkboxes wear their applications' logos, which
         # tell them apart faster than their names do.
         set_icon_label_pixmap(

@@ -256,16 +256,6 @@ QToolButton:hover {
             </widget>
            </item>
            <item>
-            <widget class="QLabel" name="checkBox_run_shots_text">
-             <property name="toolTip">
-              <string>Send compiled shot files to the hardware</string>
-             </property>
-             <property name="text">
-              <string>BLACS</string>
-             </property>
-            </widget>
-           </item>
-           <item>
             <layout class="QHBoxLayout" name="blacs_link_layout"/>
            </item>
            <item>
@@ -306,16 +296,6 @@ QToolButton:hover {
             </widget>
            </item>
            <item>
-            <widget class="QLabel" name="checkBox_view_shots_text">
-             <property name="toolTip">
-              <string>Open the shot files in runviewer after compilation</string>
-             </property>
-             <property name="text">
-              <string>runviewer</string>
-             </property>
-            </widget>
-           </item>
-           <item>
             <layout class="QHBoxLayout" name="runviewer_link_layout"/>
            </item>
            <item>
@@ -332,6 +312,111 @@ QToolButton:hover {
             </spacer>
            </item>
           </layout>
+         </item>
+         <item>
+          <layout class="QHBoxLayout" name="horizontalLayout_lyse">
+           <property name="spacing">
+            <number>4</number>
+           </property>
+           <item>
+            <widget class="QCheckBox" name="send_to_server">
+             <property name="focusPolicy">
+              <enum>Qt::NoFocus</enum>
+             </property>
+             <property name="toolTip">
+              <string>Send completed shot files for analysis</string>
+             </property>
+             <property name="text">
+              <string/>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QLabel" name="send_to_server_icon">
+             <property name="text">
+              <string/>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <layout class="QHBoxLayout" name="lyse_link_layout"/>
+           </item>
+           <item>
+            <spacer name="horizontalSpacer_lyse">
+             <property name="orientation">
+              <enum>Qt::Orientation::Horizontal</enum>
+             </property>
+             <property name="sizeHint" stdset="0">
+              <size>
+               <width>0</width>
+               <height>0</height>
+              </size>
+             </property>
+            </spacer>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <widget class="QFrame" name="failed_to_send_frame">
+           <property name="styleSheet">
+            <string notr="true">QFrame{background-color: '#FF9999'};</string>
+           </property>
+           <property name="frameShape">
+            <enum>QFrame::NoFrame</enum>
+           </property>
+           <property name="frameShadow">
+            <enum>QFrame::Raised</enum>
+           </property>
+           <layout class="QHBoxLayout" name="horizontalLayout_failed_to_send">
+            <property name="leftMargin">
+             <number>5</number>
+            </property>
+            <property name="topMargin">
+             <number>3</number>
+            </property>
+            <property name="rightMargin">
+             <number>3</number>
+            </property>
+            <property name="bottomMargin">
+             <number>3</number>
+            </property>
+            <item>
+             <widget class="QLabel" name="resend_shots_label">
+              <property name="text">
+               <string>[n] shots to send</string>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QToolButton" name="retry_button">
+              <property name="toolTip">
+               <string>Retry now</string>
+              </property>
+              <property name="text">
+               <string>...</string>
+              </property>
+              <property name="icon">
+               <iconset>
+                <normaloff>:/qtutils/fugue/arrow-circle.png</normaloff>:/qtutils/fugue/arrow-circle.png</iconset>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QToolButton" name="clear_unsent_shots_button">
+              <property name="toolTip">
+               <string>Clear</string>
+              </property>
+              <property name="text">
+               <string/>
+              </property>
+              <property name="icon">
+               <iconset>
+                <normaloff>:/qtutils/fugue/minus.png</normaloff>:/qtutils/fugue/minus.png</iconset>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </widget>
          </item>
         </layout>
        </widget>

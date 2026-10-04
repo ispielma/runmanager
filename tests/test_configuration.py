@@ -17,13 +17,11 @@ import tempfile
 import types
 import unittest
 
-from qtutils import UiLoader
 from qtutils.qt.QtGui import QStandardItemModel
 from qtutils.qt.QtWidgets import QApplication
 
-import runmanager
 # fixtures stubs the splash and does the guarded import of the application.
-from fixtures import FingerTabWidget, RunManager, TreeView
+from fixtures import RunManager, load_main_ui
 from runmanager.queueing import QueueController, QueueManager
 
 _qapplication = None
@@ -42,13 +40,8 @@ class QueueInConfigurationTests(unittest.TestCase):
 
     def session(self, *shots):
         """Runmanager without its startup, with these shots in its queue."""
-        loader = UiLoader()
-        loader.registerCustomWidget(FingerTabWidget)
-        loader.registerCustomWidget(TreeView)
         app = RunManager.__new__(RunManager)
-        app.ui = loader.load(
-            os.path.join(os.path.dirname(runmanager.__file__), 'main.ui')
-        )
+        app.ui = load_main_ui()
         app.init_config_window_title()
         app.groups_model = QStandardItemModel()
         app.axes_model = QStandardItemModel()

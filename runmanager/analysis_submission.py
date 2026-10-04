@@ -11,7 +11,7 @@
 # the project for the full license.                                 #
 #                                                                   #
 #####################################################################
-"""Lyse submission widget and retry loop for runmanager."""
+"""Send completed shots to lyse from runmanager's lyse row, retrying any it cannot send."""
 
 import importlib.resources
 import logging
@@ -20,21 +20,16 @@ import queue
 import sys
 import threading
 import time
-from pathlib import Path
 
 import labscript_utils.shared_drive
 from labscript_utils.qtwidgets.elide_label import elide_label
 from labscript_utils.qtwidgets.link_indicator import LinkIndicator
 from lyse.client import LyseClient
-from qtutils import UiLoader, inmain_decorator
+from qtutils import inmain_decorator
 from qtutils.qt import QtGui
 from qtutils.qt.QtCore import Qt
-from qtutils.qt.QtWidgets import QSizePolicy
 from zprocess import TimeoutError, raise_exception_in_thread
 from zprocess.security import AuthenticationFailure
-
-
-runmanager_dir = Path(__file__).absolute().parent
 
 
 def set_icon_label_pixmap(label, icon_path, size=16):
@@ -48,41 +43,34 @@ def set_icon_label_pixmap(label, icon_path, size=16):
 
 
 class AnalysisSubmission(object):
-    def __init__(self, parent_layout=None):
+    def __init__(self, ui):
         self.inqueue = queue.Queue()
         self.lyse = LyseClient(timeout=1)
 
-        self.widget = UiLoader().load(os.path.join(runmanager_dir, 'analysis_submission.ui'))
+        self.ui = ui
         set_icon_label_pixmap(
-            self.widget.send_to_server_icon, importlib.resources.files('lyse') / 'lyse.svg'
+            self.ui.send_to_server_icon, importlib.resources.files('lyse') / 'lyse.svg'
         )
         self.lyse_link = LinkIndicator(
             'lyse', lambda: self.lyse.say_hello(timeout=1), host=self.lyse.host
         )
-        self.widget.lyse_link_layout.addWidget(self.lyse_link)
+        self.ui.lyse_link_layout.addWidget(self.lyse_link)
         if self.lyse.host:
             self.lyse_link.start()
         else:
             self.lyse_link.show_disabled('No lyse host is configured')
 
-        if parent_layout is not None:
-            try:
-                parent_layout.insertWidget(parent_layout.count(), self.widget)
-            except AttributeError:
-                parent_layout.addWidget(self.widget)
-
-        self.widget.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
         elide_label(
-            self.widget.resend_shots_label,
-            self.widget.failed_to_send_frame.layout(),
+            self.ui.resend_shots_label,
+            self.ui.failed_to_send_frame.layout(),
             Qt.ElideRight,
         )
 
-        self.widget.send_to_server.toggled.connect(self._set_send_to_server)
-        self.widget.clear_unsent_shots_button.clicked.connect(
+        self.ui.send_to_server.toggled.connect(self._set_send_to_server)
+        self.ui.clear_unsent_shots_button.clicked.connect(
             lambda _=False: self.clear_waiting_files()
         )
-        self.widget.retry_button.clicked.connect(lambda _=False: self.check_retry())
+        self.ui.retry_button.clicked.connect(lambda _=False: self.check_retry())
 
         self._waiting_for_submission = []
         self.time_of_last_attempt = 0
@@ -117,34 +105,34 @@ class AnalysisSubmission(object):
     @inmain_decorator(True)
     def _apply_send_to_server(self, value, clear_waiting):
         self._send_to_server = bool(value)
-        self.widget.send_to_server.setChecked(self.send_to_server)
+        self.ui.send_to_server.setChecked(self.send_to_server)
         if self.send_to_server:
             self.check_retry()
         else:
             if clear_waiting:
                 self.clear_waiting_files()
             else:
-                self.widget.failed_to_send_frame.hide()
+                self.ui.failed_to_send_frame.hide()
 
     @inmain_decorator(True)
     def update_waiting_files_message(self):
         if (
             self.server_online == 'checking'
             and len(self._waiting_for_submission) == 1
-            and not self.widget.failed_to_send_frame.isVisible()
+            and not self.ui.failed_to_send_frame.isVisible()
         ):
             return
         if self._waiting_for_submission:
-            self.widget.failed_to_send_frame.show()
+            self.ui.failed_to_send_frame.show()
             if self.server_online == 'checking':
-                self.widget.retry_button.hide()
+                self.ui.retry_button.hide()
                 text = 'Sending %s shot(s)...' % len(self._waiting_for_submission)
             else:
-                self.widget.retry_button.show()
+                self.ui.retry_button.show()
                 text = '%s shot(s) to send' % len(self._waiting_for_submission)
-            self.widget.resend_shots_label.setText(text)
+            self.ui.resend_shots_label.setText(text)
         else:
-            self.widget.failed_to_send_frame.hide()
+            self.ui.failed_to_send_frame.hide()
 
     @inmain_decorator(True)
     def clear_waiting_files(self):
