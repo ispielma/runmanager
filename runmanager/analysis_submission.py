@@ -24,10 +24,11 @@ from pathlib import Path
 
 import labscript_utils.shared_drive
 from labscript_utils.qtwidgets.elide_label import elide_label
+from labscript_utils.qtwidgets.link_indicator import LinkIndicator
 from lyse.client import LyseClient
 from qtutils import UiLoader, inmain_decorator
 from qtutils.qt import QtGui
-from qtutils.qt.QtCore import Qt, QSize
+from qtutils.qt.QtCore import Qt
 from qtutils.qt import QtWidgets
 from qtutils.qt.QtWidgets import QSizePolicy
 from zprocess import TimeoutError, raise_exception_in_thread
@@ -56,6 +57,7 @@ class AnalysisSubmission(object):
         set_icon_label_pixmap(
             self.widget.send_to_server_icon, importlib.resources.files('lyse') / 'lyse.svg'
         )
+        self.lyse_link = LinkIndicator(self.widget.server_online, 'lyse', host=self.lyse.host)
 
         if parent_layout is not None:
             if isinstance(parent_layout, QtWidgets.QGridLayout):
@@ -84,7 +86,6 @@ class AnalysisSubmission(object):
         self.time_of_last_connectivity_check = 0
         self._shutdown = False
         self._send_to_server = False
-        self._server_online = ''
         self.server_online = ''
         self.send_to_server = False
 
@@ -143,43 +144,6 @@ class AnalysisSubmission(object):
             else:
                 self.widget.failed_to_send_frame.hide()
             self.widget.server_online.hide()
-
-    @property
-    @inmain_decorator(True)
-    def server_online(self):
-        return self._server_online
-
-    @server_online.setter
-    @inmain_decorator(True)
-    def server_online(self, value):
-        self._server_online = str(value)
-
-        icon_names = {
-            'checking': ':/qtutils/fugue/hourglass',
-            'online': ':/qtutils/fugue/tick',
-            'offline': ':/qtutils/fugue/exclamation',
-            '': ':/qtutils/fugue/status-offline',
-        }
-        tooltips = {
-            'checking': 'Checking...',
-            'online': 'Server is responding',
-            'offline': 'Server not responding',
-            '': 'Disabled',
-        }
-
-        icon = QtGui.QIcon(icon_names.get(self._server_online, ':/qtutils/fugue/exclamation-red'))
-        pixmap = icon.pixmap(QSize(16, 16))
-        tooltip = tooltips.get(
-            self._server_online,
-            'Invalid server status: %s' % self._server_online,
-        )
-        tooltip += '\nHost: %s' % self.lyse.host
-        if self.failure_reason is not None:
-            tooltip += '\n' + self.failure_reason
-
-        self.widget.server_online.setPixmap(pixmap)
-        self.widget.server_online.setToolTip(tooltip)
-        self.update_waiting_files_message()
 
     @inmain_decorator(True)
     def update_waiting_files_message(self):
@@ -271,6 +235,7 @@ class AnalysisSubmission(object):
         send_to_server = self.send_to_server
         if host and send_to_server:
             self.server_online = 'checking'
+            self.update_waiting_files_message()
             try:
                 self.lyse.say_hello()
                 self.failure_reason = None
@@ -281,8 +246,10 @@ class AnalysisSubmission(object):
                 success = True
 
             self.server_online = 'online' if success else 'offline'
+            self.lyse_link.show_link(success, self.failure_reason)
         else:
             self.server_online = ''
+        self.update_waiting_files_message()
 
         self.time_of_last_connectivity_check = time.time()
 
@@ -292,16 +259,16 @@ class AnalysisSubmission(object):
             path = self._waiting_for_submission[0]
             self._mainloop_logger.debug('Submitting run file %s.\n' % os.path.basename(path))
             self.server_online = 'checking'
+            self.update_waiting_files_message()
             try:
                 self.lyse.add_shot(labscript_utils.shared_drive.path_to_agnostic(path))
                 self.failure_reason = None
             except (TimeoutError, OSError, AuthenticationFailure) as e:
                 success = False
                 self.failure_reason = str(e)
-            except Exception as e:
+            except Exception:
                 # lyse answered and refused the shot, which a retry would not change:
                 self._mainloop_logger.exception('lyse refused %s', path)
-                self.failure_reason = str(e)
             if not success:
                 break
             try:
@@ -310,4 +277,6 @@ class AnalysisSubmission(object):
                 pass
 
         self.server_online = 'online' if success else 'offline'
+        self.lyse_link.show_link(success, self.failure_reason)
+        self.update_waiting_files_message()
         self.time_of_last_connectivity_check = time.time()
