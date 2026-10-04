@@ -54,14 +54,31 @@
     </widget>
    </item>
    <item row="0" column="3">
-    <widget class="QLabel" name="server_online">
-     <property name="text">
-      <string/>
+    <layout class="QHBoxLayout" name="horizontalLayout_lyse_link">
+     <property name="spacing">
+      <number>4</number>
      </property>
-     <property name="scaledContents">
-      <bool>false</bool>
-     </property>
-    </widget>
+     <item>
+      <widget class="QLabel" name="server_online">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="scaledContents">
+        <bool>false</bool>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="server_online_text">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="textInteractionFlags">
+        <set>Qt::TextSelectableByMouse</set>
+       </property>
+      </widget>
+     </item>
+    </layout>
    </item>
    <item row="1" column="0" colspan="4">
     <widget class="QFrame" name="failed_to_send_frame">
