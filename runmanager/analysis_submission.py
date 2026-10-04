@@ -24,7 +24,7 @@ from pathlib import Path
 
 import labscript_utils.shared_drive
 from labscript_utils.qtwidgets.elide_label import elide_label
-from labscript_utils.qtwidgets.link_indicator import LinkIndicator, LinkMonitor
+from labscript_utils.qtwidgets.link_indicator import LinkIndicator
 from lyse.client import LyseClient
 from qtutils import UiLoader, inmain_decorator
 from qtutils.qt import QtGui
@@ -57,17 +57,11 @@ class AnalysisSubmission(object):
             self.widget.send_to_server_icon, importlib.resources.files('lyse') / 'lyse.svg'
         )
         self.lyse_link = LinkIndicator(
-            self.widget.server_online,
-            'lyse',
-            text_label=self.widget.server_online_text,
-            host=self.lyse.host,
+            'lyse', lambda: self.lyse.say_hello(timeout=1), host=self.lyse.host
         )
-        self.lyse_monitor = LinkMonitor(
-            lambda: self.lyse.say_hello(timeout=1),
-            lambda ok, answer: self.lyse_link.show_link(ok, None if ok else answer),
-        )
+        self.widget.lyse_link_layout.addWidget(self.lyse_link)
         if self.lyse.host:
-            self.lyse_monitor.start()
+            self.lyse_link.start()
         else:
             self.lyse_link.show_disabled('No lyse host is configured')
 
@@ -172,7 +166,7 @@ class AnalysisSubmission(object):
         if self._shutdown:
             return
         self._shutdown = True
-        self.lyse_monitor.shutdown()
+        self.lyse_link.shutdown()
         self.inqueue.put(['close', None])
         if (
             self.mainloop_thread.is_alive()

@@ -72,7 +72,7 @@ from labscript_utils.lookup_format import format_lookup_string, unescape_braces
 from labscript_utils.setup_logging import setup_logging
 import labscript_utils.shared_drive as shared_drive
 from labscript_utils import dedent
-from labscript_utils.qtwidgets.link_indicator import LinkIndicator, LinkMonitor
+from labscript_utils.qtwidgets.link_indicator import LinkIndicator
 from blacs.client import BlacsClient
 from runviewer.client import RunviewerClient
 from zprocess import Interruptor, raise_exception_in_thread
@@ -2190,24 +2190,15 @@ class RunManager(LabscriptApplication):
         )
         blacs = BlacsClient(timeout=1)
         self.blacs_link = LinkIndicator(
-            self.ui.blacs_status_indicator,
-            'BLACS',
-            text_label=self.ui.blacs_status_text,
-            host=blacs.host,
+            'BLACS', blacs.get_status, host=blacs.host, on_answer=self.update_blacs_status
         )
-        self.blacs_link_monitor = LinkMonitor(blacs.get_status, self.update_blacs_status)
-        self.blacs_link_monitor.start()
+        self.ui.blacs_link_layout.addWidget(self.blacs_link)
+        self.blacs_link.start()
         self.runviewer_link = LinkIndicator(
-            self.ui.runviewer_status_indicator,
-            'runviewer',
-            text_label=self.ui.runviewer_status_text,
-            host=self.runviewer.host,
+            'runviewer', lambda: self.runviewer.say_hello(timeout=1), host=self.runviewer.host
         )
-        self.runviewer_link_monitor = LinkMonitor(
-            lambda: self.runviewer.say_hello(timeout=1),
-            lambda ok, answer: self.runviewer_link.show_link(ok, None if ok else answer),
-        )
-        self.runviewer_link_monitor.start()
+        self.ui.runviewer_link_layout.addWidget(self.runviewer_link)
+        self.runviewer_link.start()
         self.connect_signals()
         logger.info('UI loaded')
 
@@ -2539,8 +2530,8 @@ class RunManager(LabscriptApplication):
             if reply == QtWidgets.QMessageBox.Yes:
                 self.save_configuration(self.last_save_config_file)
         self.analysis_submission.shutdown()
-        self.blacs_link_monitor.shutdown()
-        self.runviewer_link_monitor.shutdown()
+        self.blacs_link.shutdown()
+        self.runviewer_link.shutdown()
         self.queue_manager.shutdown()
         self.to_child.put(['quit', None])
         self.output_box.shutdown()
@@ -2572,10 +2563,7 @@ class RunManager(LabscriptApplication):
 
     def update_blacs_status(self, reachable, answer):
         if reachable:
-            self.blacs_link.show_link(True)
             self.blacs_link.show_state(*blacs_state(answer))
-        else:
-            self.blacs_link.show_link(False, answer)
 
     @inmain_decorator()
     def refresh_queue_tab(self):
