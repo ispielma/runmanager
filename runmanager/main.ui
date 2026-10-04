@@ -257,12 +257,7 @@ subprocess</string>
            <item>
             <widget class="QCheckBox" name="checkBox_run_shots">
              <property name="toolTip">
-              <string>Put the shots compiled by Engage into the runmanager queue, for BLACS to run.
-Unticked, they are compiled and left alone.
-
-This is not Pause queue, which withholds shots already in the queue;
-not BLACS's Request shots, which is what lets BLACS run anything at all;
-and not Abort, which stops the shot BLACS is running.</string>
+              <string>Send compiled shot files to the hardware</string>
              </property>
              <property name="text">
               <string/>
@@ -282,12 +277,7 @@ and not Abort, which stops the shot BLACS is running.</string>
            <item>
             <widget class="QLabel" name="checkBox_run_shots_text">
              <property name="toolTip">
-              <string>Put the shots compiled by Engage into the runmanager queue, for BLACS to run.
-Unticked, they are compiled and left alone.
-
-This is not Pause queue, which withholds shots already in the queue;
-not BLACS's Request shots, which is what lets BLACS run anything at all;
-and not Abort, which stops the shot BLACS is running.</string>
+              <string>Send compiled shot files to the hardware</string>
              </property>
              <property name="text">
               <string>BLACS</string>
