@@ -109,11 +109,11 @@ class RunmanagerClient(ZMQClient):
         return self.request('set_run_shots', value)
 
     def get_view_shots(self):
-        """Get boolean state of 'View shot(s)' checkbox"""
+        """Get boolean state of 'runviewer' checkbox"""
         return self.request('get_view_shots')
 
     def set_view_shots(self, value):
-        """Set boolean state of 'View shot(s)' checkbox"""
+        """Set boolean state of 'runviewer' checkbox"""
         return self.request('set_view_shots', value)
 
     def get_shuffle(self):

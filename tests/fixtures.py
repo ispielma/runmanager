@@ -21,8 +21,8 @@ the application. Tests import those names from here and never from
 ``blacs/tests/fixtures.py``.
 
 Tests that need a ``QApplication`` build their own; ``test_queueing`` and
-``test_blacs_status`` both already do. Nothing here creates one, and nothing
-here shows a widget.
+``test_analysis_submission`` both already do. Nothing here creates one, and
+nothing here shows a widget.
 
 The tests that hand shots to lyse share the few functions at the end, which
 serve a real lyse and submit to it through a real ``AnalysisSubmission``.
@@ -38,6 +38,7 @@ import types
 import warnings
 
 from labscript_utils.labconfig import LabConfig
+from qtutils import UiLoader
 import tomli_w
 
 
@@ -118,6 +119,7 @@ __all__ = [
     'Splash',
     'TreeView',
     'labconfig',
+    'load_main_ui',
     'main_module',
     'runviewer_main',
     'serve_lyse',
@@ -164,9 +166,17 @@ def serve_lyse(testcase, lyse_app, port=None):
     return server
 
 
+def load_main_ui():
+    """runmanager's main window, loaded from main.ui as RunManager loads it."""
+    loader = UiLoader()
+    loader.registerCustomWidget(FingerTabWidget)
+    loader.registerCustomWidget(TreeView)
+    return loader.load(os.path.join(os.path.dirname(main_module.__file__), 'main.ui'))
+
+
 def submit_to_lyse(testcase, port):
     """A real AnalysisSubmission, sending shots to the lyse on this port."""
-    submission = AnalysisSubmission()
+    submission = AnalysisSubmission(load_main_ui())
     testcase.addCleanup(stop_submission, submission)
     submission.lyse = LyseClient(host='127.0.0.1', port=port, timeout=1)
     submission.send_to_server = True
