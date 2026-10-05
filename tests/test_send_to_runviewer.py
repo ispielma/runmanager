@@ -4,6 +4,7 @@ The shot goes through the real RunviewerClient to a real RunviewerServer; only
 the process start is faked, by serving that server where the started runviewer
 would.
 """
+import functools
 import os
 import queue
 import socket
@@ -51,11 +52,14 @@ class SendToRunviewerTests(unittest.TestCase):
         with socket.socket() as probe:
             probe.bind(('127.0.0.1', 0))
             self.port = probe.getsockname()[1]
+        # send_to_runviewer builds its own client; this one finds the test's server:
+        patcher = mock.patch.object(
+            main_module, 'RunviewerClient', functools.partial(RunviewerClient, port=self.port)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.said = []
         self.app = RunManager.__new__(RunManager)
-        self.app.runviewer = RunviewerClient(
-            host='127.0.0.1', port=self.port, timeout=0.5
-        )
         self.app.output_box = types.SimpleNamespace(
             output=lambda text, red=False: self.said.append(text)
         )

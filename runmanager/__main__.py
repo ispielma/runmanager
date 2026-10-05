@@ -2169,7 +2169,6 @@ class RunManager(LabscriptApplication):
         self.child_ready = threading.Event()
         self.child_ready.set()
 
-        self.runviewer = RunviewerClient(host='localhost', timeout=0.5)
         self.queue_controller = QueueController()
         self.queue_manager = QueueManager(
             controller=self.queue_controller,
@@ -2189,15 +2188,18 @@ class RunManager(LabscriptApplication):
             self.ui.checkBox_view_shots_icon,
             importlib.resources.files('runviewer') / 'runviewer.svg',
         )
-        blacs = BlacsClient(timeout=1)
+        blacs = BlacsClient()
         self.blacs_link = LinkIndicator(
-            'BLACS', blacs.get_status, host=blacs.host, on_answer=self.update_blacs_status
+            'BLACS',
+            blacs.host,
+            blacs.port,
+            command='get_status',
+            on_answer=self.update_blacs_status,
         )
         self.ui.blacs_link_layout.addWidget(self.blacs_link)
         self.blacs_link.start()
-        self.runviewer_link = LinkIndicator(
-            'runviewer', lambda: self.runviewer.say_hello(timeout=1), host=self.runviewer.host
-        )
+        runviewer = RunviewerClient(host='localhost')
+        self.runviewer_link = LinkIndicator('runviewer', runviewer.host, runviewer.port)
         self.ui.runviewer_link_layout.addWidget(self.runviewer_link)
         self.runviewer_link.start()
         self.connect_signals()
@@ -4953,9 +4955,11 @@ class RunManager(LabscriptApplication):
         )
 
     def send_to_runviewer(self, run_file):
+        # Called on whichever thread compiled the shot, so with a client of its own:
+        runviewer = RunviewerClient(host='localhost', timeout=0.5)
         agnostic_path = shared_drive.path_to_agnostic(run_file)
         try:
-            self.runviewer.say_hello(timeout=1)
+            runviewer.say_hello(timeout=1)
         except Exception:
             logger.info('runviewer not running, attempting to start...')
             # Runviewer not running, start it:
@@ -4985,12 +4989,12 @@ class RunManager(LabscriptApplication):
                     close_fds=True,
                 )
             try:
-                self.runviewer.say_hello(timeout=15)
+                runviewer.say_hello(timeout=15)
             except Exception as e:
                 self.output_box.output('Couldn\'t submit shot to runviewer: %s\n\n' % str(e), red=True)
 
         try:
-            self.runviewer.add_shot(agnostic_path)
+            runviewer.add_shot(agnostic_path)
             self.output_box.output('Shot %s sent to runviewer.\n' % os.path.basename(run_file))
         except Exception as e:
             self.output_box.output('Couldn\'t submit shot to runviewer: %s\n\n' % str(e), red=True)
