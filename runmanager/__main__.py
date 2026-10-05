@@ -2189,15 +2189,17 @@ class RunManager(LabscriptApplication):
             self.ui.checkBox_view_shots_icon,
             importlib.resources.files('runviewer') / 'runviewer.svg',
         )
-        blacs = BlacsClient(timeout=1)
+        blacs = BlacsClient()
         self.blacs_link = LinkIndicator(
-            'BLACS', blacs.get_status, host=blacs.host, on_answer=self.update_blacs_status
+            'BLACS',
+            blacs.host,
+            blacs.port,
+            command='get_status',
+            on_answer=self.update_blacs_status,
         )
         self.ui.blacs_link_layout.addWidget(self.blacs_link)
         self.blacs_link.start()
-        self.runviewer_link = LinkIndicator(
-            'runviewer', lambda: self.runviewer.say_hello(timeout=1), host=self.runviewer.host
-        )
+        self.runviewer_link = LinkIndicator('runviewer', self.runviewer.host, self.runviewer.port)
         self.ui.runviewer_link_layout.addWidget(self.runviewer_link)
         self.runviewer_link.start()
         self.connect_signals()

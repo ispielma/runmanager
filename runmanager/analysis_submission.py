@@ -51,9 +51,7 @@ class AnalysisSubmission(object):
         set_icon_label_pixmap(
             self.ui.send_to_server_icon, importlib.resources.files('lyse') / 'lyse.svg'
         )
-        self.lyse_link = LinkIndicator(
-            'lyse', lambda: self.lyse.say_hello(timeout=1), host=self.lyse.host
-        )
+        self.lyse_link = LinkIndicator('lyse', self.lyse.host, self.lyse.port)
         self.ui.lyse_link_layout.addWidget(self.lyse_link)
         if self.lyse.host:
             self.lyse_link.start()
