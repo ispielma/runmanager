@@ -36,9 +36,11 @@ from zprocess import raise_exception_in_thread
 from runmanager import _plain_value
 from runmanager.client import (
     BLOCKED_SHOT_STATE,
+    COMPILING_SHOT_STATE,
     PROVIDER_NONE,
     PROVIDER_PAUSED,
     PROVIDER_SHOT,
+    QUEUED_SHOT_STATE,
     SHOT_OUTCOME_STATUSES,
     UNKNOWN_SHOT_STATE,
 )
@@ -485,6 +487,39 @@ class QueueController(object):
             else:
                 answer[shot_id] = {'pending': False, 'state': UNKNOWN_SHOT_STATE}
         return answer
+
+    def get_queue(self):
+        """List the rows of the queue, in queue order.
+
+        Reads only.
+
+        Returns
+        -------
+        list of dict
+            One dict per row. ``shot_id`` is the row's stable id,
+            ``sequence_id`` and ``sequence_index`` the sequence its shot belongs
+            to (None for a row that records none), ``run_number`` its number
+            within that sequence, and ``path`` its shot file. ``state`` is the
+            row's own state when it has one, and otherwise
+            ``COMPILING_SHOT_STATE`` while its compile is under way and
+            ``QUEUED_SHOT_STATE`` while it waits its turn. ``message`` is the
+            reason the row gives for its state, empty when it gives none.
+        """
+        with self._lock:
+            return [
+                {
+                    'shot_id': item['shot_id'],
+                    'sequence_id': item['sequence_attrs'].get('sequence_id'),
+                    'sequence_index': item['sequence_attrs'].get('sequence_index'),
+                    'run_number': item['run_no'],
+                    'path': item['path'],
+                    'state': item['state'] or (
+                        COMPILING_SHOT_STATE if item['compiling'] else QUEUED_SHOT_STATE
+                    ),
+                    'message': item['message'],
+                }
+                for item in self._items
+            ]
 
     def get_queued_sequence_attrs(self, path):
         """The sequence attributes of the queued shot at ``path``, or None.

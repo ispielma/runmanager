@@ -85,6 +85,10 @@ from runmanager.client import (
     PROVIDER_PENDING,
     PROVIDER_SHOT,
     SHOT_OUTCOME_STATUSES,
+    SUBMISSION_MODE_LAST_SEQUENCE,
+    SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE,
+    SUBMISSION_MODE_NEW_SEQUENCE,
+    SUBMISSION_MODE_NEW_SEQUENCE_CLEAR_QUEUE,
     SequenceRefused,
 )
 from runmanager.analysis_submission import (
@@ -135,11 +139,6 @@ process_tree = ProcessTree.instance()
 
 # Set a meaningful name for zprocess.locking's client id:
 process_tree.zlock_client.set_process_name(APPLICATION_NAME)
-
-SUBMISSION_MODE_NEW_SEQUENCE = 'new_sequence'
-SUBMISSION_MODE_LAST_SEQUENCE = 'last_sequence'
-SUBMISSION_MODE_NEW_SEQUENCE_CLEAR_QUEUE = 'new_sequence_clear_queue'
-SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE = 'last_sequence_clear_queue'
 
 SubmissionMode = collections.namedtuple(
     'SubmissionMode', ['joins_sequence', 'clears_queue']
@@ -2868,27 +2867,52 @@ class RunManager(LabscriptApplication):
     def on_engage_clicked(self, checked=False, submission_mode=SUBMISSION_MODE_NEW_SEQUENCE):
         logger.info('Engage')
         try:
-            send_to_BLACS = self.ui.checkBox_run_shots.isChecked()
-            send_to_runviewer = self.ui.checkBox_view_shots.isChecked()
-            mode = SUBMISSION_MODES[submission_mode]
-            if (mode.joins_sequence or mode.clears_queue) and not send_to_BLACS:
-                # A mode that reads the queue for a sequence to join, or
-                # empties it, is about the queue -- so with nothing going to
-                # BLACS there is nothing for it to do.
-                self.output_box.output(
-                    "Warning: alternate queue submission modes require 'BLACS' to be selected.\n\n",
-                    red=True,
-                )
-                return
-            self.compile_and_queue_shots(
-                submission_mode,
-                send_to_BLACS,
-                send_to_runviewer,
-                self.expand_pending_shots(),
-            )
+            self.engage(submission_mode)
         except Exception as e:
             self.output_box.output('%s\n\n' % str(e), red=True)
         logger.info('end engage')
+
+    def engage(self, submission_mode=SUBMISSION_MODE_NEW_SEQUENCE):
+        """Compile the shots the window's globals expand into, and queue them.
+
+        What the Engage button does, and what a remote caller's engage does.
+
+        Parameters
+        ----------
+        submission_mode : str
+            A key of ``SUBMISSION_MODES``: how the batch joins the queue.
+
+        Returns
+        -------
+        list of dict
+            The queue records of the batch, in the order the shots were made.
+
+        Raises
+        ------
+        ValueError
+            For a submission mode that is not known, and for an alternate one
+            while 'BLACS' is not ticked.
+        Exception
+            Whatever stops the batch being made, such as no labscript file.
+        """
+        if submission_mode not in SUBMISSION_MODES:
+            raise ValueError(f'Unknown submission mode {submission_mode!r}.')
+        send_to_BLACS = self.ui.checkBox_run_shots.isChecked()
+        send_to_runviewer = self.ui.checkBox_view_shots.isChecked()
+        mode = SUBMISSION_MODES[submission_mode]
+        if (mode.joins_sequence or mode.clears_queue) and not send_to_BLACS:
+            # A mode that reads the queue for a sequence to join, or
+            # empties it, is about the queue -- so with nothing going to
+            # BLACS there is nothing for it to do.
+            raise ValueError(
+                "Alternate queue submission modes require 'BLACS' to be selected."
+            )
+        return self.compile_and_queue_shots(
+            submission_mode,
+            send_to_BLACS,
+            send_to_runviewer,
+            self.expand_pending_shots(),
+        )
 
     def expand_pending_shots(self):
         """The shots the window's globals stand for, in the order to make them.
@@ -5291,6 +5315,17 @@ class RunManager(LabscriptApplication):
         }
 
 
+def shot_receipt(record):
+    """What a remote caller is told about a shot it submitted."""
+    return {
+        'shot_id': record['shot_id'],
+        'sequence_id': record['sequence_attrs']['sequence_id'],
+        'sequence_index': record['sequence_attrs']['sequence_index'],
+        'run_number': record['run_no'],
+        'path': record['path'],
+    }
+
+
 class RunmanagerServer(ZMQServer):
     def __init__(self):
         port = app.exp_config.getint('ports', 'runmanager', fallback=DEFAULT_PORT)
@@ -5465,9 +5500,9 @@ class RunmanagerServer(ZMQServer):
             'jit_enabled', GroupTab.change_global_jit_enabled, globals
         )
 
-    def handle_engage(self):
+    def handle_engage(self, submission_mode=SUBMISSION_MODE_NEW_SEQUENCE):
         app.wait_until_preparse_complete()
-        inmain(app.on_engage_clicked)
+        return [shot_receipt(record) for record in inmain(app.engage, submission_mode)]
 
     @inmain_decorator()
     def handle_abort(self):
@@ -5492,6 +5527,12 @@ class RunmanagerServer(ZMQServer):
         app.ui.checkBox_view_shots.setChecked(
             self._coerce_remote_boolean(value, 'value')
         )
+
+    def handle_get_analyse_shots(self):
+        return app.analysis_submission.send_to_server
+
+    def handle_set_analyse_shots(self, value):
+        app.analysis_submission.send_to_server = self._coerce_remote_boolean(value, 'value')
 
     @inmain_decorator()
     def handle_get_shuffle(self):
@@ -5632,16 +5673,7 @@ class RunmanagerServer(ZMQServer):
             batch,
             sequence=None if sequence is None else (sequence, sequence_index),
         )
-        return [
-            {
-                'shot_id': record['shot_id'],
-                'sequence_id': record['sequence_attrs']['sequence_id'],
-                'sequence_index': record['sequence_attrs']['sequence_index'],
-                'run_number': record['run_no'],
-                'path': record['path'],
-            }
-            for record in records
-        ]
+        return [shot_receipt(record) for record in records]
 
     def handle_shot_status(self, shot_ids):
         """Whether each of these shots can still produce a result.
@@ -5650,6 +5682,10 @@ class RunmanagerServer(ZMQServer):
         queue controller is safe to ask from any thread, so this is not a GUI
         read."""
         return app.queue_controller.get_shot_statuses(list(shot_ids))
+
+    def handle_get_queue(self):
+        """Read-only, and the queue controller is safe to ask from any thread."""
+        return app.queue_controller.get_queue()
 
     def handle_queue_exchange(self, outcome=None, request_shot=True):
         return app.queue_exchange(outcome, bool(request_shot))

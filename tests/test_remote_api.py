@@ -24,11 +24,24 @@ from qtutils.qt.QtGui import QStandardItemModel
 from qtutils.qt.QtWidgets import QApplication
 import runmanager
 import runmanager.globals_file as globals_file
-from runmanager.client import RunmanagerClient, SequenceRefused
+from runmanager.analysis_submission import AnalysisSubmission
+from runmanager.client import (
+    SUBMISSION_MODE_LAST_SEQUENCE,
+    SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE,
+    RunmanagerClient,
+    SequenceRefused,
+)
 # fixtures stubs the splash and does the guarded import of the
 # application, once, for every test module. Importing
 # runmanager.__main__ here instead would show the startup banner.
-from fixtures import RunManager, RunmanagerServer, labconfig, main_module
+from fixtures import (
+    RunManager,
+    RunmanagerServer,
+    labconfig,
+    load_main_ui,
+    main_module,
+    stop_submission,
+)
 from runmanager.queueing import (
     BLOCKED_SHOT_STATE,
     COMPILE_MODE_EAGER,
@@ -126,6 +139,7 @@ class SubmittingApp(object):
     prepare_queue_shot = RunManager.prepare_queue_shot
     on_abort_clicked = RunManager.on_abort_clicked
     on_engage_clicked = RunManager.on_engage_clicked
+    engage = RunManager.engage
     expand_pending_shots = RunManager.expand_pending_shots
     parse_globals = RunManager.parse_globals
     add_item_to_axes_model = RunManager.add_item_to_axes_model
@@ -830,6 +844,36 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
             'gave up, rather than carrying on past them',
         )
 
+    def test_a_remote_engage_carries_out_the_mode_and_receipts_each_shot(self):
+        self.enqueue('experiment_007.h5')
+        globals_file.set_field(self.app.globals_file, 'group', 'x', 'scan', '[1, 2]')
+        globals_file.set_field(self.app.globals_file, 'group', 'x', 'scan_enabled', True)
+        globals_file.set_field(self.app.globals_file, 'group', 'x', 'expansion', 'outer')
+
+        receipts = self.request(
+            self.client.engage, SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE
+        )
+
+        sequence_id = self.SEQUENCE['sequence_id']
+        self.assertEqual(
+            [(receipt['sequence_id'], receipt['run_number']) for receipt in receipts],
+            [(sequence_id, 0), (sequence_id, 1)],
+            'the replacement joined the sequence that was queued, from 0 again',
+        )
+        self.assertEqual(
+            [row['shot_id'] for row in self.request(self.client.get_queue)],
+            [receipt['shot_id'] for receipt in receipts],
+            'and the queue lists those shots and nothing it replaced',
+        )
+
+    def test_a_remote_engage_in_an_alternate_mode_needs_blacs_ticked(self):
+        self.app.ui.checkBox_run_shots.isChecked = lambda: False
+
+        with self.assertRaises(ValueError):
+            self.request(self.client.engage, SUBMISSION_MODE_LAST_SEQUENCE)
+
+        self.assertEqual(self.app.batches, [], 'and nothing was made')
+
 
 class ShuffledEngageTests(RemoteCommandTestCase):
     """Engaging a scan with the shuffle button down, or an axis's box checked.
@@ -932,6 +976,21 @@ class CompileOnlyEngageTests(RemoteCommandTestCase):
         self.assertTrue(all(os.path.isfile(path) for path in self.app.compiled))
         self.assertEqual(self.app.queue_controller.get_queue_paths(), [])
         self.assertEqual(self.app.sent_to_runviewer, [])
+
+
+class AnalyseShotsTests(RemoteCommandTestCase):
+    """The lyse checkbox, read and set by a remote caller."""
+
+    def setUp(self):
+        super().setUp()
+        self.app.analysis_submission = AnalysisSubmission(load_main_ui())
+        self.addCleanup(stop_submission, self.app.analysis_submission)
+
+    def test_the_checkbox_reads_back_what_was_set(self):
+        for value in (True, False):
+            self.request(self.client.set_analyse_shots, value)
+
+            self.assertEqual(self.request(self.client.get_analyse_shots), value)
 
 
 class PreparsingApp(FakeApp):
