@@ -53,7 +53,7 @@ class QueueInConfigurationTests(unittest.TestCase):
         app.queue_manager = QueueManager(
             app.queue_controller,
             lambda item, default_globals: None,
-            lambda labscript_file, path: True,
+            lambda labscript_file, path: (True, ''),
             lambda path: None,
             lambda *args, **kwargs: None,
         )

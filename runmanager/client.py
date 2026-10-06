@@ -324,6 +324,33 @@ class RunmanagerClient(ZMQClient):
         """
         return self.request('get_queue')
 
+    def test_compile(self):
+        """Compile the first shot of the window's globals, and queue nothing.
+
+        Compiles the shot Engage would make first, from the globals, scans and
+        shuffle as they stand, into a scratch .h5 file in the operating
+        system's temporary folder, which the operating system cleans up. It
+        queues nothing, claims no sequence and touches no output folder, so it
+        can be repeated freely to see whether a labscript file compiles.
+        Answers only once the compile finishes, so the client's timeout has to
+        outlast it; meanwhile runmanager answers no other remote request.
+
+        Returns
+        -------
+        dict
+            ``{'success': bool, 'error': str, 'path': str}``. ``error`` is ''
+            on success and the compile's traceback otherwise, and ``path`` is
+            the compiled shot file.
+
+        Raises
+        ------
+        ValueError
+            When no labscript file is selected.
+        Exception
+            Whatever stops the globals being expanded.
+        """
+        return self.request('test_compile')
+
     def queue_exchange(self, outcome=None, request_shot=True):
         """Report how a shot turned out, and ask for the next one.
 

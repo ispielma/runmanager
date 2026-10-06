@@ -43,6 +43,7 @@ import threading
 import ast
 import pprint
 import signal
+import tempfile
 import unicodedata
 import importlib.metadata
 import importlib.resources
@@ -3099,7 +3100,10 @@ class RunManager(LabscriptApplication):
         self.to_child.put(['quit', None])
         # Its own Interruptor: on the queue's, put() waits for a subscription
         # that zmq never reports while the compile's get() holds the same one.
-        self.from_child.put(['done', False], interruptor=Interruptor())
+        self.from_child.put(
+            ['done', False, 'The compiler subprocess was restarted during the compile.'],
+            interruptor=Interruptor(),
+        )
         time.sleep(0.1)
         self.output_box.output('Asking subprocess to quit...')
         timeout_time = time.time() + 2
@@ -4606,12 +4610,50 @@ class RunManager(LabscriptApplication):
         self.set_config_window_title(save_target)
 
     def compile_run_file(self, labscript_file, run_file):
+        """Return ``(success, error)``: whether the file compiled and, if not, its traceback."""
         with self.compiler_lock:
             self.child_ready.wait()
             self.to_child.put(['compile', [labscript_file, run_file]])
-            signal, success = self.from_child.get()
+            signal, success, error = self.from_child.get()
         assert signal == 'done'
-        return success
+        return success, error
+
+    def test_compile(self):
+        """Compile the first shot of the window's globals, queueing nothing.
+
+        Runs on the server thread, so the window is read through ``inmain``.
+        The shot is written to a scratch file in the OS's temporary folder.
+
+        Returns
+        -------
+        dict
+            ``{'success', 'error', 'path'}``: whether it compiled, the
+            compile's traceback if not, and the scratch file.
+
+        Raises
+        ------
+        ValueError
+            If no labscript file is selected.
+        """
+        labscript_file = inmain(self.ui.lineEdit_labscript_file.text)
+        if not labscript_file:
+            raise ValueError('No labscript file selected.')
+        active_groups = inmain(self.get_active_groups, interactive=False)
+        _, frozen = inmain(self.expand_pending_shots)[0]
+        sequence_globals, run_globals = runmanager.get_queue_compile_globals(
+            active_groups, frozen
+        )
+        # Claims no sequence index, which the next real sequence keeps:
+        sequence_attrs, _, _ = runmanager.new_sequence_details(
+            labscript_file, config=self.exp_config, increment_sequence_index=False
+        )
+        fd, path = tempfile.mkstemp(prefix='runmanager_test_compile_', suffix='.h5')
+        os.close(fd)
+        runmanager.make_single_run_file(
+            path, sequence_globals, run_globals, sequence_attrs, 0, 1
+        )
+        success, error = self.compile_run_file(labscript_file, path)
+        return {'success': success, 'error': error, 'path': path}
 
     def parse_globals(self, active_groups, raise_exceptions=True, expand_globals=True, expansion_order = None, return_dimensions = False):
         sequence_globals = runmanager.get_globals(active_groups)
@@ -5103,7 +5145,7 @@ class RunManager(LabscriptApplication):
                 'n_runs': default_index + 1,
                 'send_to_runviewer': send_to_runviewer,
             }
-            if not self.queue_manager.compile_shot(shot, default_globals=True):
+            if not self.queue_manager.compile_shot(shot, default_globals=True)[0]:
                 raise RuntimeError(
                     'Compilation failed for %s' % os.path.basename(run_file)
                 )
@@ -5686,6 +5728,10 @@ class RunmanagerServer(ZMQServer):
     def handle_get_queue(self):
         """Read-only, and the queue controller is safe to ask from any thread."""
         return app.queue_controller.get_queue()
+
+    def handle_test_compile(self):
+        app.wait_until_preparse_complete()
+        return app.test_compile()
 
     def handle_queue_exchange(self, outcome=None, request_shot=True):
         return app.queue_exchange(outcome, bool(request_shot))

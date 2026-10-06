@@ -18,6 +18,7 @@ import types
 import unittest
 from unittest import mock
 
+import labscript_utils.h5_lock, h5py
 from labscript_utils.ls_zprocess import ZMQServer
 from qtutils.qt.QtCore import Qt
 from qtutils.qt.QtGui import QStandardItemModel
@@ -41,6 +42,7 @@ from fixtures import (
     load_main_ui,
     main_module,
     stop_submission,
+    wait_for,
 )
 from runmanager.queueing import (
     BLOCKED_SHOT_STATE,
@@ -58,7 +60,7 @@ class FakeApp(object):
         self.queue_manager = QueueManager(
             self.queue_controller,
             lambda item, default_globals: None,
-            lambda labscript_file, path: True,
+            lambda labscript_file, path: (True, ''),
             lambda path: None,
             lambda *args, **kwargs: None,
         )
@@ -141,6 +143,7 @@ class SubmittingApp(object):
     on_engage_clicked = RunManager.on_engage_clicked
     engage = RunManager.engage
     expand_pending_shots = RunManager.expand_pending_shots
+    test_compile = RunManager.test_compile
     parse_globals = RunManager.parse_globals
     add_item_to_axes_model = RunManager.add_item_to_axes_model
     update_axes_indentation = RunManager.update_axes_indentation
@@ -157,6 +160,8 @@ class SubmittingApp(object):
         self.currently_open_groups = {}
         self.n_shots = None
         self.compiling = threading.Event()
+        # What a compile answers: whether it worked and, if not, why.
+        self.compile_result = (True, '')
         self.axes_model = QStandardItemModel()
         self.queue_compile_mode_combo = types.SimpleNamespace(
             currentData=lambda: COMPILE_MODE_EAGER
@@ -204,7 +209,7 @@ class SubmittingApp(object):
     def compile_run_file(self, labscript_file, path):
         self.compiling.wait()
         self.compiled.append(path)
-        return True
+        return self.compile_result
 
     def get_active_groups(self, interactive=True):
         return {'group': self.globals_file}
@@ -976,6 +981,61 @@ class CompileOnlyEngageTests(RemoteCommandTestCase):
         self.assertTrue(all(os.path.isfile(path) for path in self.app.compiled))
         self.assertEqual(self.app.queue_controller.get_queue_paths(), [])
         self.assertEqual(self.app.sent_to_runviewer, [])
+
+
+class CompileErrorTests(RemoteCommandTestCase):
+    """What a remote caller is told when a compile fails.
+
+    A queued shot's row carries the error, and test_compile, which queues
+    nothing, answers with it.
+    """
+
+    ERROR = 'NameError: name "z" is not defined'
+
+    def make_app(self):
+        return SubmittingApp(self.directory)
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        super().setUp()
+        runmanager.new_global(self.app.globals_file, 'group', 'x')
+        globals_file.set_field(self.app.globals_file, 'group', 'x', 'default', '0')
+        self.app.compile_result = (False, self.ERROR)
+        self.app.compiling.set()
+
+    def test_a_shot_that_fails_to_compile_lists_its_error_in_the_queue(self):
+        [receipt] = self.request(self.client.engage)
+        wait_for(
+            lambda: self.app.queue_controller.get_queue()[0]['state'] == 'compile_failed'
+        )
+
+        [row] = self.request(self.client.get_queue)
+
+        self.assertEqual(row['shot_id'], receipt['shot_id'])
+        self.assertEqual(row['state'], 'compile_failed')
+        self.assertIn(self.ERROR, row['message'])
+
+    def test_a_test_compile_answers_with_the_error_and_queues_nothing(self):
+        globals_file.set_field(self.app.globals_file, 'group', 'x', 'scan', '[1, 2]')
+        globals_file.set_field(self.app.globals_file, 'group', 'x', 'scan_enabled', True)
+        globals_file.set_field(self.app.globals_file, 'group', 'x', 'expansion', 'outer')
+        stored = sorted(os.listdir(self.directory))
+
+        answer = self.request(self.client.test_compile)
+        self.addCleanup(os.remove, answer['path'])
+
+        self.assertEqual(answer['success'], False)
+        self.assertEqual(answer['error'], self.ERROR)
+        self.assertEqual(self.app.compiled, [answer['path']])
+        with h5py.File(answer['path'], 'r') as f:
+            self.assertEqual(f['globals'].attrs['x'], 1, 'it is the first shot')
+        self.assertEqual(self.request(self.client.get_queue), [])
+        self.assertEqual(
+            sorted(os.listdir(self.directory)),
+            stored,
+            'and no sequence was claimed and no output folder touched',
+        )
 
 
 class AnalyseShotsTests(RemoteCommandTestCase):

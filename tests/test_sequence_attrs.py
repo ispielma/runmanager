@@ -103,7 +103,7 @@ class DefaultSequenceTests(unittest.TestCase):
         app.queue_manager = QueueManager(
             QueueController(),
             app.prepare_queue_shot,
-            lambda labscript_file, run_file: True,
+            lambda labscript_file, run_file: (True, ''),
             lambda run_file: None,
             app.output_box.output,
         )
