@@ -46,8 +46,8 @@ class BatchProcessor(object):
         while True:
             signal, data =  self.from_parent.get()
             if signal == 'compile':
-                success = self.compile(*data)
-                self.to_parent.put(['done',success])
+                success, error = self.compile(*data)
+                self.to_parent.put(['done', success, error])
             elif signal == 'quit':
                 sys.exit(0)
             else:
@@ -70,13 +70,13 @@ class BatchProcessor(object):
                         f.read(), self.script_module.__file__, 'exec', dont_inherit=True
                     )
                     exec(code, self.script_module.__dict__)
-            return True
+            return True, ''
         except Exception:
             traceback_lines = traceback.format_exception(*sys.exc_info())
             del traceback_lines[1:2]
             message = ''.join(traceback_lines)
             sys.stderr.write(message)
-            return False
+            return False, message
         finally:
             labscript.labscript_cleanup()
             os.chdir(cwd)

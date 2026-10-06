@@ -43,6 +43,7 @@ import threading
 import ast
 import pprint
 import signal
+import tempfile
 import unicodedata
 import importlib.metadata
 import importlib.resources
@@ -85,6 +86,10 @@ from runmanager.client import (
     PROVIDER_PENDING,
     PROVIDER_SHOT,
     SHOT_OUTCOME_STATUSES,
+    SUBMISSION_MODE_LAST_SEQUENCE,
+    SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE,
+    SUBMISSION_MODE_NEW_SEQUENCE,
+    SUBMISSION_MODE_NEW_SEQUENCE_CLEAR_QUEUE,
     SequenceRefused,
 )
 from runmanager.analysis_submission import (
@@ -136,11 +141,6 @@ process_tree = ProcessTree.instance()
 # Set a meaningful name for zprocess.locking's client id:
 process_tree.zlock_client.set_process_name(APPLICATION_NAME)
 
-SUBMISSION_MODE_NEW_FOLDER = 'new_folder'
-SUBMISSION_MODE_ADD_SHOTS = 'add_shots'
-SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE = 'new_folder_clear_queue'
-SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE = 'add_shots_clear_queue'
-
 SubmissionMode = collections.namedtuple(
     'SubmissionMode', ['joins_sequence', 'clears_queue']
 )
@@ -166,16 +166,16 @@ SubmissionMode = collections.namedtuple(
 # a batch engaged as a new sequence while BLACS works through the last one
 # leaves the queue holding one sequence and BLACS running another.
 SUBMISSION_MODES = {
-    SUBMISSION_MODE_NEW_FOLDER: SubmissionMode(
+    SUBMISSION_MODE_NEW_SEQUENCE: SubmissionMode(
         joins_sequence=False, clears_queue=False
     ),
-    SUBMISSION_MODE_ADD_SHOTS: SubmissionMode(
+    SUBMISSION_MODE_LAST_SEQUENCE: SubmissionMode(
         joins_sequence=True, clears_queue=False
     ),
-    SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE: SubmissionMode(
+    SUBMISSION_MODE_NEW_SEQUENCE_CLEAR_QUEUE: SubmissionMode(
         joins_sequence=False, clears_queue=True
     ),
-    SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE: SubmissionMode(
+    SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE: SubmissionMode(
         joins_sequence=True, clears_queue=True
     ),
 }
@@ -2687,7 +2687,7 @@ class RunManager(LabscriptApplication):
             'Add shots to new sequence'
         )
         self.engage_new_sequence_action.triggered.connect(
-            lambda: self.on_engage_clicked(submission_mode=SUBMISSION_MODE_NEW_FOLDER)
+            lambda: self.on_engage_clicked(submission_mode=SUBMISSION_MODE_NEW_SEQUENCE)
         )
         self.engage_new_sequence_action.setToolTip(
             'Submit the new batch as a new shot sequence.'
@@ -2695,44 +2695,44 @@ class RunManager(LabscriptApplication):
         self.engage_new_sequence_action.setStatusTip(
             'Submit the new batch as a new shot sequence.'
         )
-        self.engage_add_shots_action = self.engage_submission_menu.addAction(
+        self.engage_last_sequence_action = self.engage_submission_menu.addAction(
             'Add shots to last sequence'
         )
-        self.engage_add_shots_action.triggered.connect(
-            lambda: self.on_engage_clicked(submission_mode=SUBMISSION_MODE_ADD_SHOTS)
+        self.engage_last_sequence_action.triggered.connect(
+            lambda: self.on_engage_clicked(submission_mode=SUBMISSION_MODE_LAST_SEQUENCE)
         )
-        self.engage_add_shots_action.setToolTip(
+        self.engage_last_sequence_action.setToolTip(
             'Submit the new batch onto the same shot sequence as the queued shots.'
         )
-        self.engage_add_shots_action.setStatusTip(
+        self.engage_last_sequence_action.setStatusTip(
             'Submit the new batch onto the same shot sequence as the queued shots.'
         )
-        self.engage_replace_queue_action = self.engage_submission_menu.addAction(
+        self.engage_new_sequence_clear_queue_action = self.engage_submission_menu.addAction(
             'Empty queue, then add shots to new sequence'
         )
-        self.engage_replace_queue_action.triggered.connect(
+        self.engage_new_sequence_clear_queue_action.triggered.connect(
             lambda: self.on_engage_clicked(
-                submission_mode=SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE
+                submission_mode=SUBMISSION_MODE_NEW_SEQUENCE_CLEAR_QUEUE
             )
         )
-        self.engage_replace_queue_action.setToolTip(
+        self.engage_new_sequence_clear_queue_action.setToolTip(
             'Delete the queued shots BLACS is not running, then submit the replacement batch as a new shot sequence.'
         )
-        self.engage_replace_queue_action.setStatusTip(
+        self.engage_new_sequence_clear_queue_action.setStatusTip(
             'Delete the queued shots BLACS is not running, then submit the replacement batch as a new shot sequence.'
         )
-        self.engage_add_clear_action = self.engage_submission_menu.addAction(
+        self.engage_last_sequence_clear_queue_action = self.engage_submission_menu.addAction(
             'Empty queue, then add shots to last sequence'
         )
-        self.engage_add_clear_action.triggered.connect(
+        self.engage_last_sequence_clear_queue_action.triggered.connect(
             lambda: self.on_engage_clicked(
-                submission_mode=SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE
+                submission_mode=SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE
             )
         )
-        self.engage_add_clear_action.setToolTip(
+        self.engage_last_sequence_clear_queue_action.setToolTip(
             'Delete the queued shots BLACS is not running, then submit the replacement batch onto the same shot sequence.'
         )
-        self.engage_add_clear_action.setStatusTip(
+        self.engage_last_sequence_clear_queue_action.setStatusTip(
             'Delete the queued shots BLACS is not running, then submit the replacement batch onto the same shot sequence.'
         )
         self.engage_submission_menu.aboutToShow.connect(
@@ -2792,14 +2792,14 @@ class RunManager(LabscriptApplication):
         get_submission_anchor, against the queue the batch is written into."""
         return (
             self.ui.checkBox_run_shots.isChecked()
-            and self.get_submission_anchor(SUBMISSION_MODE_ADD_SHOTS) is not None
+            and self.get_submission_anchor(SUBMISSION_MODE_LAST_SEQUENCE) is not None
         )
 
     def update_engage_submission_menu_actions(self):
         enabled = self.can_use_alternate_submission_mode()
-        self.engage_add_shots_action.setEnabled(enabled)
-        self.engage_replace_queue_action.setEnabled(enabled)
-        self.engage_add_clear_action.setEnabled(enabled)
+        self.engage_last_sequence_action.setEnabled(enabled)
+        self.engage_new_sequence_clear_queue_action.setEnabled(enabled)
+        self.engage_last_sequence_clear_queue_action.setEnabled(enabled)
 
     def reindex_run_file_infos(
         self, run_file_infos, indexed_path_base, index_start=None, name_format=None
@@ -2865,30 +2865,55 @@ class RunManager(LabscriptApplication):
             run_file_info['n_runs'] = runs_in_sequence
         return run_file_infos
 
-    def on_engage_clicked(self, checked=False, submission_mode=SUBMISSION_MODE_NEW_FOLDER):
+    def on_engage_clicked(self, checked=False, submission_mode=SUBMISSION_MODE_NEW_SEQUENCE):
         logger.info('Engage')
         try:
-            send_to_BLACS = self.ui.checkBox_run_shots.isChecked()
-            send_to_runviewer = self.ui.checkBox_view_shots.isChecked()
-            mode = SUBMISSION_MODES[submission_mode]
-            if (mode.joins_sequence or mode.clears_queue) and not send_to_BLACS:
-                # A mode that reads the queue for a sequence to join, or
-                # empties it, is about the queue -- so with nothing going to
-                # BLACS there is nothing for it to do.
-                self.output_box.output(
-                    "Warning: alternate queue submission modes require 'BLACS' to be selected.\n\n",
-                    red=True,
-                )
-                return
-            self.compile_and_queue_shots(
-                submission_mode,
-                send_to_BLACS,
-                send_to_runviewer,
-                self.expand_pending_shots(),
-            )
+            self.engage(submission_mode)
         except Exception as e:
             self.output_box.output('%s\n\n' % str(e), red=True)
         logger.info('end engage')
+
+    def engage(self, submission_mode=SUBMISSION_MODE_NEW_SEQUENCE):
+        """Compile the shots the window's globals expand into, and queue them.
+
+        What the Engage button does, and what a remote caller's engage does.
+
+        Parameters
+        ----------
+        submission_mode : str
+            A key of ``SUBMISSION_MODES``: how the batch joins the queue.
+
+        Returns
+        -------
+        list of dict
+            The queue records of the batch, in the order the shots were made.
+
+        Raises
+        ------
+        ValueError
+            For a submission mode that is not known, and for an alternate one
+            while 'BLACS' is not ticked.
+        Exception
+            Whatever stops the batch being made, such as no labscript file.
+        """
+        if submission_mode not in SUBMISSION_MODES:
+            raise ValueError(f'Unknown submission mode {submission_mode!r}.')
+        send_to_BLACS = self.ui.checkBox_run_shots.isChecked()
+        send_to_runviewer = self.ui.checkBox_view_shots.isChecked()
+        mode = SUBMISSION_MODES[submission_mode]
+        if (mode.joins_sequence or mode.clears_queue) and not send_to_BLACS:
+            # A mode that reads the queue for a sequence to join, or
+            # empties it, is about the queue -- so with nothing going to
+            # BLACS there is nothing for it to do.
+            raise ValueError(
+                "Alternate queue submission modes require 'BLACS' to be selected."
+            )
+        return self.compile_and_queue_shots(
+            submission_mode,
+            send_to_BLACS,
+            send_to_runviewer,
+            self.expand_pending_shots(),
+        )
 
     def expand_pending_shots(self):
         """The shots the window's globals stand for, in the order to make them.
@@ -3075,7 +3100,10 @@ class RunManager(LabscriptApplication):
         self.to_child.put(['quit', None])
         # Its own Interruptor: on the queue's, put() waits for a subscription
         # that zmq never reports while the compile's get() holds the same one.
-        self.from_child.put(['done', False], interruptor=Interruptor())
+        self.from_child.put(
+            ['done', False, 'The compiler subprocess was restarted during the compile.'],
+            interruptor=Interruptor(),
+        )
         time.sleep(0.1)
         self.output_box.output('Asking subprocess to quit...')
         timeout_time = time.time() + 2
@@ -4582,12 +4610,50 @@ class RunManager(LabscriptApplication):
         self.set_config_window_title(save_target)
 
     def compile_run_file(self, labscript_file, run_file):
+        """Return ``(success, error)``: whether the file compiled and, if not, its traceback."""
         with self.compiler_lock:
             self.child_ready.wait()
             self.to_child.put(['compile', [labscript_file, run_file]])
-            signal, success = self.from_child.get()
+            signal, success, error = self.from_child.get()
         assert signal == 'done'
-        return success
+        return success, error
+
+    def test_compile(self):
+        """Compile the first shot of the window's globals, queueing nothing.
+
+        Runs on the server thread, so the window is read through ``inmain``.
+        The shot is written to a scratch file in the OS's temporary folder.
+
+        Returns
+        -------
+        dict
+            ``{'success', 'error', 'path'}``: whether it compiled, the
+            compile's traceback if not, and the scratch file.
+
+        Raises
+        ------
+        ValueError
+            If no labscript file is selected.
+        """
+        labscript_file = inmain(self.ui.lineEdit_labscript_file.text)
+        if not labscript_file:
+            raise ValueError('No labscript file selected.')
+        active_groups = inmain(self.get_active_groups, interactive=False)
+        _, frozen = inmain(self.expand_pending_shots)[0]
+        sequence_globals, run_globals = runmanager.get_queue_compile_globals(
+            active_groups, frozen
+        )
+        # Claims no sequence index, which the next real sequence keeps:
+        sequence_attrs, _, _ = runmanager.new_sequence_details(
+            labscript_file, config=self.exp_config, increment_sequence_index=False
+        )
+        fd, path = tempfile.mkstemp(prefix='runmanager_test_compile_', suffix='.h5')
+        os.close(fd)
+        runmanager.make_single_run_file(
+            path, sequence_globals, run_globals, sequence_attrs, 0, 1
+        )
+        success, error = self.compile_run_file(labscript_file, path)
+        return {'success': success, 'error': error, 'path': path}
 
     def parse_globals(self, active_groups, raise_exceptions=True, expand_globals=True, expansion_order = None, return_dimensions = False):
         sequence_globals = runmanager.get_globals(active_groups)
@@ -5079,7 +5145,7 @@ class RunManager(LabscriptApplication):
                 'n_runs': default_index + 1,
                 'send_to_runviewer': send_to_runviewer,
             }
-            if not self.queue_manager.compile_shot(shot, default_globals=True):
+            if not self.queue_manager.compile_shot(shot, default_globals=True)[0]:
                 raise RuntimeError(
                     'Compilation failed for %s' % os.path.basename(run_file)
                 )
@@ -5291,6 +5357,17 @@ class RunManager(LabscriptApplication):
         }
 
 
+def shot_receipt(record):
+    """What a remote caller is told about a shot it submitted."""
+    return {
+        'shot_id': record['shot_id'],
+        'sequence_id': record['sequence_attrs']['sequence_id'],
+        'sequence_index': record['sequence_attrs']['sequence_index'],
+        'run_number': record['run_no'],
+        'path': record['path'],
+    }
+
+
 class RunmanagerServer(ZMQServer):
     def __init__(self):
         port = app.exp_config.getint('ports', 'runmanager', fallback=DEFAULT_PORT)
@@ -5465,9 +5542,9 @@ class RunmanagerServer(ZMQServer):
             'jit_enabled', GroupTab.change_global_jit_enabled, globals
         )
 
-    def handle_engage(self):
+    def handle_engage(self, submission_mode=SUBMISSION_MODE_NEW_SEQUENCE):
         app.wait_until_preparse_complete()
-        inmain(app.on_engage_clicked)
+        return [shot_receipt(record) for record in inmain(app.engage, submission_mode)]
 
     @inmain_decorator()
     def handle_abort(self):
@@ -5492,6 +5569,12 @@ class RunmanagerServer(ZMQServer):
         app.ui.checkBox_view_shots.setChecked(
             self._coerce_remote_boolean(value, 'value')
         )
+
+    def handle_get_analyse_shots(self):
+        return app.analysis_submission.send_to_server
+
+    def handle_set_analyse_shots(self, value):
+        app.analysis_submission.send_to_server = self._coerce_remote_boolean(value, 'value')
 
     @inmain_decorator()
     def handle_get_shuffle(self):
@@ -5626,22 +5709,13 @@ class RunmanagerServer(ZMQServer):
         # the session's later shots into the operator's sequence.
         records = inmain(
             app.compile_and_queue_shots,
-            SUBMISSION_MODE_NEW_FOLDER if sequence is None else SUBMISSION_MODE_ADD_SHOTS,
+            SUBMISSION_MODE_NEW_SEQUENCE if sequence is None else SUBMISSION_MODE_LAST_SEQUENCE,
             True,
             send_to_runviewer,
             batch,
             sequence=None if sequence is None else (sequence, sequence_index),
         )
-        return [
-            {
-                'shot_id': record['shot_id'],
-                'sequence_id': record['sequence_attrs']['sequence_id'],
-                'sequence_index': record['sequence_attrs']['sequence_index'],
-                'run_number': record['run_no'],
-                'path': record['path'],
-            }
-            for record in records
-        ]
+        return [shot_receipt(record) for record in records]
 
     def handle_shot_status(self, shot_ids):
         """Whether each of these shots can still produce a result.
@@ -5650,6 +5724,14 @@ class RunmanagerServer(ZMQServer):
         queue controller is safe to ask from any thread, so this is not a GUI
         read."""
         return app.queue_controller.get_shot_statuses(list(shot_ids))
+
+    def handle_get_queue(self):
+        """Read-only, and the queue controller is safe to ask from any thread."""
+        return app.queue_controller.get_queue()
+
+    def handle_test_compile(self):
+        app.wait_until_preparse_complete()
+        return app.test_compile()
 
     def handle_queue_exchange(self, outcome=None, request_shot=True):
         return app.queue_exchange(outcome, bool(request_shot))

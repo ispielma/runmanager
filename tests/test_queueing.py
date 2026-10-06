@@ -329,6 +329,7 @@ class RejectedShotTests(unittest.TestCase):
 
 
 ANALYSED_MARKER = '/runmanager-tests/marker.h5'
+COMPILE_ERROR = 'NameError: name "x" is not defined'
 
 
 class FakeRunManager(object):
@@ -366,8 +367,9 @@ class FakeRunManager(object):
             output=lambda text, red=False: self.said.append(text)
         )
         # What the compiler does: True as though the shot compiled, False as it
-        # reports a bad labscript file, or an exception for a failure to get
-        # that far. Recorded so a test can say how many times it was asked.
+        # reports a bad labscript file with COMPILE_ERROR, or an exception for a
+        # failure to get that far. Recorded so a test can say how many times it
+        # was asked.
         self.compiles = compiles
         self.compiled = []
         self.queue_controller = QueueController()
@@ -391,7 +393,7 @@ class FakeRunManager(object):
         self.compiled.append(path)
         if isinstance(self.compiles, Exception):
             raise self.compiles
-        return self.compiles
+        return self.compiles, ('' if self.compiles else COMPILE_ERROR)
 
     def analysed_paths(self):
         """The paths lyse has received, once all handed over so far have gone."""
@@ -597,7 +599,7 @@ class LazyCompileFailureTests(unittest.TestCase):
 
     def test_a_shot_that_cannot_be_compiled_stays_red_at_the_head_with_its_reason(self):
         for compiles, reason in (
-            (False, 'Could not be compiled'),
+            (False, COMPILE_ERROR),
             (RuntimeError('no such labscript file'), 'no such labscript file'),
         ):
             with self.subTest(compiles=repr(compiles)):
@@ -702,7 +704,7 @@ class CompiledFlagOwnershipTests(unittest.TestCase):
         manager = QueueManager(
             controller,
             lambda item, default_globals: None,
-            lambda labscript_file, path: True,
+            lambda labscript_file, path: (True, ''),
             lambda path: None,
             lambda *args, **kwargs: None,
         )
@@ -769,7 +771,7 @@ class SubmittedShotTests(unittest.TestCase):
             self.release.wait(5)
         if isinstance(self.compiles, Exception):
             raise self.compiles
-        return self.compiles
+        return self.compiles, ('' if self.compiles else COMPILE_ERROR)
 
     def submit(self, count=1, send_to_BLACS=True):
         records = self.manager.compile_shots(
@@ -887,7 +889,7 @@ class ContinuingSequenceAnchorTests(unittest.TestCase):
             'BLACS has the first shot',
         )
         self.assertEqual(
-            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
+            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_LAST_SEQUENCE),
             waiting,
             'and the queue still ends where it ends',
         )
@@ -937,7 +939,7 @@ class ContinuingSequenceAnchorTests(unittest.TestCase):
             'what BLACS is running while the caller works out what to send',
         )
         self.assertEqual(
-            app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
+            app.get_submission_anchor(main_module.SUBMISSION_MODE_LAST_SEQUENCE),
             submitted,
             'and the sequence still carries on from the submitted shot',
         )
@@ -959,7 +961,7 @@ class ContinuingSequenceAnchorTests(unittest.TestCase):
                     filler['state'], PROVIDER_NONE, 'nothing filled the gap'
                 )
                 self.assertEqual(
-                    app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
+                    app.get_submission_anchor(main_module.SUBMISSION_MODE_LAST_SEQUENCE),
                     submitted,
                     'and the shot that ran is what the next submission '
                     'carries on from',
@@ -1925,7 +1927,7 @@ class DeletedAnchorTests(unittest.TestCase):
 
         self.assertFalse(os.path.exists(sent), 'the row took its file with it')
         self.assertIsNone(
-            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
+            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_LAST_SEQUENCE),
             'and a deleted shot is not a sequence for the next batch to join',
         )
 
@@ -1961,7 +1963,7 @@ class DeletedAnchorTests(unittest.TestCase):
 
         self.assertFalse(os.path.exists(sent), 'and the cancelled row went')
         self.assertIsNone(
-            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
+            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_LAST_SEQUENCE),
             'a shot the operator cancelled and whose file has gone is not '
             'what the next submission carries on from',
         )
@@ -1982,7 +1984,7 @@ class CallerChosenShotIdTests(unittest.TestCase):
         self.manager = QueueManager(
             self.controller,
             lambda item, default_globals: self.written.append(item['shot_id']),
-            lambda labscript_file, path: True,
+            lambda labscript_file, path: (True, ''),
             lambda path: None,
             lambda *args, **kwargs: None,
         )

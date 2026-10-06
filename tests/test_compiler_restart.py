@@ -57,7 +57,7 @@ class FakeChild:
                 self.compiled.append(data[1])
                 if release:
                     release.wait(10)
-                replies.send_pyobj(['done', True])
+                replies.send_pyobj(['done', True, ''])
 
         threading.Thread(target=mainloop, daemon=True).start()
 

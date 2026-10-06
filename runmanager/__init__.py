@@ -839,16 +839,15 @@ def compile_labscript_async(labscript_file, run_file,
     )
     to_child.put(['compile', [labscript_file, run_file]])
     while True:
-        signal, data = from_child.get()
+        signal, success, error = from_child.get()
         if signal == 'done':
-            success = data
             to_child.put(['quit', None])
             child.communicate()
             if done_callback is not None:
                 done_callback(success)
             break
         else:
-            raise RuntimeError((signal, data))
+            raise RuntimeError((signal, success, error))
 
 
 def compile_multishot_async(labscript_file, run_files,
@@ -883,11 +882,10 @@ def compile_multishot_async(labscript_file, run_files,
         for run_file in run_files:
             to_child.put(['compile', [labscript_file, run_file]])
             while True:
-                signal, data = from_child.get()
+                signal, success, _ = from_child.get()
                 if signal == 'done':
-                    success = data
                     if done_callback is not None:
-                        done_callback(data)
+                        done_callback(success)
                     break
             if not success:
                 break

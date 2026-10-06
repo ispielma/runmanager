@@ -11,6 +11,12 @@ PROVIDER_SHOT = 'shot'
 PROVIDER_PAUSED = 'paused'
 PROVIDER_PENDING = 'pending'
 PROVIDER_NONE = 'none'
+# How Engage adds its batch to the queue: as a sequence of its own or to the
+# last one, with the queue emptied first or not. See engage():
+SUBMISSION_MODE_NEW_SEQUENCE = 'new_sequence'
+SUBMISSION_MODE_LAST_SEQUENCE = 'last_sequence'
+SUBMISSION_MODE_NEW_SEQUENCE_CLEAR_QUEUE = 'new_sequence_clear_queue'
+SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE = 'last_sequence_clear_queue'
 # How BLACS may say a shot it was offered turned out. Every one but 'completed'
 # leaves the row at the head of the queue in red; see shot_finished() in
 # queueing.py:
@@ -23,6 +29,10 @@ BLOCKED_SHOT_STATE = 'blocked'
 # What a shot id with no row in the queue is answered with. Not the empty
 # state, which a row waiting its turn has.
 UNKNOWN_SHOT_STATE = 'unknown'
+# What get_queue calls a row in the empty state while its shot compiles.
+COMPILING_SHOT_STATE = 'compiling'
+# What get_queue calls a row in the empty state while it waits its turn.
+QUEUED_SHOT_STATE = 'queued'
 
 
 class SequenceRefused(ValueError):
@@ -84,9 +94,55 @@ class RunmanagerClient(ZMQClient):
         """Set JIT? state for active globals."""
         return self.request('set_jit_enabled', globals)
 
-    def engage(self):
-        """Trigger shot compilation/submission"""
-        return self.request('engage')
+    def engage(self, submission_mode=SUBMISSION_MODE_NEW_SEQUENCE):
+        """Compile the shots the window's globals expand into, and queue them.
+
+        Does what the window's Engage button does with its globals, scans and
+        shuffle as they stand, sending the shots where its BLACS and runviewer
+        checkboxes say; ``n_shots`` says how many there will be. Answers once
+        the batch is made, before its shots compile, so each ``path`` is where
+        a file will be written and not a file that is there yet. With 'BLACS'
+        unticked the shots are not queued, and ``get_queue`` does not list them.
+
+        Parameters
+        ----------
+        submission_mode : str
+            How the batch joins the queue, one of the ``SUBMISSION_MODE_``
+            constants of this module, each named after an entry of the window's
+            Engage menu:
+
+            ``SUBMISSION_MODE_NEW_SEQUENCE``
+                "Add shots to new sequence": the batch is a sequence of its own.
+            ``SUBMISSION_MODE_LAST_SEQUENCE``
+                "Add shots to last sequence": the batch is added to the sequence
+                of the last shot queued or, with none queued, of the shot last
+                sent to BLACS, and is a sequence of its own if there is neither.
+            ``SUBMISSION_MODE_NEW_SEQUENCE_CLEAR_QUEUE``
+                "Empty queue, then add shots to new sequence": the queued shots
+                BLACS is not running are deleted first.
+            ``SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE``
+                "Empty queue, then add shots to last sequence": the same, with
+                the batch added to the last sequence.
+
+        Returns
+        -------
+        list of dict
+            One descriptor per shot, in the order made:
+            ``{'shot_id', 'sequence_id', 'sequence_index', 'run_number',
+            'path'}``, as ``submit_shots`` returns.
+
+        Raises
+        ------
+        ValueError
+            For a ``submission_mode`` that is not one of these, and for any
+            but the first while 'BLACS' is unticked, since the others are about
+            the queue.
+        Exception
+            Whatever the window reports when it cannot engage, such as no
+            labscript file, no output folder, or globals that cannot be
+            evaluated.
+        """
+        return self.request('engage', submission_mode)
 
     def abort(self):
         """Empty runmanager's queue, as its Empty queue button does.
@@ -115,6 +171,19 @@ class RunmanagerClient(ZMQClient):
     def set_view_shots(self, value):
         """Set boolean state of 'runviewer' checkbox"""
         return self.request('set_view_shots', value)
+
+    def get_analyse_shots(self):
+        """Get boolean state of the lyse checkbox.
+
+        Whether completed shots are sent to lyse."""
+        return self.request('get_analyse_shots')
+
+    def set_analyse_shots(self, value):
+        """Set boolean state of the lyse checkbox.
+
+        Setting it False also drops the shots still waiting to be sent, as
+        unticking the checkbox does."""
+        return self.request('set_analyse_shots', value)
 
     def get_shuffle(self):
         """Get boolean state of 'Shuffle' checkbox"""
@@ -230,6 +299,57 @@ class RunmanagerClient(ZMQClient):
         Reads only: nothing is consumed by asking, so the same ids can be asked
         about as often as wanted."""
         return self.request('shot_status', list(shot_ids))
+
+    def get_queue(self):
+        """List the shots in runmanager's queue, the front of the queue first.
+
+        Reads only: nothing is consumed by asking, so the queue can be asked
+        about as often as wanted. A shot engaged with 'BLACS' unticked is not
+        queued, and is not listed.
+
+        Returns
+        -------
+        list of dict
+            One dict per queue row. ``shot_id``, ``sequence_id``,
+            ``sequence_index``, ``run_number`` and ``path`` are as
+            ``submit_shots`` and ``engage`` return them. ``state`` is the row's
+            own state: ``'running'`` once BLACS has been offered the shot;
+            ``'failed'`` when BLACS reported that it did not complete, and it
+            will be offered again; ``'rejected'`` and ``'compile_failed'`` when
+            it waits on an operator, holding up the rows behind it;
+            ``'cancelled'`` when it was deleted while BLACS had it. A row in
+            none of these is ``'compiling'`` while its shot compiles and
+            ``'queued'`` while it waits its turn. ``message`` is the reason a
+            row gives for being in its state, and empty when it gives none.
+        """
+        return self.request('get_queue')
+
+    def test_compile(self):
+        """Compile the first shot of the window's globals, and queue nothing.
+
+        Compiles the shot Engage would make first, from the globals, scans and
+        shuffle as they stand, into a scratch .h5 file in the operating
+        system's temporary folder, which the operating system cleans up. It
+        queues nothing, claims no sequence and touches no output folder, so it
+        can be repeated freely to see whether a labscript file compiles.
+        Answers only once the compile finishes, so the client's timeout has to
+        outlast it; meanwhile runmanager answers no other remote request.
+
+        Returns
+        -------
+        dict
+            ``{'success': bool, 'error': str, 'path': str}``. ``error`` is ''
+            on success and the compile's traceback otherwise, and ``path`` is
+            the compiled shot file.
+
+        Raises
+        ------
+        ValueError
+            When no labscript file is selected.
+        Exception
+            Whatever stops the globals being expanded.
+        """
+        return self.request('test_compile')
 
     def queue_exchange(self, outcome=None, request_shot=True):
         """Report how a shot turned out, and ask for the next one.

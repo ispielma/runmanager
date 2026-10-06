@@ -36,9 +36,11 @@ from zprocess import raise_exception_in_thread
 from runmanager import _plain_value
 from runmanager.client import (
     BLOCKED_SHOT_STATE,
+    COMPILING_SHOT_STATE,
     PROVIDER_NONE,
     PROVIDER_PAUSED,
     PROVIDER_SHOT,
+    QUEUED_SHOT_STATE,
     SHOT_OUTCOME_STATUSES,
     UNKNOWN_SHOT_STATE,
 )
@@ -485,6 +487,39 @@ class QueueController(object):
             else:
                 answer[shot_id] = {'pending': False, 'state': UNKNOWN_SHOT_STATE}
         return answer
+
+    def get_queue(self):
+        """List the rows of the queue, in queue order.
+
+        Reads only.
+
+        Returns
+        -------
+        list of dict
+            One dict per row. ``shot_id`` is the row's stable id,
+            ``sequence_id`` and ``sequence_index`` the sequence its shot belongs
+            to (None for a row that records none), ``run_number`` its number
+            within that sequence, and ``path`` its shot file. ``state`` is the
+            row's own state when it has one, and otherwise
+            ``COMPILING_SHOT_STATE`` while its compile is under way and
+            ``QUEUED_SHOT_STATE`` while it waits its turn. ``message`` is the
+            reason the row gives for its state, empty when it gives none.
+        """
+        with self._lock:
+            return [
+                {
+                    'shot_id': item['shot_id'],
+                    'sequence_id': item['sequence_attrs'].get('sequence_id'),
+                    'sequence_index': item['sequence_attrs'].get('sequence_index'),
+                    'run_number': item['run_no'],
+                    'path': item['path'],
+                    'state': item['state'] or (
+                        COMPILING_SHOT_STATE if item['compiling'] else QUEUED_SHOT_STATE
+                    ),
+                    'message': item['message'],
+                }
+                for item in self._items
+            ]
 
     def get_queued_sequence_attrs(self, path):
         """The sequence attributes of the queued shot at ``path``, or None.
@@ -1003,9 +1038,14 @@ class QueueManager(QtCore.QObject):
         The record's ``send_to_runviewer`` says whether it is asked. With
         ``default_globals`` the file is written from the globals' defaults, as
         a default shot is, rather than from the item's frozen globals.
+
+        Returns ``(success, error)``: whether it compiled and, if not, the
+        compile's traceback.
         """
         self.prepare_run_file_callback(item, default_globals=default_globals)
-        success = self.compile_run_file_callback(item['labscript_file'], item['path'])
+        success, error = self.compile_run_file_callback(
+            item['labscript_file'], item['path']
+        )
         if success and item['send_to_runviewer']:
             self.send_to_runviewer_callback(item['path'])
         # Deliberately does not mark the record compiled. For a row already in
@@ -1014,7 +1054,7 @@ class QueueManager(QtCore.QObject):
         # compile is recorded, and the offer's running state would then be
         # wiped by the compile finishing -- so the row would be handed to BLACS
         # and offered again afterwards as though it never had been.
-        return success
+        return success, error
 
     def compile_next_in_background(self):
         """Start compiling the shot at the head of the queue if it is not ready.
@@ -1035,14 +1075,12 @@ class QueueManager(QtCore.QObject):
 
     def _background_compile(self, item):
         success = False
-        # What the row will say it went red for. A failure in the user's script
-        # reaches us only as False, the compiler having written the traceback to
-        # the output box, so there is nothing to quote here but a pointer to it.
-        # A failure to get even that far arrives as an exception and can say
-        # what happened.
-        message = 'Could not be compiled. See the output for the reason.'
+        # What the row will say it went red for: the traceback compile_shot
+        # returns for a failure in the user's script, or the exception of a
+        # failure to get even that far.
         try:
-            success = self.compile_shot(item)
+            success, error = self.compile_shot(item)
+            message = f'Could not be compiled:\n{error}'
         except Exception as exc:
             message = 'Could not be compiled: %s' % str(exc)
             self.output(
@@ -1225,7 +1263,7 @@ class QueueManager(QtCore.QObject):
                 elif command == 'compile_shots':
                     records, stop = args
                     for item in records:
-                        if stop.is_set() or not self.compile_shot(item):
+                        if stop.is_set() or not self.compile_shot(item)[0]:
                             self.output('Compilation aborted.\n\n', red=True)
                             break
                     else:
