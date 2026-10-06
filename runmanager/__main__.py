@@ -73,6 +73,7 @@ from labscript_utils.setup_logging import setup_logging
 import labscript_utils.shared_drive as shared_drive
 from labscript_utils import dedent
 from labscript_utils.qtwidgets.link_indicator import LinkIndicator
+from labscript_utils.text_editor import open_in_editor
 from blacs.client import BlacsClient
 from runviewer.client import RunviewerClient
 from zprocess import Interruptor, raise_exception_in_thread
@@ -2618,28 +2619,11 @@ class RunManager(LabscriptApplication):
             return
         self.ui.lineEdit_default_labscript_file.setText(labscript_file)
 
-    def edit_labscript_file(self, labscript_file):
-        editor_path = self.exp_config.get('programs', 'text_editor')
-        editor_args = self.exp_config.get('programs', 'text_editor_arguments')
-        if not labscript_file:
-            return
-        if not editor_path:
-            error_dialog("No editor specified in the labconfig.")
-        if '{file}' in editor_args:
-            editor_args = [arg if arg != '{file}' else labscript_file for arg in editor_args.split()]
-        else:
-            editor_args = [labscript_file] + editor_args.split()
-        try:
-            subprocess.Popen([editor_path] + editor_args)
-        except Exception as e:
-            error_dialog("Unable to launch text editor specified in %s. Error was: %s" %
-                         (self.exp_config.config_path, str(e)))
-
     def on_edit_labscript_file_clicked(self, checked):
-        self.edit_labscript_file(self.ui.lineEdit_labscript_file.text())
+        open_in_editor(self.ui.lineEdit_labscript_file.text(), parent=self.ui)
 
     def on_edit_default_labscript_file_clicked(self, checked):
-        self.edit_labscript_file(self.ui.lineEdit_default_labscript_file.text())
+        open_in_editor(self.ui.lineEdit_default_labscript_file.text(), parent=self.ui)
 
     def on_select_shot_output_folder_clicked(self, checked):
         shot_output_folder = QtWidgets.QFileDialog.getExistingDirectory(self.ui,
