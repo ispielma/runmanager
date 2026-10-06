@@ -887,7 +887,7 @@ class ContinuingSequenceAnchorTests(unittest.TestCase):
             'BLACS has the first shot',
         )
         self.assertEqual(
-            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
+            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_LAST_SEQUENCE),
             waiting,
             'and the queue still ends where it ends',
         )
@@ -937,7 +937,7 @@ class ContinuingSequenceAnchorTests(unittest.TestCase):
             'what BLACS is running while the caller works out what to send',
         )
         self.assertEqual(
-            app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
+            app.get_submission_anchor(main_module.SUBMISSION_MODE_LAST_SEQUENCE),
             submitted,
             'and the sequence still carries on from the submitted shot',
         )
@@ -959,7 +959,7 @@ class ContinuingSequenceAnchorTests(unittest.TestCase):
                     filler['state'], PROVIDER_NONE, 'nothing filled the gap'
                 )
                 self.assertEqual(
-                    app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
+                    app.get_submission_anchor(main_module.SUBMISSION_MODE_LAST_SEQUENCE),
                     submitted,
                     'and the shot that ran is what the next submission '
                     'carries on from',
@@ -1925,7 +1925,7 @@ class DeletedAnchorTests(unittest.TestCase):
 
         self.assertFalse(os.path.exists(sent), 'the row took its file with it')
         self.assertIsNone(
-            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
+            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_LAST_SEQUENCE),
             'and a deleted shot is not a sequence for the next batch to join',
         )
 
@@ -1961,7 +1961,7 @@ class DeletedAnchorTests(unittest.TestCase):
 
         self.assertFalse(os.path.exists(sent), 'and the cancelled row went')
         self.assertIsNone(
-            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_ADD_SHOTS),
+            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_LAST_SEQUENCE),
             'a shot the operator cancelled and whose file has gone is not '
             'what the next submission carries on from',
         )

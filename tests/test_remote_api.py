@@ -340,7 +340,7 @@ class SubmitShotsTests(RemoteCommandTestCase):
             # Engage waits on the preparse the submission's window change starts.
             self.app.wait_until_preparse_complete()
             self.app.compile_and_queue_shots(
-                main_module.SUBMISSION_MODE_NEW_FOLDER,
+                main_module.SUBMISSION_MODE_NEW_SEQUENCE,
                 True,
                 False,
                 self.app.expand_pending_shots(),
@@ -684,27 +684,27 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         # That shot writes its file after the replacement is named, and then
         # deletes it, its row having gone with the Clear.
         self.enqueue('experiment_000.h5', run_no=0, n_runs=1)
-        [compiling] = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
+        [compiling] = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
         self.assertTrue(self.wait_until(self.app.queue_controller.get_compiling_paths))
         globals_file.set_field(self.app.globals_file, 'group', 'x', 'scan', '[1, 2]')
         globals_file.set_field(self.app.globals_file, 'group', 'x', 'scan_enabled', True)
         globals_file.set_field(self.app.globals_file, 'group', 'x', 'expansion', 'outer')
 
-        replacement = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE)
+        replacement = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE)
 
         self.assertEqual([record['run_no'] for record in replacement], [0, 2])
         self.assertNotIn(compiling['path'], [record['path'] for record in replacement])
 
     def test_a_join_after_a_replacement_numbers_after_both_batches(self):
         self.enqueue('experiment_000.h5', run_no=0, n_runs=1)
-        self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
-        self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE)
+        self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
+        self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE)
         self.app.compiling.set()
         self.assertTrue(
             self.wait_until(lambda: not self.app.queue_controller.get_compiling_paths())
         )
 
-        later = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
+        later = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
 
         self.assertEqual([record['run_no'] for record in later], [2])
 
@@ -714,8 +714,8 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         # batch is numbered after the first all the same.
         self.enqueue('experiment_007.h5')
 
-        first = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
-        second = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
+        first = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
+        second = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
 
         self.assertEqual([record['run_no'] for record in first], [8])
         self.assertEqual([record['run_no'] for record in second], [9])
@@ -729,7 +729,7 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         runmanager.make_single_run_file(sent, None, {}, self.SEQUENCE, 7, 8)
         self.app.queue_manager.set_last_sent_from_queue(sent)
 
-        records = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
+        records = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
 
         self.assertEqual(
             [record['sequence_attrs']['sequence_id'] for record in records],
@@ -742,7 +742,7 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         sent = os.path.join(self.directory, 'experiment_007.h5')
         self.app.queue_manager.set_last_sent_from_queue(sent, dict(self.SEQUENCE))
 
-        records = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
+        records = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
 
         self.assertFalse(os.path.exists(sent), 'there was no file to read')
         self.assertEqual(
@@ -754,9 +754,9 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         # "Last sequence" is the one submitted last, compiled or not: its rows
         # are in the queue from the moment it is submitted.
         self.enqueue('experiment_007.h5')
-        engaged = self.engage(main_module.SUBMISSION_MODE_NEW_FOLDER)
+        engaged = self.engage(main_module.SUBMISSION_MODE_NEW_SEQUENCE)
 
-        added = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
+        added = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
 
         self.assertEqual(
             added[0]['sequence_attrs']['sequence_id'],
@@ -764,7 +764,7 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         )
 
     def test_adding_to_nothing_at_all_starts_a_sequence(self):
-        records = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
+        records = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
 
         self.assertEqual(
             [record['sequence_attrs']['sequence_index'] for record in records],
@@ -774,7 +774,7 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         )
 
     def test_replacing_nothing_at_all_starts_a_sequence(self):
-        records = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE)
+        records = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE)
 
         self.assertEqual(
             [record['sequence_attrs']['sequence_index'] for record in records],
@@ -791,7 +791,7 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
             lambda: answers.pop(0) if answers else None
         )
 
-        records = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS)
+        records = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
 
         self.assertEqual(
             [record['sequence_attrs']['sequence_id'] for record in records],
@@ -811,7 +811,7 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
             sequence_attrs=dict(self.SEQUENCE, sequence_id='20260918T140000_experiment'),
         )
 
-        records = self.engage(main_module.SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE)
+        records = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE)
 
         self.assertEqual(
             [record['sequence_attrs']['sequence_id'] for record in records],

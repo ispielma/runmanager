@@ -136,10 +136,10 @@ process_tree = ProcessTree.instance()
 # Set a meaningful name for zprocess.locking's client id:
 process_tree.zlock_client.set_process_name(APPLICATION_NAME)
 
-SUBMISSION_MODE_NEW_FOLDER = 'new_folder'
-SUBMISSION_MODE_ADD_SHOTS = 'add_shots'
-SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE = 'new_folder_clear_queue'
-SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE = 'add_shots_clear_queue'
+SUBMISSION_MODE_NEW_SEQUENCE = 'new_sequence'
+SUBMISSION_MODE_LAST_SEQUENCE = 'last_sequence'
+SUBMISSION_MODE_NEW_SEQUENCE_CLEAR_QUEUE = 'new_sequence_clear_queue'
+SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE = 'last_sequence_clear_queue'
 
 SubmissionMode = collections.namedtuple(
     'SubmissionMode', ['joins_sequence', 'clears_queue']
@@ -166,16 +166,16 @@ SubmissionMode = collections.namedtuple(
 # a batch engaged as a new sequence while BLACS works through the last one
 # leaves the queue holding one sequence and BLACS running another.
 SUBMISSION_MODES = {
-    SUBMISSION_MODE_NEW_FOLDER: SubmissionMode(
+    SUBMISSION_MODE_NEW_SEQUENCE: SubmissionMode(
         joins_sequence=False, clears_queue=False
     ),
-    SUBMISSION_MODE_ADD_SHOTS: SubmissionMode(
+    SUBMISSION_MODE_LAST_SEQUENCE: SubmissionMode(
         joins_sequence=True, clears_queue=False
     ),
-    SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE: SubmissionMode(
+    SUBMISSION_MODE_NEW_SEQUENCE_CLEAR_QUEUE: SubmissionMode(
         joins_sequence=False, clears_queue=True
     ),
-    SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE: SubmissionMode(
+    SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE: SubmissionMode(
         joins_sequence=True, clears_queue=True
     ),
 }
@@ -2687,7 +2687,7 @@ class RunManager(LabscriptApplication):
             'Add shots to new sequence'
         )
         self.engage_new_sequence_action.triggered.connect(
-            lambda: self.on_engage_clicked(submission_mode=SUBMISSION_MODE_NEW_FOLDER)
+            lambda: self.on_engage_clicked(submission_mode=SUBMISSION_MODE_NEW_SEQUENCE)
         )
         self.engage_new_sequence_action.setToolTip(
             'Submit the new batch as a new shot sequence.'
@@ -2695,44 +2695,44 @@ class RunManager(LabscriptApplication):
         self.engage_new_sequence_action.setStatusTip(
             'Submit the new batch as a new shot sequence.'
         )
-        self.engage_add_shots_action = self.engage_submission_menu.addAction(
+        self.engage_last_sequence_action = self.engage_submission_menu.addAction(
             'Add shots to last sequence'
         )
-        self.engage_add_shots_action.triggered.connect(
-            lambda: self.on_engage_clicked(submission_mode=SUBMISSION_MODE_ADD_SHOTS)
+        self.engage_last_sequence_action.triggered.connect(
+            lambda: self.on_engage_clicked(submission_mode=SUBMISSION_MODE_LAST_SEQUENCE)
         )
-        self.engage_add_shots_action.setToolTip(
+        self.engage_last_sequence_action.setToolTip(
             'Submit the new batch onto the same shot sequence as the queued shots.'
         )
-        self.engage_add_shots_action.setStatusTip(
+        self.engage_last_sequence_action.setStatusTip(
             'Submit the new batch onto the same shot sequence as the queued shots.'
         )
-        self.engage_replace_queue_action = self.engage_submission_menu.addAction(
+        self.engage_new_sequence_clear_queue_action = self.engage_submission_menu.addAction(
             'Empty queue, then add shots to new sequence'
         )
-        self.engage_replace_queue_action.triggered.connect(
+        self.engage_new_sequence_clear_queue_action.triggered.connect(
             lambda: self.on_engage_clicked(
-                submission_mode=SUBMISSION_MODE_NEW_FOLDER_CLEAR_QUEUE
+                submission_mode=SUBMISSION_MODE_NEW_SEQUENCE_CLEAR_QUEUE
             )
         )
-        self.engage_replace_queue_action.setToolTip(
+        self.engage_new_sequence_clear_queue_action.setToolTip(
             'Delete the queued shots BLACS is not running, then submit the replacement batch as a new shot sequence.'
         )
-        self.engage_replace_queue_action.setStatusTip(
+        self.engage_new_sequence_clear_queue_action.setStatusTip(
             'Delete the queued shots BLACS is not running, then submit the replacement batch as a new shot sequence.'
         )
-        self.engage_add_clear_action = self.engage_submission_menu.addAction(
+        self.engage_last_sequence_clear_queue_action = self.engage_submission_menu.addAction(
             'Empty queue, then add shots to last sequence'
         )
-        self.engage_add_clear_action.triggered.connect(
+        self.engage_last_sequence_clear_queue_action.triggered.connect(
             lambda: self.on_engage_clicked(
-                submission_mode=SUBMISSION_MODE_ADD_SHOTS_CLEAR_QUEUE
+                submission_mode=SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE
             )
         )
-        self.engage_add_clear_action.setToolTip(
+        self.engage_last_sequence_clear_queue_action.setToolTip(
             'Delete the queued shots BLACS is not running, then submit the replacement batch onto the same shot sequence.'
         )
-        self.engage_add_clear_action.setStatusTip(
+        self.engage_last_sequence_clear_queue_action.setStatusTip(
             'Delete the queued shots BLACS is not running, then submit the replacement batch onto the same shot sequence.'
         )
         self.engage_submission_menu.aboutToShow.connect(
@@ -2792,14 +2792,14 @@ class RunManager(LabscriptApplication):
         get_submission_anchor, against the queue the batch is written into."""
         return (
             self.ui.checkBox_run_shots.isChecked()
-            and self.get_submission_anchor(SUBMISSION_MODE_ADD_SHOTS) is not None
+            and self.get_submission_anchor(SUBMISSION_MODE_LAST_SEQUENCE) is not None
         )
 
     def update_engage_submission_menu_actions(self):
         enabled = self.can_use_alternate_submission_mode()
-        self.engage_add_shots_action.setEnabled(enabled)
-        self.engage_replace_queue_action.setEnabled(enabled)
-        self.engage_add_clear_action.setEnabled(enabled)
+        self.engage_last_sequence_action.setEnabled(enabled)
+        self.engage_new_sequence_clear_queue_action.setEnabled(enabled)
+        self.engage_last_sequence_clear_queue_action.setEnabled(enabled)
 
     def reindex_run_file_infos(
         self, run_file_infos, indexed_path_base, index_start=None, name_format=None
@@ -2865,7 +2865,7 @@ class RunManager(LabscriptApplication):
             run_file_info['n_runs'] = runs_in_sequence
         return run_file_infos
 
-    def on_engage_clicked(self, checked=False, submission_mode=SUBMISSION_MODE_NEW_FOLDER):
+    def on_engage_clicked(self, checked=False, submission_mode=SUBMISSION_MODE_NEW_SEQUENCE):
         logger.info('Engage')
         try:
             send_to_BLACS = self.ui.checkBox_run_shots.isChecked()
@@ -5626,7 +5626,7 @@ class RunmanagerServer(ZMQServer):
         # the session's later shots into the operator's sequence.
         records = inmain(
             app.compile_and_queue_shots,
-            SUBMISSION_MODE_NEW_FOLDER if sequence is None else SUBMISSION_MODE_ADD_SHOTS,
+            SUBMISSION_MODE_NEW_SEQUENCE if sequence is None else SUBMISSION_MODE_LAST_SEQUENCE,
             True,
             send_to_runviewer,
             batch,

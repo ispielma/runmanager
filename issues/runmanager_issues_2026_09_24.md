@@ -876,7 +876,7 @@ for exactly this. Several overlap slices above.
 - `compile_shots` keeps and coerces a caller-chosen `shot_id`, but no caller
   supplies one.
 - The record's next run number is always the stored path's index plus one. The
-  remote join also passes `SUBMISSION_MODE_ADD_SHOTS` only for its anchor to be
+  remote join also passes `SUBMISSION_MODE_LAST_SEQUENCE` only for its anchor to be
   overwritten from the record.
 - The anchor rules are explained in three places, and `n_runs` in three.
   Comments and docstrings in the range outnumber its code lines by about two to
