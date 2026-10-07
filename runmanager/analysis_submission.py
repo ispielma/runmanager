@@ -201,8 +201,8 @@ class AnalysisSubmission(object):
                     else:
                         self.on_lyse_outcome(data, LYSE_NOT_SENT, 'Analysis is off.')
                 elif signal == 'clear':
-                    # Here, between sends, so that a clear never reports the
-                    # file being sent as not sent.
+                    # Handled on this thread between files, so a clear never
+                    # reports the file being sent as not sent.
                     for path in self._waiting_for_submission:
                         self.on_lyse_outcome(
                             path, LYSE_NOT_SENT, 'Cleared before it was sent to lyse.'
@@ -221,7 +221,7 @@ class AnalysisSubmission(object):
 
     def submit_waiting_files(self):
         success = True
-        while self._waiting_for_submission and success:
+        if self._waiting_for_submission:
             path = self._waiting_for_submission[0]
             self._mainloop_logger.debug('Submitting run file %s.\n' % os.path.basename(path))
             self.server_online = 'checking'
@@ -238,9 +238,12 @@ class AnalysisSubmission(object):
                 self.on_lyse_outcome(path, LYSE_REJECTED, str(e))
             else:
                 self.on_lyse_outcome(path, LYSE_SENT, '')
-            if not success:
-                break
-            self._waiting_for_submission.pop(0)
+            if success:
+                self._waiting_for_submission.pop(0)
+                if self._waiting_for_submission:
+                    # The next file waits its turn on the queue, behind any clear.
+                    self.inqueue.put(['check/retry', None])
+                    return
 
         self.server_online = 'online' if success else 'offline'
         self.update_waiting_files_message()

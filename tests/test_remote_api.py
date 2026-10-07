@@ -502,7 +502,8 @@ class SubmitShotsTests(RemoteCommandTestCase):
         with self.assertRaises(ValueError) as raised:
             self.submit({'x': 1, 'y': 2, 'depth': 3})
 
-        self.assertIn('depth, y', str(raised.exception), 'both are named')
+        self.assertRegex(str(raised.exception), r'\bdepth\b', 'both are named')
+        self.assertRegex(str(raised.exception), r'\by\b', 'both are named')
         self.assertEqual(self.app.batches, [])
         self.assertEqual(
             self.expressions(), {'x': '0 # metres', 'y': '2*3', 'depth': '4'}
@@ -519,7 +520,11 @@ class SubmitShotsTests(RemoteCommandTestCase):
         )
 
     def test_skip_missing_writes_the_globals_that_exist_and_returns_the_rest(self):
-        self.assertEqual(self.request(self.client.set_values, {'depth': 5}), [])
+        with self.assertRaises(ValueError):
+            self.request(self.client.set_values, {'depth': 5, 'nope': 2})
+        self.assertEqual(
+            self.expressions(), {'x': '0 # metres', 'y': '2*3', 'depth': '4'}
+        )
 
         skipped = self.request(
             self.client.set_values,
@@ -529,7 +534,7 @@ class SubmitShotsTests(RemoteCommandTestCase):
 
         self.assertEqual(skipped, ['nope', 'gone'])
         self.assertEqual(
-            self.expressions(), {'x': '1 # metres', 'y': '3', 'depth': '5'}
+            self.expressions(), {'x': '1 # metres', 'y': '3', 'depth': '4'}
         )
 
 

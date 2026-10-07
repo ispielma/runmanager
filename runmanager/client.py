@@ -73,14 +73,16 @@ class RunmanagerClient(ZMQClient):
     def set_values(self, globals, raw=False, skip_missing=False):
         """Set Default expressions for active globals.
 
+        A comment the stored expression ends with is kept, unless the new one
+        has its own.
+
         Parameters
         ----------
         globals : dict
             ``{global_name: value}``. Nothing is written if any is refused.
         raw : bool
             If True, each value is a string, the expression to store. Otherwise
-            the ``repr`` of each value is stored. A comment the stored
-            expression ends with is kept, unless the new one has its own.
+            the ``repr`` of each value is stored.
         skip_missing : bool
             If True, a name in no active group is skipped and the others are
             written. Otherwise it is refused.
@@ -365,16 +367,17 @@ class RunmanagerClient(ZMQClient):
         -------
         dict
             ``{shot_id: record}``, one entry per id asked about. ``record`` is
-            ``None`` for an id runmanager has no record of, which includes a
-            shot that left the queue before runmanager last restarted, since
-            what it remembers of departed shots is not saved. A shot still
-            queued at a restart is saved with its ``shot_id`` and restored with
-            a full record, its BLACS and lyse progress reset: ``compile`` is
-            ``'compiled'`` if it had compiled and ``'waiting'`` if not, and
-            ``blacs`` and ``lyse`` are ``'waiting'``. Any other record is a
-            dict with these keys, whose ``compile``, ``queue``, ``blacs`` and
-            ``lyse`` values are this module's ``COMPILE_*``, ``QUEUE_*``,
-            ``BLACS_*`` and ``LYSE_*`` constants:
+            ``None`` for an id runmanager has no record of, including a shot
+            that left the queue before runmanager last restarted: what it
+            remembers of departed shots is not saved. A shot still queued when
+            the queue was saved with the front panel at shutdown is restored
+            after the restart, with its BLACS and lyse progress reset:
+            ``compile`` is ``'compiled'`` or ``'waiting'``, and ``blacs`` and
+            ``lyse`` are ``'waiting'``. Every record that is not ``None``,
+            restored ones included, is a dict with these keys, whose
+            ``compile``, ``queue``, ``blacs`` and ``lyse`` values are this
+            module's ``COMPILE_*``, ``QUEUE_*``, ``BLACS_*`` and ``LYSE_*``
+            constants:
 
             ``shot_id``, ``sequence_id``, ``sequence_index``, ``run_number``, ``path``
                 As ``submit_shots`` returns them.

@@ -80,6 +80,7 @@ from runviewer.client import RunviewerClient
 from zprocess import Interruptor, raise_exception_in_thread
 import runmanager
 from runmanager.client import (
+    BLACS_COMPLETED,
     DEFAULT_PORT,
     PROVIDER_NONE,
     PROVIDER_PAUSED,
@@ -5196,7 +5197,7 @@ class RunManager(LabscriptApplication):
             )
             return
         message = str(fields.get('message', ''))
-        if status != 'completed':
+        if status != BLACS_COMPLETED:
             self.queue_manager.shot_finished(shot_id, status, message)
             return
         agnostic_path = fields.get('path')
