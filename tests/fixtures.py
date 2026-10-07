@@ -174,9 +174,9 @@ def load_main_ui():
     return loader.load(os.path.join(os.path.dirname(main_module.__file__), 'main.ui'))
 
 
-def submit_to_lyse(testcase, port):
+def submit_to_lyse(testcase, port, on_lyse_outcome=lambda *outcome: None):
     """A real AnalysisSubmission, sending shots to the lyse on this port."""
-    submission = AnalysisSubmission(load_main_ui())
+    submission = AnalysisSubmission(load_main_ui(), on_lyse_outcome)
     testcase.addCleanup(stop_submission, submission)
     submission.lyse = LyseClient(host='127.0.0.1', port=port, timeout=1)
     submission.send_to_server = True

@@ -24,6 +24,7 @@ name and compile mode, and reddens a row that needs an operator.
 import os
 import queue
 import threading
+import time
 import uuid
 
 from qtutils.qt import QtCore, QtGui, QtWidgets
@@ -35,14 +36,24 @@ from zprocess import raise_exception_in_thread
 
 from runmanager import _plain_value
 from runmanager.client import (
-    BLOCKED_SHOT_STATE,
-    COMPILING_SHOT_STATE,
+    BLACS_CANCELLED,
+    BLACS_COMPLETED,
+    BLACS_FAILED,
+    BLACS_REJECTED,
+    BLACS_RUNNING,
+    BLACS_WAITING,
+    COMPILE_COMPILED,
+    COMPILE_COMPILING,
+    COMPILE_FAILED,
+    COMPILE_WAITING,
+    LYSE_WAITING,
     PROVIDER_NONE,
     PROVIDER_PAUSED,
     PROVIDER_SHOT,
-    QUEUED_SHOT_STATE,
+    QUEUE_BLOCKED,
+    QUEUE_LEFT,
+    QUEUE_QUEUED,
     SHOT_OUTCOME_STATUSES,
-    UNKNOWN_SHOT_STATE,
 )
 
 EMPTY_QUEUE_NOTHING = 'nothing'
@@ -56,8 +67,8 @@ COMPILE_MODE_LAZY = 'lazy'
 # rows below the rule are work still waiting and are never tinted.
 FAILED_ROW_BACKGROUND = QtGui.QColor('#ffcccc')
 ROW_BACKGROUNDS = {
-    'failed': FAILED_ROW_BACKGROUND,
-    'rejected': FAILED_ROW_BACKGROUND,
+    BLACS_FAILED: FAILED_ROW_BACKGROUND,
+    BLACS_REJECTED: FAILED_ROW_BACKGROUND,
     'compile_failed': FAILED_ROW_BACKGROUND,
 }
 # Set with either of them, and not left to the theme. Both fills are pale, so
@@ -67,7 +78,10 @@ ROW_BACKGROUNDS = {
 TINTED_ROW_FOREGROUND = QtGui.QColor('#202020')
 # What a shot record says about this session's attempt at it rather than about
 # the shot: assigned by _normalise_item, and left out of a saved queue:
-SESSION_ONLY_FIELDS = ('compiling', 'state', 'message', 'reclaimed')
+SESSION_ONLY_FIELDS = (
+    'compiling', 'state', 'message', 'reclaimed', 'since', 'blacs_outcome',
+    'lyse', 'lyse_message',
+)
 
 
 # The states a row reaches by being given to BLACS. Not every state is one:
@@ -76,7 +90,7 @@ SESSION_ONLY_FIELDS = ('compiling', 'state', 'message', 'reclaimed')
 # the row reserved for the shot BLACS was given, keep it there through a
 # replacement submission, and tell the operator BLACS is running it. A new
 # state that does mean a handover joins by being named here.
-BLACS_STATES = ('running', 'failed', 'rejected', 'cancelled')
+BLACS_STATES = (BLACS_RUNNING, BLACS_FAILED, BLACS_REJECTED, BLACS_CANCELLED)
 
 # The states the queue refuses to hand a row over in, each against whether a
 # row in it holds up the rows behind it as well. Written as the refusals that
@@ -89,7 +103,7 @@ REFUSED_STATES = {
     # gone, or a connection table that does not match the apparatus. Offering
     # it again would only be refused again, so it is held at the head until an
     # operator deletes it, and nothing behind it can be reached meanwhile.
-    'rejected': True,
+    BLACS_REJECTED: True,
     # claim_next_for_compile(): the compile failed and is not tried again by
     # itself, which would recompile a persistently bad shot for ever. It is
     # held the same way, until an operator deletes it or asks for another
@@ -99,7 +113,7 @@ REFUSED_STATES = {
     # queue clears the row itself, at the next request from BLACS -- see
     # drop_cancelled_head() -- so the shots behind it are waiting their turn
     # rather than waiting on anybody.
-    'cancelled': False,
+    BLACS_CANCELLED: False,
 }
 
 
@@ -116,6 +130,17 @@ def sent_to_blacs(row):
     -- and a state added to BLACS_STATES joins all three without being named
     again in each."""
     return row.get('state') in BLACS_STATES
+
+
+def shot_receipt(record):
+    """What a remote caller is told about a shot."""
+    return {
+        'shot_id': record['shot_id'],
+        'sequence_id': record['sequence_attrs'].get('sequence_id'),
+        'sequence_index': record['sequence_attrs'].get('sequence_index'),
+        'run_number': record['run_no'],
+        'path': record['path'],
+    }
 
 
 class RunmanagerQueueWidget(ShotQueueWidget):
@@ -195,14 +220,14 @@ class RunmanagerQueueWidget(ShotQueueWidget):
             }
         row_info = self._row_info(path_info)
         row_info['rule_below'] = True
-        if path_info['state'] == 'running':
+        if path_info['state'] == BLACS_RUNNING:
             row_info['tooltip'] = (
                 '%s\nBLACS has this shot. Delete cancels it: the row stays '
                 'until BLACS next asks for work, because its file may still be '
                 'being written, but it will not be sent again.'
                 % path_info['path']
             )
-        elif path_info['state'] == 'cancelled':
+        elif path_info['state'] == BLACS_CANCELLED:
             # Struck through rather than removed, and nothing more to aim at
             # it: a second Delete could not free the file any sooner than the
             # first, for the same reason.
@@ -266,6 +291,13 @@ class QueueController(object):
         # Kept so that a batch added to that shot's sequence reads no file.
         self.last_sent_sequence_attrs = None
         self._items = []
+        # The record of each shot that left the queue this session, as it was
+        # when it left.
+        self._departed = {}
+        # {local path: shot id} of each file handed to lyse and not yet settled.
+        # BLACS may have run a fresh copy, so the path lyse is given is not
+        # always the row's.
+        self._lyse_paths = {}
         # Whether or not their rows are still queued: a compile that finishes
         # after its row has gone writes its file and then deletes it.
         self._compiling_paths = set()
@@ -329,6 +361,16 @@ class QueueController(object):
         # it, which nothing has attempted since.
         record['state'] = ''
         record['message'] = ''
+        # 'blacs_outcome' is what BLACS last reported of the row, because
+        # 'state' calls an aborted and a failed shot alike 'failed'. 'since' is
+        # when the row last changed, for shot_status.
+        record['blacs_outcome'] = ''
+        record['since'] = time.time()
+        # What runmanager did with the file for lyse, once BLACS completes the
+        # shot; see record_lyse(). shot_status reports it 'waiting' until the
+        # row leaves:
+        record['lyse'] = LYSE_WAITING
+        record['lyse_message'] = ''
         return record
 
     def set_empty_queue_policy(self, value):
@@ -385,7 +427,7 @@ class QueueController(object):
             for item in self._items:
                 if item['shot_id'] not in wanted:
                     keep.append(item)
-                elif item['state'] == 'running':
+                elif item['state'] == BLACS_RUNNING:
                     # Marked, not removed. Its file may be under the hardware's
                     # pen, and nothing here can know otherwise -- so the row
                     # stays, struck through, and is never offered again. What
@@ -393,25 +435,28 @@ class QueueController(object):
                     # it, which is the one fact that proves the file is free;
                     # see offer_next. A second Delete cannot do better, for the
                     # same reason the first could not.
-                    item['state'] = 'cancelled'
+                    item['state'] = BLACS_CANCELLED
                     item['message'] = (
                         'Cancelled. It will not be sent again, and goes when '
                         'BLACS next asks for work.'
                     )
+                    item['since'] = time.time()
                     protected.append(dict(item))
                     keep.append(item)
-                elif item['state'] == 'cancelled':
+                elif item['state'] == BLACS_CANCELLED:
                     keep.append(item)
                 else:
                     removed_paths.append(item['path'])
+                    self._leave(item, 'Deleted from the queue.')
             self._items = keep
             return removed_paths, protected
 
     def clear(self):
         """Empty the queue, leaving whatever has been sent to BLACS.
 
-        Clear is reached only by the two replacement submission modes, whose
-        offer is to empty the queue and submit a batch in its place. The queue
+        Clear is reached by the two replacement submission modes, whose offer
+        is to empty the queue and submit a batch in its place, and by Empty
+        queue and the remote abort, which empty it outright. The queue
         is the work still waiting; a shot that has gone to BLACS has left it,
         and sits in the row the display reserves above the rest. Replacing the
         queue therefore replaces what is behind that row and nothing else --
@@ -424,9 +469,10 @@ class QueueController(object):
         thing that does it. Returns ``(removed_paths, protected)``."""
         with self._lock:
             kept = [item for item in self._items if sent_to_blacs(item)]
-            removed_paths = [
-                item['path'] for item in self._items if not sent_to_blacs(item)
-            ]
+            dropped = [item for item in self._items if not sent_to_blacs(item)]
+            for item in dropped:
+                self._leave(item, 'Emptied from the queue.')
+            removed_paths = [item['path'] for item in dropped]
             self._items = kept
             return removed_paths, [dict(item) for item in kept]
 
@@ -442,84 +488,118 @@ class QueueController(object):
                 if include_default_shots or not item['default_shot']
             ]
 
-    def get_shot_statuses(self, shot_ids):
-        """Say, for each of these shot ids, whether its shot can still run.
+    def _status(self, item, queue_step, pending=False):
+        """The shot_status record of a row. Call with the lock held.
 
-        ``{shot_id: {'pending': bool, 'state': str}}``, one entry per id asked
-        about. ``pending`` is whether the shot can still produce a result: the
-        queue would still hand its row over, or, for a cancelled row, BLACS
-        has it and can still complete it.
-        That is a question about the row and about what is in front of it:
-        only the head is ever offered, so a row the queue refuses to hand over
-        and does not clear itself holds up every row behind it until an
-        operator moves it. Those rows are not pending either, and say
-        ``blocked``, which is the fact about them a caller waiting on their
-        results needs.
+        For a row that has left the queue, a step it never reached and lyse
+        read None, and ``since`` is when it left.
+        """
+        state = item['state']
+        if item['compiling']:
+            compile_step = COMPILE_COMPILING
+        elif state == 'compile_failed':
+            compile_step = COMPILE_FAILED
+        elif item['compiled']:
+            compile_step = COMPILE_COMPILED
+        else:
+            compile_step = COMPILE_WAITING
+        if state == BLACS_FAILED:
+            blacs = item['blacs_outcome']
+        elif sent_to_blacs(item):
+            blacs = state
+        else:
+            blacs = BLACS_WAITING
+        lyse = LYSE_WAITING
+        since = item['since']
+        if queue_step == QUEUE_LEFT:
+            if compile_step not in (COMPILE_COMPILED, COMPILE_FAILED):
+                compile_step = None
+            if blacs == BLACS_WAITING:
+                blacs = None
+            lyse = None
+            since = time.time()
+        return dict(
+            shot_receipt(item),
+            compile=compile_step,
+            queue=queue_step,
+            blacs=blacs,
+            lyse=lyse,
+            pending=pending,
+            since=since,
+            message=item['message'],
+        )
 
-        ``state`` is for a human reading it. An id with no row is not pending,
-        because nothing further will happen to it.
+    def _leave(self, item, message, **changes):
+        """Record that a row has left the queue, with ``changes`` to its record.
 
-        Reads only. A caller may ask as often as it likes, about shots that
-        finished long ago, and the queue is no different afterwards."""
-        statuses = {}
-        with self._lock:
-            held = False
-            for item in self._items:
-                state = item['state']
-                if state in REFUSED_STATES:
-                    # Its own reason, which is what an operator has to act on.
-                    statuses[item['shot_id']] = {
-                        'pending': state == 'cancelled',
-                        'state': state,
-                    }
-                    held = held or REFUSED_STATES[state]
-                elif held:
-                    statuses[item['shot_id']] = {
-                        'pending': False,
-                        'state': BLOCKED_SHOT_STATE,
-                    }
-                else:
-                    statuses[item['shot_id']] = {'pending': True, 'state': state}
-        answer = {}
-        for shot_id in shot_ids:
-            if shot_id in statuses:
-                answer[shot_id] = dict(statuses[shot_id])
+        Call with the lock held.
+        """
+        self._departed[item['shot_id']] = dict(
+            self._status(item, QUEUE_LEFT), message=message, **changes
+        )
+
+    def _row_statuses(self):
+        """Yield the record of each row, front first. Call with the lock held.
+
+        Only the head is ever offered, so a row behind one the queue will not
+        hand over is ``'blocked'`` and not pending.
+        """
+        held = False
+        for item in self._items:
+            state = item['state']
+            if state in REFUSED_STATES:
+                # Never blocked: its own record is what an operator acts on.
+                held = held or REFUSED_STATES[state]
+                yield self._status(item, QUEUE_QUEUED, state == BLACS_CANCELLED)
+            elif held:
+                yield self._status(item, QUEUE_BLOCKED)
             else:
-                answer[shot_id] = {'pending': False, 'state': UNKNOWN_SHOT_STATE}
+                yield self._status(item, QUEUE_QUEUED, True)
+
+    def expect_lyse(self, shot_id, path):
+        """Note that this shot's file is being handed to lyse as ``path``."""
+        with self._lock:
+            self._lyse_paths[os.path.abspath(path)] = shot_id
+
+    def record_lyse(self, path, lyse, message):
+        """Record what runmanager did with a completed shot's file for lyse.
+
+        Called from the analysis submission's thread, for a path given to
+        expect_lyse. The file is handed over before the row is retired, so the
+        outcome can arrive either side of that: a queued row keeps it for when
+        it leaves, and a record that has left takes it while it is still
+        waiting. Each outcome is final, so the path is forgotten with it."""
+        with self._lock:
+            shot_id = self._lyse_paths.pop(os.path.abspath(path), None)
+            if shot_id is None:
+                return
+            for item in self._items:
+                if item['shot_id'] == shot_id:
+                    item['lyse'] = lyse
+                    item['lyse_message'] = message
+                    return
+            record = self._departed.get(shot_id)
+            if record is not None and record['lyse'] == LYSE_WAITING:
+                record.update(lyse=lyse, message=message, since=time.time())
+
+    def get_shot_statuses(self, shot_ids):
+        """Give the record of each of these shot ids, as ``shot_status`` does."""
+        with self._lock:
+            live = {record['shot_id']: record for record in self._row_statuses()}
+            answer = {}
+            for shot_id in shot_ids:
+                if shot_id in live:
+                    answer[shot_id] = live[shot_id]
+                elif shot_id in self._departed:
+                    answer[shot_id] = dict(self._departed[shot_id])
+                else:
+                    answer[shot_id] = None
         return answer
 
     def get_queue(self):
-        """List the rows of the queue, in queue order.
-
-        Reads only.
-
-        Returns
-        -------
-        list of dict
-            One dict per row. ``shot_id`` is the row's stable id,
-            ``sequence_id`` and ``sequence_index`` the sequence its shot belongs
-            to (None for a row that records none), ``run_number`` its number
-            within that sequence, and ``path`` its shot file. ``state`` is the
-            row's own state when it has one, and otherwise
-            ``COMPILING_SHOT_STATE`` while its compile is under way and
-            ``QUEUED_SHOT_STATE`` while it waits its turn. ``message`` is the
-            reason the row gives for its state, empty when it gives none.
-        """
+        """List the rows of the queue in queue order, as the client's get_queue does."""
         with self._lock:
-            return [
-                {
-                    'shot_id': item['shot_id'],
-                    'sequence_id': item['sequence_attrs'].get('sequence_id'),
-                    'sequence_index': item['sequence_attrs'].get('sequence_index'),
-                    'run_number': item['run_no'],
-                    'path': item['path'],
-                    'state': item['state'] or (
-                        COMPILING_SHOT_STATE if item['compiling'] else QUEUED_SHOT_STATE
-                    ),
-                    'message': item['message'],
-                }
-                for item in self._items
-            ]
+            return list(self._row_statuses())
 
     def get_queued_sequence_attrs(self, path):
         """The sequence attributes of the queued shot at ``path``, or None.
@@ -719,6 +799,10 @@ class QueueController(object):
                 self._items = [self._items[0]] + [
                     item for item in self._items[1:] if not item['default_shot']
                 ]
+            for item in dropped:
+                self._leave(
+                    item, 'Dropped: work was queued ahead of this default shot.'
+                )
             return [item['path'] for item in dropped]
 
     def drop_cancelled_head(self):
@@ -730,9 +814,11 @@ class QueueController(object):
         row is proof nobody is running it, the same fact the reclaim rests on.
         That is when its file is free to go. Returns the paths to delete."""
         with self._lock:
-            if not self._items or self._items[0]['state'] != 'cancelled':
+            if not self._items or self._items[0]['state'] != BLACS_CANCELLED:
                 return []
-            return [self._items.pop(0)['path']]
+            item = self._items.pop(0)
+            self._leave(item, 'Cancelled; released when BLACS asked for more work.')
+            return [item['path']]
 
     def offer_next(self):
         """Offer the shot at the head of the queue if it is ready to hand over.
@@ -787,8 +873,10 @@ class QueueController(object):
                 # restart clears the state. Meanwhile BLACS is free: it keeps
                 # asking, gets nothing, and runs its own shot.
                 return None
-            reclaimed = item['state'] == 'running'
-            item['state'] = 'running'
+            reclaimed = item['state'] == BLACS_RUNNING
+            item['state'] = BLACS_RUNNING
+            if not reclaimed:
+                item['since'] = time.time()
             # Whatever went wrong last time is being attempted again, so the
             # row goes back to the running appearance rather than keeping a
             # reason that no longer describes it:
@@ -818,14 +906,21 @@ class QueueController(object):
             for index, item in enumerate(self._items):
                 if item['shot_id'] != shot_id:
                     continue
-                if status == 'completed' or item['state'] == 'cancelled':
+                if status == BLACS_COMPLETED or item['state'] == BLACS_CANCELLED:
                     # A cancelled row goes on any outcome at all. The operator
                     # has said they do not want this shot, so a failure is not
                     # an invitation to try it again -- and a completed one is
                     # still reported onward by the caller, the cancel being
                     # about the queue and not about physics already done.
+                    changes = {'blacs': status}
+                    if status == BLACS_COMPLETED:
+                        changes.update(compile=COMPILE_COMPILED, lyse=item['lyse'])
+                        # The latest change to the shot is what its message says:
+                        if item['lyse'] != LYSE_WAITING:
+                            message = item['lyse_message']
+                    self._leave(item, message, **changes)
                     return self._items.pop(index)
-                state = 'rejected' if status == 'rejected' else 'failed'
+                state = BLACS_REJECTED if status == BLACS_REJECTED else BLACS_FAILED
                 # This catches a resend only while the row still shows the
                 # outcome being reported -- so in practice only a rejected row,
                 # that being the one state the offer path refuses to re-offer.
@@ -844,7 +939,9 @@ class QueueController(object):
                 if item['state'] == state and item['message'] == message:
                     return None
                 item['state'] = state
+                item['blacs_outcome'] = status
                 item['message'] = message
+                item['since'] = time.time()
                 return dict(item)
             return None
 
@@ -869,6 +966,7 @@ class QueueController(object):
             if item['compiling']:
                 return None, True
             item['compiling'] = True
+            item['since'] = time.time()
             self._compiling_paths.add(item['path'])
             return item, True
 
@@ -886,6 +984,7 @@ class QueueController(object):
                     and item['state'] not in REFUSED_STATES
                 ):
                     item['compiling'] = True
+                    item['since'] = time.time()
                     self._compiling_paths.add(item['path'])
                     return item
             return None
@@ -914,6 +1013,7 @@ class QueueController(object):
         operator while it was compiling."""
         with self._lock:
             item['compiling'] = False
+            item['since'] = time.time()
             self._compiling_paths.discard(item['path'])
             item['compiled'] = bool(success)
             for queued in self._items:
@@ -948,6 +1048,7 @@ class QueueController(object):
             for item in failed:
                 item['state'] = ''
                 item['message'] = ''
+                item['since'] = time.time()
             return bool(failed)
 
 
@@ -1163,9 +1264,9 @@ class QueueManager(QtCore.QObject):
         untruth most likely to send an operator to Abort on idle hardware.
         Returns the paths that were removed."""
         for row in protected:
-            if row['state'] == 'running':
+            if row['state'] == BLACS_RUNNING:
                 reason = 'BLACS is running it.'
-            elif row['state'] == 'cancelled':
+            elif row['state'] == BLACS_CANCELLED:
                 # Not something BLACS said: the operator did this, and the row
                 # already carries the whole of it.
                 reason = row['message']
@@ -1226,7 +1327,7 @@ class QueueManager(QtCore.QObject):
             # outcome BLACS sent again because our reply went missing, so it is
             # neither reported a second time nor allowed to repaint the queue.
             return None
-        if status != 'completed':
+        if status != BLACS_COMPLETED:
             self.output(
                 'BLACS reported shot %s as %s%s\n'
                 % (

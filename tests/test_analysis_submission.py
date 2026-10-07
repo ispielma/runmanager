@@ -77,6 +77,52 @@ class AnalysisSubmissionTests(unittest.TestCase):
         self.assertEqual(incoming.get(), later)
         self.assertEqual(refusing.offered, [self.path])
 
+    def submit_recording(self, port):
+        """A submission to this port, and the outcomes it reports, in order."""
+        outcomes = []
+        submission = submit_to_lyse(self, port, lambda *outcome: outcomes.append(outcome))
+        return submission, outcomes
+
+    def test_each_shot_file_is_reported_as_sent_rejected_or_not_sent(self):
+        with self.subTest('lyse takes it'):
+            submission, outcomes = self.submit_recording(self.serve(queue.Queue()).port)
+            submission.notify_shot_complete(self.path)
+            wait_for(lambda: outcomes)
+
+            self.assertEqual(outcomes, [(self.path, 'sent', '')])
+
+        with self.subTest('lyse refuses it'):
+            submission, outcomes = self.submit_recording(self.serve(RefusingQueue()).port)
+            submission.notify_shot_complete(self.path)
+            wait_for(lambda: outcomes)
+
+            self.assertEqual([outcome[:2] for outcome in outcomes], [(self.path, 'rejected')])
+            self.assertIn('lyse cannot take shots', outcomes[0][2])
+
+        with self.subTest('Analyse is off'):
+            submission, outcomes = self.submit_recording(self.serve(queue.Queue()).port)
+            submission.send_to_server = False
+            submission.notify_shot_complete(self.path)
+            wait_for(lambda: outcomes)
+
+            self.assertEqual(outcomes, [(self.path, 'not sent', 'Analysis is off.')])
+
+        with self.subTest('cleared while lyse is away'):
+            with socket.socket() as probe:
+                probe.bind(('127.0.0.1', 0))
+                port = probe.getsockname()[1]
+            submission, outcomes = self.submit_recording(port)
+            submission.notify_shot_complete(self.path)
+            wait_for(lambda: submission.server_online == 'offline')
+            self.assertEqual(outcomes, [], 'a connection failure is retried, not reported')
+            submission.clear_waiting_files()
+            wait_for(lambda: outcomes)
+
+            self.assertEqual(
+                outcomes,
+                [(self.path, 'not sent', 'Cleared before it was sent to lyse.')],
+            )
+
     def test_a_shot_waits_while_lyse_is_away_and_goes_once_it_is_back(self):
         with socket.socket() as probe:
             probe.bind(('127.0.0.1', 0))

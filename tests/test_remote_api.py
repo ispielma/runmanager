@@ -25,9 +25,7 @@ from qtutils.qt.QtGui import QStandardItemModel
 from qtutils.qt.QtWidgets import QApplication
 import runmanager
 import runmanager.globals_file as globals_file
-from runmanager.analysis_submission import AnalysisSubmission
 from runmanager.client import (
-    SUBMISSION_MODE_LAST_SEQUENCE,
     SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE,
     RunmanagerClient,
     SequenceRefused,
@@ -39,13 +37,10 @@ from fixtures import (
     RunManager,
     RunmanagerServer,
     labconfig,
-    load_main_ui,
     main_module,
-    stop_submission,
     wait_for,
 )
 from runmanager.queueing import (
-    BLOCKED_SHOT_STATE,
     COMPILE_MODE_EAGER,
     QueueController,
     QueueManager,
@@ -162,6 +157,9 @@ class SubmittingApp(object):
         self.compiling = threading.Event()
         # What a compile answers: whether it worked and, if not, why.
         self.compile_result = (True, '')
+        self.test_compile_dir = tempfile.TemporaryDirectory(
+            prefix='runmanager_test_compile_'
+        )
         self.axes_model = QStandardItemModel()
         self.queue_compile_mode_combo = types.SimpleNamespace(
             currentData=lambda: COMPILE_MODE_EAGER
@@ -493,6 +491,90 @@ class SubmitShotsTests(RemoteCommandTestCase):
             self.expressions(), {'x': '0 # metres', 'y': '2*3', 'depth': '4'}
         )
 
+    def test_a_global_with_scan_or_jit_ticked_is_refused_before_anything_is_set(self):
+        # Its shot would run the scan, or a value read at compile time, and not
+        # the value filed and receipted for it.
+        self.scan('y', '[5]')
+        globals_file.set_field(
+            self.app.globals_file, 'group', 'depth', 'jit_enabled', True
+        )
+
+        with self.assertRaises(ValueError) as raised:
+            self.submit({'x': 1, 'y': 2, 'depth': 3})
+
+        self.assertRegex(str(raised.exception), r'\bdepth\b', 'both are named')
+        self.assertRegex(str(raised.exception), r'\by\b', 'both are named')
+        self.assertEqual(self.app.batches, [])
+        self.assertEqual(
+            self.expressions(), {'x': '0 # metres', 'y': '2*3', 'depth': '4'}
+        )
+
+    def test_a_raw_expression_with_its_own_comment_is_written_as_given(self):
+        # Writing back what get_values(raw=True) read must not stack the
+        # comment it replaces on its own.
+        self.request(self.client.set_values, {'x': '1.0  # MHz'}, raw=True)
+        self.request(self.client.set_values, {'x': '1.0  # MHz'}, raw=True)
+
+        self.assertEqual(
+            self.expressions(), {'x': '1.0  # MHz', 'y': '2*3', 'depth': '4'}
+        )
+
+    def test_skip_missing_writes_the_globals_that_exist_and_returns_the_rest(self):
+        with self.assertRaises(ValueError):
+            self.request(self.client.set_values, {'depth': 5, 'nope': 2})
+        self.assertEqual(
+            self.expressions(), {'x': '0 # metres', 'y': '2*3', 'depth': '4'}
+        )
+
+        skipped = self.request(
+            self.client.set_values,
+            {'x': 1, 'nope': 2, 'y': 3, 'gone': 4},
+            skip_missing=True,
+        )
+
+        self.assertEqual(skipped, ['nope', 'gone'])
+        self.assertEqual(
+            self.expressions(), {'x': '1 # metres', 'y': '3', 'depth': '4'}
+        )
+
+
+def steps(record):
+    """The values of a shot's record that say how far it has got."""
+    return tuple(
+        record[key] for key in ('compile', 'queue', 'blacs', 'lyse', 'pending')
+    )
+
+
+def is_legal(record):
+    """Whether a record's values are a combination the table of shot_status allows."""
+    compile_step, queue, blacs, lyse, pending = steps(record)
+    if queue == 'left':
+        if blacs == 'completed':
+            ok = compile_step == 'compiled' and lyse in (
+                'waiting', 'sent', 'rejected', 'not sent'
+            )
+        else:
+            ok = lyse is None
+        return ok and not pending
+    return (
+        queue in ('queued', 'blocked')
+        and lyse == 'waiting'
+        and (blacs == 'waiting' or compile_step == 'compiled')
+        and (compile_step != 'failed' or (blacs == 'waiting' and not pending))
+        and (blacs != 'rejected' or not pending)
+        and (blacs != 'cancelled' or pending)
+        and (queue != 'blocked' or not pending)
+    )
+
+
+def may_still_complete(record):
+    """Whether BLACS can still complete the shot, going by runmanager's side only."""
+    return (
+        record['queue'] == 'queued'
+        and record['compile'] != 'failed'
+        and record['blacs'] != 'rejected'
+    )
+
 
 class ShotStatusTests(RemoteCommandTestCase):
     """Whether a shot that was submitted can still produce a result.
@@ -558,11 +640,21 @@ class ShotStatusTests(RemoteCommandTestCase):
                 answer = self.request(self.client.shot_status, ['behind'])
 
                 self.assertEqual(
-                    answer['behind'],
-                    {'pending': False, 'state': BLOCKED_SHOT_STATE}
-                    if holds_up
-                    else {'pending': True, 'state': ''},
+                    (answer['behind']['queue'], answer['behind']['pending']),
+                    ('blocked', False) if holds_up else ('queued', True),
                 )
+
+    def test_the_queue_lists_each_row_as_its_status_gives_it(self):
+        # A caller reading the queue and one polling shot_status are told the
+        # same thing: a row behind a held one is not listed as queued.
+        for state in sorted(self.EXPECTED):
+            with self.subTest(state=state):
+                self.queue(('head', state), ('behind', ''))
+
+                listed = self.request(self.client.get_queue)
+                answer = self.request(self.client.shot_status, ['head', 'behind'])
+
+                self.assertEqual(listed, [answer['head'], answer['behind']])
 
     def test_a_held_row_keeps_its_state_and_deleting_it_frees_the_rows_behind(self):
         # Blocked says the queue is not moving, not that the shot behind is
@@ -570,31 +662,177 @@ class ShotStatusTests(RemoteCommandTestCase):
         # clearing it puts the work behind back to waiting its turn.
         self.queue(('head', 'rejected'), ('behind', ''))
         answer = self.request(self.client.shot_status, ['head', 'behind'])
-        self.assertEqual(answer['head']['state'], 'rejected')
+        self.assertEqual(answer['head']['blacs'], 'rejected')
         self.assertEqual(
-            answer['behind']['state'],
-            BLOCKED_SHOT_STATE,
+            answer['behind']['queue'],
+            'blocked',
             'which is what the caller polling it is told meanwhile',
         )
 
         self.app.queue_manager.delete_rows(['head'])
 
+        behind = self.request(self.client.shot_status, ['behind'])['behind']
         self.assertEqual(
-            self.request(self.client.shot_status, ['behind'])['behind'],
-            {'pending': True, 'state': ''},
+            (behind['queue'], behind['pending']),
+            ('queued', True),
             'the answer is read off the queue as it stands, so a row asked '
             'about while it was stuck is not left carrying that',
         )
 
+    def test_a_completed_shots_lyse_outcome_is_recorded_whenever_it_arrives(self):
+        # queue_exchange hands the file to lyse before the row is retired, so
+        # the outcome can arrive either side of the shot leaving the queue.
+        def lyse_and_message(shot_id):
+            record = self.request(self.client.shot_status, [shot_id])[shot_id]
+            return record['lyse'], record['message']
+
+        for shot_id, outcome_first in (('before', True), ('after', False)):
+            with self.subTest(shot_id=shot_id):
+                self.queue((shot_id, 'running'))
+                path = os.path.join(self.directory, '%s.h5' % shot_id)
+                self.app.queue_controller.expect_lyse(shot_id, path)
+                if outcome_first:
+                    self.app.queue_controller.record_lyse(path, 'rejected', 'No room.')
+                    self.assertEqual(lyse_and_message(shot_id)[0], 'waiting')
+                self.app.queue_manager.shot_finished(shot_id, 'completed', 'It ran.')
+                if not outcome_first:
+                    self.assertEqual(lyse_and_message(shot_id), ('waiting', 'It ran.'))
+                    self.app.queue_controller.record_lyse(path, 'rejected', 'No room.')
+
+                self.assertEqual(lyse_and_message(shot_id), ('rejected', 'No room.'))
+
     def test_a_shot_the_queue_no_longer_has_is_not_pending(self):
-        answer = self.request(self.client.shot_status, ['never-heard-of-it'])
+        # Told apart by how each left the queue, because a result is coming
+        # only from the shot BLACS completed.
+        self.queue(('ran', 'running'), ('deleted', ''), ('emptied', ''))
+        self.app.queue_manager.shot_finished('ran', 'completed')
+        self.app.queue_manager.delete_rows(['deleted'])
+        self.app.queue_manager.clear()
+
+        answer = self.request(
+            self.client.shot_status,
+            ['ran', 'deleted', 'emptied', 'never-heard-of-it'],
+        )
 
         self.assertEqual(
-            answer['never-heard-of-it'],
-            {'pending': False, 'state': 'unknown'},
-            'nothing more will happen to a shot with no row, and no row state '
-            'describes it -- least of all the empty one, which means waiting',
+            [steps(answer[shot_id]) for shot_id in ('ran', 'deleted', 'emptied')],
+            [
+                ('compiled', 'left', 'completed', 'waiting', False),
+                ('compiled', 'left', None, None, False),
+                ('compiled', 'left', None, None, False),
+            ],
+            'nothing more will happen to a shot with no row, and only the one '
+            'BLACS completed has a result coming',
         )
+        self.assertIsNone(
+            answer['never-heard-of-it'],
+            'runmanager answers only for the shots it has held this session',
+        )
+
+    def test_every_record_is_one_the_table_allows_whatever_became_of_the_shot(self):
+        # Four shots are taken through every end the queue has, and at each
+        # stage the records shot_status and get_queue give are checked against
+        # the table in RunmanagerClient.shot_status, and pending against
+        # whether BLACS can still complete the shot.
+        manager = self.app.queue_manager
+        ids = ['retried', 'behind', 'cancelled', 'emptied']
+        held, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def compile_run_file(labscript_file, path):
+            held.set()
+            release.wait(5)
+            return True, ''
+
+        manager.compile_run_file_callback = compile_run_file
+        since = {}
+
+        def submit(*shot_ids):
+            manager.compile_shots(
+                [
+                    {
+                        'path': os.path.join(self.directory, '%s.h5' % shot_id),
+                        'shot_id': shot_id,
+                        'compile_mode': COMPILE_MODE_EAGER,
+                        'compiled': False,
+                    }
+                    for shot_id in shot_ids
+                ],
+                True,
+                False,
+            )
+
+        def ask():
+            answer = self.request(self.client.shot_status, ids)
+            listed = self.request(self.client.get_queue)
+            for record in [record for record in answer.values() if record] + listed:
+                self.assertTrue(is_legal(record), record)
+                self.assertEqual(record['pending'], may_still_complete(record), record)
+            self.assertEqual(listed, [answer[record['shot_id']] for record in listed])
+            return answer
+
+        def expect(shot_id, *expected):
+            """The shot has just changed, and now stands like this."""
+            record = ask()[shot_id]
+            self.assertEqual(steps(record), expected)
+            self.assertGreater(record['since'], since.get(shot_id, 0))
+            since[shot_id] = record['since']
+
+        submit('retried', 'behind', 'cancelled')
+        self.assertTrue(held.wait(5), 'the first shot is compiling')
+        expect('retried', 'compiling', 'queued', 'waiting', 'waiting', True)
+        expect('behind', 'waiting', 'queued', 'waiting', 'waiting', True)
+        release.set()
+        wait_for(
+            lambda: all(
+                row['compile'] == 'compiled'
+                for row in self.app.queue_controller.get_queue()
+            )
+        )
+        expect('retried', 'compiled', 'queued', 'waiting', 'waiting', True)
+        expect('behind', 'compiled', 'queued', 'waiting', 'waiting', True)
+
+        manager.offer_next()
+        expect('retried', 'compiled', 'queued', 'running', 'waiting', True)
+        manager.shot_finished('retried', 'aborted', 'The shot aborted.')
+        expect('retried', 'compiled', 'queued', 'aborted', 'waiting', True)
+
+        manager.offer_next()
+        manager.shot_finished('retried', 'rejected', 'The shot cannot be read.')
+        expect('retried', 'compiled', 'queued', 'rejected', 'waiting', False)
+        self.assertEqual(
+            steps(ask()['behind']), ('compiled', 'blocked', 'waiting', 'waiting', False)
+        )
+
+        manager.delete_rows(['retried'])
+        expect('retried', 'compiled', 'left', 'rejected', None, False)
+        self.assertEqual(
+            steps(ask()['behind']), ('compiled', 'queued', 'waiting', 'waiting', True)
+        )
+
+        manager.offer_next()
+        manager.shot_finished('behind', 'completed', 'The shot ran.')
+        expect('behind', 'compiled', 'left', 'completed', 'waiting', False)
+        path = os.path.join(self.directory, 'behind.h5')
+        self.app.queue_controller.expect_lyse('behind', path)
+        self.app.queue_controller.record_lyse(path, 'sent', '')
+        expect('behind', 'compiled', 'left', 'completed', 'sent', False)
+
+        manager.offer_next()
+        expect('cancelled', 'compiled', 'queued', 'running', 'waiting', True)
+        manager.delete_rows(['cancelled'])
+        expect('cancelled', 'compiled', 'queued', 'cancelled', 'waiting', True)
+
+        # Emptied while it compiles, so it never reached BLACS or compiled:
+        release.clear()
+        held.clear()
+        submit('emptied')
+        self.assertTrue(held.wait(5), 'the last shot is compiling')
+        manager.clear()
+        expect('emptied', None, 'left', None, None, False)
+
+        manager.offer_next()
+        expect('cancelled', 'compiled', 'left', 'cancelled', None, False)
 
 
 class EmptyQueueTests(RemoteCommandTestCase):
@@ -687,11 +925,6 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         self.app.queue_manager.enqueue([record])
         return path
 
-    def engage(self, submission_mode):
-        return self.app.compile_and_queue_shots(
-            submission_mode, True, False, self.app.expand_pending_shots()
-        )
-
     def wait_until(self, predicate):
         for _ in range(500):
             if predicate():
@@ -703,27 +936,27 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         # That shot writes its file after the replacement is named, and then
         # deletes it, its row having gone with the Clear.
         self.enqueue('experiment_000.h5', run_no=0, n_runs=1)
-        [compiling] = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
+        [compiling] = self.app.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
         self.assertTrue(self.wait_until(self.app.queue_controller.get_compiling_paths))
         globals_file.set_field(self.app.globals_file, 'group', 'x', 'scan', '[1, 2]')
         globals_file.set_field(self.app.globals_file, 'group', 'x', 'scan_enabled', True)
         globals_file.set_field(self.app.globals_file, 'group', 'x', 'expansion', 'outer')
 
-        replacement = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE)
+        replacement = self.app.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE)
 
         self.assertEqual([record['run_no'] for record in replacement], [0, 2])
         self.assertNotIn(compiling['path'], [record['path'] for record in replacement])
 
     def test_a_join_after_a_replacement_numbers_after_both_batches(self):
         self.enqueue('experiment_000.h5', run_no=0, n_runs=1)
-        self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
-        self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE)
+        self.app.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
+        self.app.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE)
         self.app.compiling.set()
         self.assertTrue(
             self.wait_until(lambda: not self.app.queue_controller.get_compiling_paths())
         )
 
-        later = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
+        later = self.app.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
 
         self.assertEqual([record['run_no'] for record in later], [2])
 
@@ -733,8 +966,8 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         # batch is numbered after the first all the same.
         self.enqueue('experiment_007.h5')
 
-        first = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
-        second = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
+        first = self.app.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
+        second = self.app.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
 
         self.assertEqual([record['run_no'] for record in first], [8])
         self.assertEqual([record['run_no'] for record in second], [9])
@@ -748,7 +981,7 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         runmanager.make_single_run_file(sent, None, {}, self.SEQUENCE, 7, 8)
         self.app.queue_manager.set_last_sent_from_queue(sent)
 
-        records = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
+        records = self.app.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
 
         self.assertEqual(
             [record['sequence_attrs']['sequence_id'] for record in records],
@@ -761,7 +994,7 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         sent = os.path.join(self.directory, 'experiment_007.h5')
         self.app.queue_manager.set_last_sent_from_queue(sent, dict(self.SEQUENCE))
 
-        records = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
+        records = self.app.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
 
         self.assertFalse(os.path.exists(sent), 'there was no file to read')
         self.assertEqual(
@@ -773,9 +1006,9 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         # "Last sequence" is the one submitted last, compiled or not: its rows
         # are in the queue from the moment it is submitted.
         self.enqueue('experiment_007.h5')
-        engaged = self.engage(main_module.SUBMISSION_MODE_NEW_SEQUENCE)
+        engaged = self.app.engage(main_module.SUBMISSION_MODE_NEW_SEQUENCE)
 
-        added = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
+        added = self.app.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
 
         self.assertEqual(
             added[0]['sequence_attrs']['sequence_id'],
@@ -783,7 +1016,7 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         )
 
     def test_adding_to_nothing_at_all_starts_a_sequence(self):
-        records = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
+        records = self.app.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
 
         self.assertEqual(
             [record['sequence_attrs']['sequence_index'] for record in records],
@@ -793,7 +1026,7 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         )
 
     def test_replacing_nothing_at_all_starts_a_sequence(self):
-        records = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE)
+        records = self.app.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE)
 
         self.assertEqual(
             [record['sequence_attrs']['sequence_index'] for record in records],
@@ -810,7 +1043,7 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
             lambda: answers.pop(0) if answers else None
         )
 
-        records = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
+        records = self.app.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
 
         self.assertEqual(
             [record['sequence_attrs']['sequence_id'] for record in records],
@@ -830,7 +1063,7 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
             sequence_attrs=dict(self.SEQUENCE, sequence_id='20260918T140000_experiment'),
         )
 
-        records = self.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE)
+        records = self.app.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE)
 
         self.assertEqual(
             [record['sequence_attrs']['sequence_id'] for record in records],
@@ -870,14 +1103,6 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
             [receipt['shot_id'] for receipt in receipts],
             'and the queue lists those shots and nothing it replaced',
         )
-
-    def test_a_remote_engage_in_an_alternate_mode_needs_blacs_ticked(self):
-        self.app.ui.checkBox_run_shots.isChecked = lambda: False
-
-        with self.assertRaises(ValueError):
-            self.request(self.client.engage, SUBMISSION_MODE_LAST_SEQUENCE)
-
-        self.assertEqual(self.app.batches, [], 'and nothing was made')
 
 
 class ShuffledEngageTests(RemoteCommandTestCase):
@@ -1007,13 +1232,13 @@ class CompileErrorTests(RemoteCommandTestCase):
     def test_a_shot_that_fails_to_compile_lists_its_error_in_the_queue(self):
         [receipt] = self.request(self.client.engage)
         wait_for(
-            lambda: self.app.queue_controller.get_queue()[0]['state'] == 'compile_failed'
+            lambda: self.app.queue_controller.get_queue()[0]['compile'] == 'failed'
         )
 
         [row] = self.request(self.client.get_queue)
 
         self.assertEqual(row['shot_id'], receipt['shot_id'])
-        self.assertEqual(row['state'], 'compile_failed')
+        self.assertEqual(row['compile'], 'failed')
         self.assertIn(self.ERROR, row['message'])
 
     def test_a_test_compile_answers_with_the_error_and_queues_nothing(self):
@@ -1023,7 +1248,6 @@ class CompileErrorTests(RemoteCommandTestCase):
         stored = sorted(os.listdir(self.directory))
 
         answer = self.request(self.client.test_compile)
-        self.addCleanup(os.remove, answer['path'])
 
         self.assertEqual(answer['success'], False)
         self.assertEqual(answer['error'], self.ERROR)
@@ -1036,21 +1260,6 @@ class CompileErrorTests(RemoteCommandTestCase):
             stored,
             'and no sequence was claimed and no output folder touched',
         )
-
-
-class AnalyseShotsTests(RemoteCommandTestCase):
-    """The lyse checkbox, read and set by a remote caller."""
-
-    def setUp(self):
-        super().setUp()
-        self.app.analysis_submission = AnalysisSubmission(load_main_ui())
-        self.addCleanup(stop_submission, self.app.analysis_submission)
-
-    def test_the_checkbox_reads_back_what_was_set(self):
-        for value in (True, False):
-            self.request(self.client.set_analyse_shots, value)
-
-            self.assertEqual(self.request(self.client.get_analyse_shots), value)
 
 
 class PreparsingApp(FakeApp):

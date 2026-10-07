@@ -17,22 +17,29 @@ SUBMISSION_MODE_NEW_SEQUENCE = 'new_sequence'
 SUBMISSION_MODE_LAST_SEQUENCE = 'last_sequence'
 SUBMISSION_MODE_NEW_SEQUENCE_CLEAR_QUEUE = 'new_sequence_clear_queue'
 SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE = 'last_sequence_clear_queue'
+# The values of each step in a shot's record. See shot_status():
+COMPILE_WAITING = 'waiting'
+COMPILE_COMPILING = 'compiling'
+COMPILE_COMPILED = 'compiled'
+COMPILE_FAILED = 'failed'
+QUEUE_QUEUED = 'queued'
+QUEUE_BLOCKED = 'blocked'
+QUEUE_LEFT = 'left'
+BLACS_WAITING = 'waiting'
+BLACS_RUNNING = 'running'
+BLACS_COMPLETED = 'completed'
+BLACS_ABORTED = 'aborted'
+BLACS_FAILED = 'failed'
+BLACS_REJECTED = 'rejected'
+BLACS_CANCELLED = 'cancelled'
+LYSE_WAITING = 'waiting'
+LYSE_SENT = 'sent'
+LYSE_REJECTED = 'rejected'
+LYSE_NOT_SENT = 'not sent'
 # How BLACS may say a shot it was offered turned out. Every one but 'completed'
 # leaves the row at the head of the queue in red; see shot_finished() in
 # queueing.py:
-SHOT_OUTCOME_STATUSES = ('completed', 'aborted', 'failed', 'rejected')
-# What a row the queue would hand over is answered with while a row it will
-# not hand over sits in front of it. Only the head is ever offered, so such a
-# row is not going anywhere either, and the empty state it is in would read as
-# work about to be done.
-BLOCKED_SHOT_STATE = 'blocked'
-# What a shot id with no row in the queue is answered with. Not the empty
-# state, which a row waiting its turn has.
-UNKNOWN_SHOT_STATE = 'unknown'
-# What get_queue calls a row in the empty state while its shot compiles.
-COMPILING_SHOT_STATE = 'compiling'
-# What get_queue calls a row in the empty state while it waits its turn.
-QUEUED_SHOT_STATE = 'queued'
+SHOT_OUTCOME_STATUSES = (BLACS_COMPLETED, BLACS_ABORTED, BLACS_FAILED, BLACS_REJECTED)
 
 
 class SequenceRefused(ValueError):
@@ -63,9 +70,40 @@ class RunmanagerClient(ZMQClient):
         the evaluated Python values."""
         return self.request('get_globals', raw=raw)
 
-    def set_values(self, globals, raw=False):
-        """Set Default expressions for active globals."""
-        return self.request('set_values', globals, raw=raw)
+    def set_values(self, globals, raw=False, skip_missing=False):
+        """Set Default expressions for active globals.
+
+        A comment the stored expression ends with is kept, unless the new one
+        has its own.
+
+        Parameters
+        ----------
+        globals : dict
+            ``{global_name: value}``. Nothing is written if any is refused.
+        raw : bool
+            If True, each value is a string, the expression to store. Otherwise
+            the ``repr`` of each value is stored.
+        skip_missing : bool
+            If True, a name in no active group is skipped and the others are
+            written. Otherwise it is refused.
+
+        Returns
+        -------
+        list of str
+            The names skipped for being in no active group, in the order
+            given. Always empty unless ``skip_missing`` is True.
+
+        Raises
+        ------
+        ValueError
+            For a name in no active group while ``skip_missing`` is False, or
+            one in a legacy HDF5 globals file.
+        TypeError
+            For a value that is not a string while ``raw`` is True.
+        RuntimeError
+            For a name defined in more than one active group.
+        """
+        return self.request('set_values', globals, raw=raw, skip_missing=skip_missing)
 
     def get_scans(self, raw=False):
         """Return all active globals' Scan values.
@@ -74,9 +112,30 @@ class RunmanagerClient(ZMQClient):
         evaluated Python values."""
         return self.request('get_scans', raw=raw)
 
-    def set_scans(self, globals, raw=False):
-        """Set Scan expressions for active globals."""
-        return self.request('set_scans', globals, raw=raw)
+    def set_scans(self, globals, raw=False, skip_missing=False):
+        """Set Scan expressions for active globals.
+
+        Parameters
+        ----------
+        globals : dict
+            ``{global_name: value}``, as for ``set_values``.
+        raw : bool
+            As for ``set_values``.
+        skip_missing : bool
+            As for ``set_values``.
+
+        Returns
+        -------
+        list of str
+            The names skipped for being in no active group, as ``set_values``
+            returns them.
+
+        Raises
+        ------
+        ValueError, TypeError, RuntimeError
+            As ``set_values`` raises them.
+        """
+        return self.request('set_scans', globals, raw=raw, skip_missing=skip_missing)
 
     def get_scan_enabled(self):
         """Return all active globals' Scan? state."""
@@ -102,7 +161,10 @@ class RunmanagerClient(ZMQClient):
         checkboxes say; ``n_shots`` says how many there will be. Answers once
         the batch is made, before its shots compile, so each ``path`` is where
         a file will be written and not a file that is there yet. With 'BLACS'
-        unticked the shots are not queued, and ``get_queue`` does not list them.
+        unticked the shots are not queued, so ``get_queue`` does not list them,
+        ``shot_status`` answers ``None`` for them and a compile error
+        reaches only the output box. ``test_compile`` is how to check that a
+        script compiles.
 
         Parameters
         ----------
@@ -119,10 +181,14 @@ class RunmanagerClient(ZMQClient):
                 sent to BLACS, and is a sequence of its own if there is neither.
             ``SUBMISSION_MODE_NEW_SEQUENCE_CLEAR_QUEUE``
                 "Empty queue, then add shots to new sequence": the queued shots
-                BLACS is not running are deleted first.
+                not yet sent to BLACS are deleted first. Running, failed,
+                rejected and cancelled rows are kept.
             ``SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE``
-                "Empty queue, then add shots to last sequence": the same, with
-                the batch added to the last sequence.
+                "Empty queue, then add shots to last sequence": the queue is
+                emptied in the same way, and the batch is added to the sequence
+                of the shot last sent to BLACS or, if none has been sent, of the
+                last shot queued, and is a sequence of its own if there is
+                neither.
 
         Returns
         -------
@@ -134,20 +200,20 @@ class RunmanagerClient(ZMQClient):
         Raises
         ------
         ValueError
-            For a ``submission_mode`` that is not one of these, and for any
-            but the first while 'BLACS' is unticked, since the others are about
-            the queue.
+            For a ``submission_mode`` that is not one of these, for any but the
+            first while 'BLACS' is unticked, since the others are about the
+            queue, and when there is no labscript file or output folder, or the
+            globals cannot be evaluated or expand into no shots.
         Exception
-            Whatever the window reports when it cannot engage, such as no
-            labscript file, no output folder, or globals that cannot be
-            evaluated.
+            Whatever else stops the batch being made.
         """
         return self.request('engage', submission_mode)
 
     def abort(self):
         """Empty runmanager's queue, as its Empty queue button does.
 
-        A shot BLACS has is kept."""
+        The shots not yet sent to BLACS are deleted. Running, failed, rejected
+        and cancelled rows are kept."""
         return self.request('abort')
 
     def get_run_shots(self):
@@ -271,9 +337,11 @@ class RunmanagerClient(ZMQClient):
         evaluated sets no global, and one refused as it is queued is left at
         its last entry; either way nothing is queued and nothing runs.
 
-        The Scan? and JIT? boxes of the globals an entry names are the
-        caller's to manage, through get_scan_enabled, set_scan_enabled,
-        get_jit_enabled and set_jit_enabled."""
+        An entry naming a global whose Scan? or JIT? box is ticked is refused
+        too, with a ValueError that names the globals: the shot would run the
+        scan, or a value read at compile time, and not the one submitted. The
+        boxes are the caller's to manage, through get_scan_enabled,
+        set_scan_enabled, get_jit_enabled and set_jit_enabled."""
         return self.request(
             'submit_shots',
             list(entries),
@@ -282,22 +350,117 @@ class RunmanagerClient(ZMQClient):
         )
 
     def shot_status(self, shot_ids):
-        """Whether each of these shots can still produce a result.
+        """Say how far each of these shots has got, step by step.
 
-        Answers ``{shot_id: {'pending': bool, 'state': str}}``, one entry per
-        id asked about. ``pending`` is false once nothing further will happen
-        to that shot -- it completed and left the queue, or it is held waiting
-        on an operator. A shot cancelled while BLACS has it is pending until
-        BLACS is done with it, as it can still complete.
+        A shot is compiled, queued, run by BLACS and, once BLACS completes it,
+        analysed by lyse. Its record says where it stands in each of those
+        steps. Reads only: nothing is consumed by asking, so the same ids can
+        be asked about as often as wanted.
 
-        ``state`` is the queue row's own state, for a human reading a log,
-        plus one answer no row is ever in: ``'blocked'`` is a row runmanager
-        would hand over sitting behind one it will not, which is not pending
-        until an operator moves what is in front of it. An id runmanager
-        knows nothing of at all is reported as ``'unknown'``.
+        Parameters
+        ----------
+        shot_ids : list of str
+            The ``shot_id`` of each shot to ask about, as ``submit_shots`` and
+            ``engage`` return it.
 
-        Reads only: nothing is consumed by asking, so the same ids can be asked
-        about as often as wanted."""
+        Returns
+        -------
+        dict
+            ``{shot_id: record}``, one entry per id asked about. ``record`` is
+            ``None`` for an id runmanager has no record of, including a shot
+            that left the queue before runmanager last restarted: what it
+            remembers of departed shots is not saved. A shot still queued when
+            the queue was saved with the front panel at shutdown is restored
+            after the restart, with its BLACS and lyse progress reset:
+            ``compile`` is ``'compiled'`` or ``'waiting'``, and ``blacs`` and
+            ``lyse`` are ``'waiting'``. Every record that is not ``None``,
+            restored ones included, is a dict with these keys, whose
+            ``compile``, ``queue``, ``blacs`` and ``lyse`` values are this
+            module's ``COMPILE_*``, ``QUEUE_*``, ``BLACS_*`` and ``LYSE_*``
+            constants:
+
+            ``shot_id``, ``sequence_id``, ``sequence_index``, ``run_number``, ``path``
+                As ``submit_shots`` returns them.
+            ``compile``
+                ``'waiting'``, ``'compiling'``, ``'compiled'`` or ``'failed'``.
+                A shot that fails to compile stays in the queue and holds up
+                the shots behind it until an operator deletes it or asks for
+                another compile. ``None`` for a shot that left the queue
+                without having compiled or failed to compile.
+            ``queue``
+                ``'queued'`` while the shot is in the queue, including a shot
+                that itself holds the queue up. ``'blocked'`` when it is in the
+                queue behind a shot only an operator can clear, one whose
+                ``blacs`` is ``'rejected'`` or whose ``compile`` is
+                ``'failed'``, so that it is not offered to BLACS until they do.
+                ``'left'`` once it is no longer in the queue.
+            ``blacs``
+                ``'waiting'`` for a shot not yet offered to BLACS, and
+                ``'running'`` once it is offered and BLACS has reported no
+                outcome. Then ``'completed'``, or ``'aborted'`` or ``'failed'``
+                when BLACS reported that it did not complete, after which it is
+                offered again, or ``'rejected'`` when BLACS could not read it,
+                which holds the queue up until an operator clears it. A shot
+                deleted while BLACS had it is ``'cancelled'``: it is not
+                offered again, but BLACS may still complete it. A shot that
+                left keeps the last of these it had, and is ``None`` if it was
+                never offered.
+            ``lyse``
+                What runmanager did with a completed shot's file; it never
+                hears back from lyse about the analysis. ``None`` for a shot
+                that left without BLACS completing it, which lyse never gets.
+                Otherwise:
+
+                ``'waiting'``
+                    Not handed to lyse yet, including while lyse does not
+                    answer and runmanager will retry. Always so in the queue.
+                ``'sent'``
+                    lyse took the file.
+                ``'rejected'``
+                    lyse answered and refused the file; ``message`` is its
+                    reason.
+                ``'not sent'``
+                    Runmanager will not send it, because Analyse was off when
+                    the shot completed, or the shot was cleared while waiting
+                    (the Clear button, or unticking Analyse).
+            ``pending``
+                Whether the shot may still reach ``blacs`` ``'completed'``, as
+                far as runmanager can tell, and nothing about lyse. True for a
+                shot the queue would still hand over to BLACS, and for a
+                ``'cancelled'`` one, which BLACS may still complete. False for
+                a ``'blocked'`` shot, a shot waiting on an operator and every
+                shot that has left.
+            ``since``
+                ``time.time()`` of the latest change to the shot's ``compile``,
+                ``blacs``, ``lyse`` or ``message``, or of its leaving the
+                queue. It does not move when another shot's change blocks or
+                unblocks this one.
+            ``message``
+                Why the shot last changed: what BLACS said of its outcome, the
+                compile's error, why it left the queue, or why ``lyse`` is
+                ``'rejected'`` or ``'not sent'``. ``''`` if none.
+
+        Notes
+        -----
+        Only some combinations of these values occur. A shot is in the queue
+        when ``queue`` is ``'queued'`` or ``'blocked'``, and has left when it
+        is ``'left'``:
+
+        ========  ======================  =============================================
+        Where     When                    Then
+        ========  ======================  =============================================
+        in queue  always                  lyse 'waiting'
+        in queue  blacs not 'waiting'     compile 'compiled'
+        in queue  compile 'failed'        blacs 'waiting', pending False
+        in queue  blacs 'rejected'        pending False
+        in queue  blacs 'cancelled'       pending True
+        in queue  queue 'blocked'         pending False
+        left      always                  pending False
+        left      blacs 'completed'       compile 'compiled'; lyse 'waiting', 'sent',
+                                          'rejected' or 'not sent'
+        left      blacs not 'completed'   lyse None
+        ========  ======================  =============================================
+        """
         return self.request('shot_status', list(shot_ids))
 
     def get_queue(self):
@@ -310,17 +473,8 @@ class RunmanagerClient(ZMQClient):
         Returns
         -------
         list of dict
-            One dict per queue row. ``shot_id``, ``sequence_id``,
-            ``sequence_index``, ``run_number`` and ``path`` are as
-            ``submit_shots`` and ``engage`` return them. ``state`` is the row's
-            own state: ``'running'`` once BLACS has been offered the shot;
-            ``'failed'`` when BLACS reported that it did not complete, and it
-            will be offered again; ``'rejected'`` and ``'compile_failed'`` when
-            it waits on an operator, holding up the rows behind it;
-            ``'cancelled'`` when it was deleted while BLACS had it. A row in
-            none of these is ``'compiling'`` while its shot compiles and
-            ``'queued'`` while it waits its turn. ``message`` is the reason a
-            row gives for being in its state, and empty when it gives none.
+            The record ``shot_status`` gives for each shot in the queue, in
+            queue order.
         """
         return self.request('get_queue')
 
@@ -328,26 +482,28 @@ class RunmanagerClient(ZMQClient):
         """Compile the first shot of the window's globals, and queue nothing.
 
         Compiles the shot Engage would make first, from the globals, scans and
-        shuffle as they stand, into a scratch .h5 file in the operating
-        system's temporary folder, which the operating system cleans up. It
-        queues nothing, claims no sequence and touches no output folder, so it
-        can be repeated freely to see whether a labscript file compiles.
-        Answers only once the compile finishes, so the client's timeout has to
-        outlast it; meanwhile runmanager answers no other remote request.
+        shuffle as they stand, into a scratch .h5 file that each test compile
+        overwrites and that is removed when runmanager exits. It queues
+        nothing, claims no sequence and touches no output folder, so it can be
+        repeated freely to see whether a labscript file compiles. Answers only
+        once the compile finishes, so the client's timeout has to outlast it;
+        meanwhile runmanager answers no other remote request.
 
         Returns
         -------
         dict
             ``{'success': bool, 'error': str, 'path': str}``. ``error`` is ''
             on success and the compile's traceback otherwise, and ``path`` is
-            the compiled shot file.
+            the compiled shot file, which stays valid until the next
+            ``test_compile``.
 
         Raises
         ------
         ValueError
-            When no labscript file is selected.
+            When no labscript file is selected, or the globals cannot be
+            evaluated or expand into no shots.
         Exception
-            Whatever stops the globals being expanded.
+            Whatever else stops the globals being expanded.
         """
         return self.request('test_compile')
 
