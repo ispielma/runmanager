@@ -2184,7 +2184,7 @@ class RunManager(LabscriptApplication):
             output=self.output_box.output,
         )
         self.setup_queue_tab()
-        self.analysis_submission = AnalysisSubmission(self.ui)
+        self.analysis_submission = AnalysisSubmission(self.ui, self.queue_controller.record_lyse)
         # The three destination checkboxes wear their applications' logos, which
         # tell them apart faster than their names do.
         set_icon_label_pixmap(
@@ -5209,6 +5209,9 @@ class RunManager(LabscriptApplication):
             if queued_path:
                 agnostic_path = shared_drive.path_to_agnostic(queued_path)
         if agnostic_path:
+            self.queue_controller.expect_lyse(
+                shot_id, shared_drive.path_to_local(agnostic_path)
+            )
             self.analysis_submission.notify_shot_complete(agnostic_path)
         record = self.queue_manager.shot_finished(shot_id, status, message)
         if record is None:

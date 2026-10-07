@@ -633,6 +633,33 @@ class ShotStatusTests(RemoteCommandTestCase):
             'about while it was stuck is not left carrying that',
         )
 
+    def test_a_completed_shots_lyse_outcome_is_recorded_whenever_it_arrives(self):
+        # queue_exchange hands the file to lyse before the row is retired, so
+        # the outcome can arrive either side of the shot leaving the queue. And
+        # BLACS may have run a fresh copy, which is the file lyse is given.
+        def lyse_and_message(shot_id):
+            record = self.request(self.client.shot_status, [shot_id])[shot_id]
+            return record['lyse'], record['message']
+
+        for shot_id, outcome_first, file in (
+            ('before', True, 'before.h5'),
+            ('after', False, 'after.h5'),
+            ('copy', False, 'copy_run_1.h5'),
+        ):
+            with self.subTest(shot_id=shot_id):
+                self.queue((shot_id, 'running'))
+                path = os.path.join(self.directory, file)
+                self.app.queue_controller.expect_lyse(shot_id, path)
+                if outcome_first:
+                    self.app.queue_controller.record_lyse(path, 'rejected', 'No room.')
+                    self.assertEqual(lyse_and_message(shot_id)[0], 'waiting')
+                self.app.queue_manager.shot_finished(shot_id, 'completed', 'It ran.')
+                if not outcome_first:
+                    self.assertEqual(lyse_and_message(shot_id), ('waiting', 'It ran.'))
+                    self.app.queue_controller.record_lyse(path, 'rejected', 'No room.')
+
+                self.assertEqual(lyse_and_message(shot_id), ('rejected', 'No room.'))
+
     def test_a_shot_the_queue_no_longer_has_is_not_pending(self):
         # Told apart by how each left the queue, because a result is coming
         # only from the shot BLACS completed.
@@ -745,6 +772,10 @@ class ShotStatusTests(RemoteCommandTestCase):
         manager.offer_next()
         manager.shot_finished('behind', 'completed', 'The shot ran.')
         expect('behind', 'compiled', 'left', 'completed', 'waiting', False)
+        path = os.path.join(self.directory, 'behind.h5')
+        self.app.queue_controller.expect_lyse('behind', path)
+        self.app.queue_controller.record_lyse(path, 'sent', '')
+        expect('behind', 'compiled', 'left', 'completed', 'sent', False)
 
         manager.offer_next()
         expect('cancelled', 'compiled', 'queued', 'running', 'waiting', True)

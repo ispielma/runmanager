@@ -325,11 +325,23 @@ class RunmanagerClient(ZMQClient):
                 left keeps the last of these it had, and is ``None`` if it was
                 never offered.
             ``lyse``
-                ``'waiting'`` for every shot in the queue and for a shot BLACS
-                completed whose submission to lyse is still to be settled, then
-                ``'sent'``, ``'rejected'`` or ``'not sent'``. ``None`` for a
-                shot that left without BLACS completing it, which lyse never
-                gets.
+                What runmanager did with a completed shot's file; it never
+                hears back from lyse about the analysis. ``None`` for a shot
+                that left without BLACS completing it, which lyse never gets.
+                Otherwise:
+
+                ``'waiting'``
+                    Not handed to lyse yet, including while lyse does not
+                    answer and runmanager will retry. Always so in the queue.
+                ``'sent'``
+                    lyse took the file.
+                ``'rejected'``
+                    lyse answered and refused the file; ``message`` is its
+                    reason.
+                ``'not sent'``
+                    Runmanager will not send it, because Analyse was off when
+                    the shot completed, or the shot was cleared while waiting
+                    (the Clear button, or unticking Analyse).
             ``pending``
                 Whether the shot may still reach ``blacs`` ``'completed'``, as
                 far as runmanager can tell, and nothing about lyse. True for a
@@ -344,7 +356,8 @@ class RunmanagerClient(ZMQClient):
                 unblocks this one.
             ``message``
                 Why the shot last changed: what BLACS said of its outcome, the
-                compile's error, or why it left the queue. ``''`` if none.
+                compile's error, why it left the queue, or why ``lyse`` is
+                ``'rejected'`` or ``'not sent'``. ``''`` if none.
 
         Notes
         -----

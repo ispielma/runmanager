@@ -65,7 +65,8 @@ TINTED_ROW_FOREGROUND = QtGui.QColor('#202020')
 # What a shot record says about this session's attempt at it rather than about
 # the shot: assigned by _normalise_item, and left out of a saved queue:
 SESSION_ONLY_FIELDS = (
-    'compiling', 'state', 'message', 'reclaimed', 'since', 'blacs_outcome'
+    'compiling', 'state', 'message', 'reclaimed', 'since', 'blacs_outcome',
+    'lyse', 'lyse_message',
 )
 
 
@@ -279,6 +280,10 @@ class QueueController(object):
         # The record of each shot that left the queue this session, as it was
         # when it left.
         self._departed = {}
+        # {local path: shot id} of each file handed to lyse and not yet settled.
+        # BLACS may have run a fresh copy, so the path lyse is given is not
+        # always the row's.
+        self._lyse_paths = {}
         # Whether or not their rows are still queued: a compile that finishes
         # after its row has gone writes its file and then deletes it.
         self._compiling_paths = set()
@@ -347,6 +352,10 @@ class QueueController(object):
         # when the row last changed, for shot_status.
         record['blacs_outcome'] = ''
         record['since'] = time.time()
+        # What runmanager did with the file for lyse, once BLACS completes the
+        # shot; see record_lyse(). It stays 'waiting' in the queue:
+        record['lyse'] = 'waiting'
+        record['lyse_message'] = ''
         return record
 
     def set_empty_queue_policy(self, value):
@@ -529,6 +538,32 @@ class QueueController(object):
                 yield self._record(item, 'blocked', False)
             else:
                 yield self._record(item, 'queued', True)
+
+    def expect_lyse(self, shot_id, path):
+        """Note that this shot's file is being handed to lyse as ``path``."""
+        with self._lock:
+            self._lyse_paths[os.path.abspath(path)] = shot_id
+
+    def record_lyse(self, path, lyse, message):
+        """Record what runmanager did with a completed shot's file for lyse.
+
+        Called from the analysis submission's thread or the GUI thread, for a
+        path given to expect_lyse. The file is handed over before the row is
+        retired, so the outcome can arrive either side of that: a queued row
+        keeps it for when it leaves, and a record that has left takes it. Each
+        outcome is final, so the path is forgotten with it."""
+        with self._lock:
+            shot_id = self._lyse_paths.pop(os.path.abspath(path), None)
+            if shot_id is None:
+                return
+            for item in self._items:
+                if item['shot_id'] == shot_id:
+                    item['lyse'] = lyse
+                    item['lyse_message'] = message
+                    return
+            record = self._departed.get(shot_id)
+            if record is not None and record['blacs'] == 'completed':
+                record.update(lyse=lyse, message=message, since=time.time())
 
     def get_shot_statuses(self, shot_ids):
         """Give the record of each of these shot ids, as ``shot_status`` does.
@@ -874,7 +909,10 @@ class QueueController(object):
                         message=message,
                     )
                     if status == 'completed':
-                        departed.update(compile='compiled', lyse='waiting')
+                        departed.update(compile='compiled', lyse=item['lyse'])
+                        # The latest change to the shot is what its message says:
+                        if item['lyse'] != 'waiting':
+                            departed['message'] = item['lyse_message']
                     self._departed[shot_id] = departed
                     return self._items.pop(index)
                 state = 'rejected' if status == 'rejected' else 'failed'
