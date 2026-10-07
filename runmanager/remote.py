@@ -22,8 +22,6 @@ get_run_shots = _default_client.get_run_shots
 set_run_shots = _default_client.set_run_shots
 get_view_shots = _default_client.get_view_shots
 set_view_shots = _default_client.set_view_shots
-get_analyse_shots = _default_client.get_analyse_shots
-set_analyse_shots = _default_client.set_analyse_shots
 get_shuffle = _default_client.get_shuffle
 set_shuffle = _default_client.set_shuffle
 n_shots = _default_client.n_shots
@@ -35,8 +33,6 @@ error_in_globals = _default_client.error_in_globals
 is_output_folder_default = _default_client.is_output_folder_default
 reset_shot_output_folder = _default_client.reset_shot_output_folder
 shot_status = _default_client.shot_status
-get_queue = _default_client.get_queue
-test_compile = _default_client.test_compile
 submit_shots = _default_client.submit_shots
 queue_exchange = _default_client.queue_exchange
 

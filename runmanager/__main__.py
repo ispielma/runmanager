@@ -105,6 +105,7 @@ from runmanager.queueing import (
     QueueController,
     QueueManager,
     RunmanagerQueueWidget,
+    shot_receipt,
 )
 
 from qtutils import (
@@ -2144,6 +2145,10 @@ class RunManager(LabscriptApplication):
         # queue manager starts its worker thread, as that thread compiles
         # shots via self.compile_run_file():
         self.compiler_lock = threading.Lock()
+        # One file, overwritten by each test compile; the directory is removed on exit.
+        self.test_compile_dir = tempfile.TemporaryDirectory(
+            prefix='runmanager_test_compile_'
+        )
         # Each sequence made or added to here, by (sequence_id, sequence_index), as
         # two started in the same second share an id: its newest shot's path,
         # attributes, next run number and name format. In memory, lost on restart.
@@ -2874,28 +2879,7 @@ class RunManager(LabscriptApplication):
         logger.info('end engage')
 
     def engage(self, submission_mode=SUBMISSION_MODE_NEW_SEQUENCE):
-        """Compile the shots the window's globals expand into, and queue them.
-
-        What the Engage button does, and what a remote caller's engage does.
-
-        Parameters
-        ----------
-        submission_mode : str
-            A key of ``SUBMISSION_MODES``: how the batch joins the queue.
-
-        Returns
-        -------
-        list of dict
-            The queue records of the batch, in the order the shots were made.
-
-        Raises
-        ------
-        ValueError
-            For a submission mode that is not known, and for an alternate one
-            while 'BLACS' is not ticked.
-        Exception
-            Whatever stops the batch being made, such as no labscript file.
-        """
+        """Make the batch the Engage button makes, returning its queue records."""
         if submission_mode not in SUBMISSION_MODES:
             raise ValueError(f'Unknown submission mode {submission_mode!r}.')
         send_to_BLACS = self.ui.checkBox_run_shots.isChecked()
@@ -2929,7 +2913,7 @@ class RunManager(LabscriptApplication):
         The shuffle button reorders the pairs, which is the only place
         anything is reordered: everything downstream makes the batch in the
         order it is given."""
-        active_groups = self.get_active_groups()
+        active_groups = self.get_active_groups(interactive=False)
         # Get ordering of expansion globals
         expansion_order = {}
         for i in range(self.axes_model.rowCount()):
@@ -2943,7 +2927,7 @@ class RunManager(LabscriptApplication):
                 active_groups, expansion_order=expansion_order
             )
         except Exception as e:
-            raise Exception('Error parsing globals:\n%s\nCompilation aborted.' % str(e))
+            raise ValueError(f'The globals could not be evaluated: {e}') from e
         globals_details = runmanager.globals_file.get_globals_details(active_groups)
         pending = [
             (
@@ -2952,6 +2936,8 @@ class RunManager(LabscriptApplication):
             )
             for shot_globals in shots
         ]
+        if not pending:
+            raise ValueError('The globals expand into no shots.')
         if self.ui.pushButton_shuffle.checkState() == QtCore.Qt.Checked:
             # Globals are shuffled one expansion at a time as they are
             # expanded, so even with every one of them shuffled the batch is
@@ -2988,10 +2974,10 @@ class RunManager(LabscriptApplication):
         indexed_path_base = self.get_submission_anchor(submission_mode)
         labscript_file = self.ui.lineEdit_labscript_file.text()
         if not labscript_file:
-            raise Exception('Error: No labscript file selected')
+            raise ValueError('No labscript file is selected.')
         output_folder = self.ui.lineEdit_shot_output_folder.text()
         if not output_folder:
-            raise Exception('Error: No output folder selected')
+            raise ValueError('No output folder is selected.')
         active_groups = self.get_active_groups()
         index_start = None
         sequence_attrs = None
@@ -4619,41 +4605,28 @@ class RunManager(LabscriptApplication):
         return success, error
 
     def test_compile(self):
-        """Compile the first shot of the window's globals, queueing nothing.
-
-        Runs on the server thread, so the window is read through ``inmain``.
-        The shot is written to a scratch file in the OS's temporary folder.
-
-        Returns
-        -------
-        dict
-            ``{'success', 'error', 'path'}``: whether it compiled, the
-            compile's traceback if not, and the scratch file.
-
-        Raises
-        ------
-        ValueError
-            If no labscript file is selected.
-        """
+        """Compile the window's first shot into a scratch file, queueing nothing."""
         labscript_file = inmain(self.ui.lineEdit_labscript_file.text)
         if not labscript_file:
-            raise ValueError('No labscript file selected.')
+            raise ValueError('No labscript file is selected.')
         active_groups = inmain(self.get_active_groups, interactive=False)
         _, frozen = inmain(self.expand_pending_shots)[0]
-        sequence_globals, run_globals = runmanager.get_queue_compile_globals(
-            active_groups, frozen
-        )
         # Claims no sequence index, which the next real sequence keeps:
         sequence_attrs, _, _ = runmanager.new_sequence_details(
             labscript_file, config=self.exp_config, increment_sequence_index=False
         )
-        fd, path = tempfile.mkstemp(prefix='runmanager_test_compile_', suffix='.h5')
-        os.close(fd)
-        runmanager.make_single_run_file(
-            path, sequence_globals, run_globals, sequence_attrs, 0, 1
-        )
-        success, error = self.compile_run_file(labscript_file, path)
-        return {'success': success, 'error': error, 'path': path}
+        record = {
+            'path': os.path.join(self.test_compile_dir.name, 'test_compile.h5'),
+            'labscript_file': labscript_file,
+            'active_groups': active_groups,
+            'frozen_globals': frozen,
+            'sequence_attrs': sequence_attrs,
+            'run_no': 0,
+            'n_runs': 1,
+            'send_to_runviewer': False,
+        }
+        success, error = self.queue_manager.compile_shot(record)
+        return {'success': success, 'error': error, 'path': record['path']}
 
     def parse_globals(self, active_groups, raise_exceptions=True, expand_globals=True, expansion_order = None, return_dimensions = False):
         sequence_globals = runmanager.get_globals(active_groups)
@@ -5355,17 +5328,6 @@ class RunManager(LabscriptApplication):
             'shot_id': item['shot_id'],
             'path': agnostic_path,
         }
-
-
-def shot_receipt(record):
-    """What a remote caller is told about a shot it submitted."""
-    return {
-        'shot_id': record['shot_id'],
-        'sequence_id': record['sequence_attrs']['sequence_id'],
-        'sequence_index': record['sequence_attrs']['sequence_index'],
-        'run_number': record['run_no'],
-        'path': record['path'],
-    }
 
 
 class RunmanagerServer(ZMQServer):

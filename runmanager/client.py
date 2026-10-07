@@ -30,8 +30,9 @@ BLOCKED_SHOT_STATE = 'blocked'
 COMPLETED_SHOT_STATE = 'completed'
 # What a shot that left the queue without completing is answered with.
 REMOVED_SHOT_STATE = 'removed'
-# What a shot id that never had a row this session is answered with. Not the
-# empty state, which a row waiting its turn has.
+# What an id the queue has not held since runmanager started is answered with:
+# one never queued, such as a shot engaged with 'BLACS' unticked, or one from
+# before a restart. Not the empty state, which a row waiting its turn has.
 UNKNOWN_SHOT_STATE = 'unknown'
 # What get_queue calls a row in the empty state while its shot compiles.
 COMPILING_SHOT_STATE = 'compiling'
@@ -106,7 +107,10 @@ class RunmanagerClient(ZMQClient):
         checkboxes say; ``n_shots`` says how many there will be. Answers once
         the batch is made, before its shots compile, so each ``path`` is where
         a file will be written and not a file that is there yet. With 'BLACS'
-        unticked the shots are not queued, and ``get_queue`` does not list them.
+        unticked the shots are not queued, so ``get_queue`` does not list them,
+        ``shot_status`` answers ``'unknown'`` for them and a compile error
+        reaches only the output box. ``test_compile`` is how to check that a
+        script compiles.
 
         Parameters
         ----------
@@ -123,10 +127,14 @@ class RunmanagerClient(ZMQClient):
                 sent to BLACS, and is a sequence of its own if there is neither.
             ``SUBMISSION_MODE_NEW_SEQUENCE_CLEAR_QUEUE``
                 "Empty queue, then add shots to new sequence": the queued shots
-                BLACS is not running are deleted first.
+                not yet sent to BLACS are deleted first. Running, failed,
+                rejected and cancelled rows are kept.
             ``SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE``
-                "Empty queue, then add shots to last sequence": the same, with
-                the batch added to the last sequence.
+                "Empty queue, then add shots to last sequence": the queue is
+                emptied in the same way, and the batch is added to the sequence
+                of the shot last sent to BLACS or, if none has been sent, of the
+                last shot queued, and is a sequence of its own if there is
+                neither.
 
         Returns
         -------
@@ -138,20 +146,20 @@ class RunmanagerClient(ZMQClient):
         Raises
         ------
         ValueError
-            For a ``submission_mode`` that is not one of these, and for any
-            but the first while 'BLACS' is unticked, since the others are about
-            the queue.
+            For a ``submission_mode`` that is not one of these, for any but the
+            first while 'BLACS' is unticked, since the others are about the
+            queue, and when there is no labscript file or output folder, or the
+            globals cannot be evaluated or expand into no shots.
         Exception
-            Whatever the window reports when it cannot engage, such as no
-            labscript file, no output folder, or globals that cannot be
-            evaluated.
+            Whatever else stops the batch being made.
         """
         return self.request('engage', submission_mode)
 
     def abort(self):
         """Empty runmanager's queue, as its Empty queue button does.
 
-        A shot BLACS has is kept."""
+        The shots not yet sent to BLACS are deleted. Running, failed, rejected
+        and cancelled rows are kept."""
         return self.request('abort')
 
     def get_run_shots(self):
@@ -301,9 +309,9 @@ class RunmanagerClient(ZMQClient):
         an id with no row, and say why: ``'completed'`` is a shot BLACS
         completed, which goes on to lyse if analysis is on; ``'removed'`` is
         one that left the queue without completing, whether deleted, emptied
-        out by a replacing Engage or dropped; ``'unknown'`` is an id runmanager
-        has not had since it started, so one that left before a restart reads
-        this too.
+        out by a replacing Engage or dropped; ``'unknown'`` is an id the queue
+        has not held since runmanager started: one never queued, such as a shot
+        engaged with 'BLACS' unticked, or one from before a restart.
 
         Reads only: nothing is consumed by asking, so the same ids can be asked
         about as often as wanted."""
@@ -326,7 +334,9 @@ class RunmanagerClient(ZMQClient):
             ``'failed'`` when BLACS reported that it did not complete, and it
             will be offered again; ``'rejected'`` and ``'compile_failed'`` when
             it waits on an operator, holding up the rows behind it;
-            ``'cancelled'`` when it was deleted while BLACS had it. A row in
+            ``'cancelled'`` when it was deleted while BLACS had it; ``'blocked'``
+            when it would be handed over but sits behind a ``'rejected'`` or
+            ``'compile_failed'`` row, as ``shot_status`` also says. A row in
             none of these is ``'compiling'`` while its shot compiles and
             ``'queued'`` while it waits its turn. ``message`` is the reason a
             row gives for being in its state, and empty when it gives none.
@@ -337,26 +347,28 @@ class RunmanagerClient(ZMQClient):
         """Compile the first shot of the window's globals, and queue nothing.
 
         Compiles the shot Engage would make first, from the globals, scans and
-        shuffle as they stand, into a scratch .h5 file in the operating
-        system's temporary folder, which the operating system cleans up. It
-        queues nothing, claims no sequence and touches no output folder, so it
-        can be repeated freely to see whether a labscript file compiles.
-        Answers only once the compile finishes, so the client's timeout has to
-        outlast it; meanwhile runmanager answers no other remote request.
+        shuffle as they stand, into a scratch .h5 file that each test compile
+        overwrites and that is removed when runmanager exits. It queues
+        nothing, claims no sequence and touches no output folder, so it can be
+        repeated freely to see whether a labscript file compiles. Answers only
+        once the compile finishes, so the client's timeout has to outlast it;
+        meanwhile runmanager answers no other remote request.
 
         Returns
         -------
         dict
             ``{'success': bool, 'error': str, 'path': str}``. ``error`` is ''
             on success and the compile's traceback otherwise, and ``path`` is
-            the compiled shot file.
+            the compiled shot file, which stays valid until the next
+            ``test_compile``.
 
         Raises
         ------
         ValueError
-            When no labscript file is selected.
+            When no labscript file is selected, or the globals cannot be
+            evaluated or expand into no shots.
         Exception
-            Whatever stops the globals being expanded.
+            Whatever else stops the globals being expanded.
         """
         return self.request('test_compile')
 

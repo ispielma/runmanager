@@ -120,6 +120,17 @@ def sent_to_blacs(row):
     return row.get('state') in BLACS_STATES
 
 
+def shot_receipt(record):
+    """What a remote caller is told about a shot."""
+    return {
+        'shot_id': record['shot_id'],
+        'sequence_id': record['sequence_attrs'].get('sequence_id'),
+        'sequence_index': record['sequence_attrs'].get('sequence_index'),
+        'run_number': record['run_no'],
+        'path': record['path'],
+    }
+
+
 class RunmanagerQueueWidget(ShotQueueWidget):
     """Shot queue widget configured for runmanager-owned shot records."""
 
@@ -448,6 +459,24 @@ class QueueController(object):
                 if include_default_shots or not item['default_shot']
             ]
 
+    def _row_statuses(self):
+        """Yield ``(item, pending, state)`` for each row. Call with the lock held.
+
+        ``state`` is the row's own, ``BLOCKED_SHOT_STATE`` for a row behind one
+        the queue will not hand over, and empty for a row waiting its turn.
+        """
+        held = False
+        for item in self._items:
+            state = item['state']
+            if state in REFUSED_STATES:
+                # Its own reason, which is what an operator has to act on.
+                held = held or REFUSED_STATES[state]
+                yield item, state == 'cancelled', state
+            elif held:
+                yield item, False, BLOCKED_SHOT_STATE
+            else:
+                yield item, True, state
+
     def get_shot_statuses(self, shot_ids):
         """Say, for each of these shot ids, whether its shot can still run.
 
@@ -470,25 +499,11 @@ class QueueController(object):
 
         Reads only. A caller may ask as often as it likes, about shots that
         finished long ago, and the queue is no different afterwards."""
-        statuses = {}
         with self._lock:
-            held = False
-            for item in self._items:
-                state = item['state']
-                if state in REFUSED_STATES:
-                    # Its own reason, which is what an operator has to act on.
-                    statuses[item['shot_id']] = {
-                        'pending': state == 'cancelled',
-                        'state': state,
-                    }
-                    held = held or REFUSED_STATES[state]
-                elif held:
-                    statuses[item['shot_id']] = {
-                        'pending': False,
-                        'state': BLOCKED_SHOT_STATE,
-                    }
-                else:
-                    statuses[item['shot_id']] = {'pending': True, 'state': state}
+            statuses = {
+                item['shot_id']: {'pending': pending, 'state': state}
+                for item, pending, state in self._row_statuses()
+            }
             answer = {}
             for shot_id in shot_ids:
                 if shot_id in statuses:
@@ -501,36 +516,17 @@ class QueueController(object):
         return answer
 
     def get_queue(self):
-        """List the rows of the queue, in queue order.
-
-        Reads only.
-
-        Returns
-        -------
-        list of dict
-            One dict per row. ``shot_id`` is the row's stable id,
-            ``sequence_id`` and ``sequence_index`` the sequence its shot belongs
-            to (None for a row that records none), ``run_number`` its number
-            within that sequence, and ``path`` its shot file. ``state`` is the
-            row's own state when it has one, and otherwise
-            ``COMPILING_SHOT_STATE`` while its compile is under way and
-            ``QUEUED_SHOT_STATE`` while it waits its turn. ``message`` is the
-            reason the row gives for its state, empty when it gives none.
-        """
+        """List the rows of the queue in queue order, as the client's get_queue does."""
         with self._lock:
             return [
-                {
-                    'shot_id': item['shot_id'],
-                    'sequence_id': item['sequence_attrs'].get('sequence_id'),
-                    'sequence_index': item['sequence_attrs'].get('sequence_index'),
-                    'run_number': item['run_no'],
-                    'path': item['path'],
-                    'state': item['state'] or (
+                dict(
+                    shot_receipt(item),
+                    state=state or (
                         COMPILING_SHOT_STATE if item['compiling'] else QUEUED_SHOT_STATE
                     ),
-                    'message': item['message'],
-                }
-                for item in self._items
+                    message=item['message'],
+                )
+                for item, _, state in self._row_statuses()
             ]
 
     def get_queued_sequence_attrs(self, path):
