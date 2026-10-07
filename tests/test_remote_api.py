@@ -41,9 +41,7 @@ from fixtures import (
     wait_for,
 )
 from runmanager.queueing import (
-    BLOCKED_SHOT_STATE,
     COMPILE_MODE_EAGER,
-    QUEUED_SHOT_STATE,
     QueueController,
     QueueManager,
 )
@@ -494,6 +492,44 @@ class SubmitShotsTests(RemoteCommandTestCase):
         )
 
 
+def steps(record):
+    """The values of a shot's record that say how far it has got."""
+    return tuple(
+        record[key] for key in ('compile', 'queue', 'blacs', 'lyse', 'pending')
+    )
+
+
+def is_legal(record):
+    """Whether a record's values are a combination the table of shot_status allows."""
+    compile_step, queue, blacs, lyse, pending = steps(record)
+    if queue == 'left':
+        if blacs == 'completed':
+            ok = compile_step == 'compiled' and lyse in (
+                'waiting', 'sent', 'rejected', 'not sent'
+            )
+        else:
+            ok = lyse is None
+        return ok and not pending
+    return (
+        queue in ('queued', 'blocked')
+        and lyse == 'waiting'
+        and (blacs == 'waiting' or compile_step == 'compiled')
+        and (compile_step != 'failed' or (blacs == 'waiting' and not pending))
+        and (blacs != 'rejected' or not pending)
+        and (blacs != 'cancelled' or pending)
+        and (queue != 'blocked' or not pending)
+    )
+
+
+def may_still_complete(record):
+    """Whether BLACS can still complete the shot, going by runmanager's side only."""
+    return (
+        record['queue'] == 'queued'
+        and record['compile'] != 'failed'
+        and record['blacs'] != 'rejected'
+    )
+
+
 class ShotStatusTests(RemoteCommandTestCase):
     """Whether a shot that was submitted can still produce a result.
 
@@ -558,30 +594,21 @@ class ShotStatusTests(RemoteCommandTestCase):
                 answer = self.request(self.client.shot_status, ['behind'])
 
                 self.assertEqual(
-                    answer['behind'],
-                    {'pending': False, 'state': BLOCKED_SHOT_STATE}
-                    if holds_up
-                    else {'pending': True, 'state': ''},
+                    (answer['behind']['queue'], answer['behind']['pending']),
+                    ('blocked', False) if holds_up else ('queued', True),
                 )
 
-    def test_the_queue_lists_each_row_in_the_state_its_status_gives_it(self):
+    def test_the_queue_lists_each_row_as_its_status_gives_it(self):
         # A caller reading the queue and one polling shot_status are told the
         # same thing: a row behind a held one is not listed as queued.
         for state in sorted(self.EXPECTED):
             with self.subTest(state=state):
                 self.queue(('head', state), ('behind', ''))
-                shot_ids = ['head', 'behind']
 
                 listed = self.request(self.client.get_queue)
-                answer = self.request(self.client.shot_status, shot_ids)
+                answer = self.request(self.client.shot_status, ['head', 'behind'])
 
-                self.assertEqual(
-                    [row['state'] for row in listed],
-                    [
-                        answer[shot_id]['state'] or QUEUED_SHOT_STATE
-                        for shot_id in shot_ids
-                    ],
-                )
+                self.assertEqual(listed, [answer['head'], answer['behind']])
 
     def test_a_held_row_keeps_its_state_and_deleting_it_frees_the_rows_behind(self):
         # Blocked says the queue is not moving, not that the shot behind is
@@ -589,18 +616,19 @@ class ShotStatusTests(RemoteCommandTestCase):
         # clearing it puts the work behind back to waiting its turn.
         self.queue(('head', 'rejected'), ('behind', ''))
         answer = self.request(self.client.shot_status, ['head', 'behind'])
-        self.assertEqual(answer['head']['state'], 'rejected')
+        self.assertEqual(answer['head']['blacs'], 'rejected')
         self.assertEqual(
-            answer['behind']['state'],
-            BLOCKED_SHOT_STATE,
+            answer['behind']['queue'],
+            'blocked',
             'which is what the caller polling it is told meanwhile',
         )
 
         self.app.queue_manager.delete_rows(['head'])
 
+        behind = self.request(self.client.shot_status, ['behind'])['behind']
         self.assertEqual(
-            self.request(self.client.shot_status, ['behind'])['behind'],
-            {'pending': True, 'state': ''},
+            (behind['queue'], behind['pending']),
+            ('queued', True),
             'the answer is read off the queue as it stands, so a row asked '
             'about while it was stuck is not left carrying that',
         )
@@ -619,16 +647,120 @@ class ShotStatusTests(RemoteCommandTestCase):
         )
 
         self.assertEqual(
-            answer,
-            {
-                'ran': {'pending': False, 'state': 'completed'},
-                'deleted': {'pending': False, 'state': 'removed'},
-                'emptied': {'pending': False, 'state': 'removed'},
-                'never-heard-of-it': {'pending': False, 'state': 'unknown'},
-            },
-            'nothing more will happen to a shot with no row, and no row state '
-            'describes it -- least of all the empty one, which means waiting',
+            [steps(answer[shot_id]) for shot_id in ('ran', 'deleted', 'emptied')],
+            [
+                ('compiled', 'left', 'completed', 'waiting', False),
+                ('compiled', 'left', None, None, False),
+                ('compiled', 'left', None, None, False),
+            ],
+            'nothing more will happen to a shot with no row, and only the one '
+            'BLACS completed has a result coming',
         )
+        self.assertIsNone(
+            answer['never-heard-of-it'],
+            'runmanager answers only for the shots it has held this session',
+        )
+
+    def test_every_record_is_one_the_table_allows_whatever_became_of_the_shot(self):
+        # Four shots are taken through every end the queue has, and at each
+        # stage the records shot_status and get_queue give are checked against
+        # the table in RunmanagerClient.shot_status, and pending against
+        # whether BLACS can still complete the shot.
+        manager = self.app.queue_manager
+        ids = ['retried', 'behind', 'cancelled', 'emptied']
+        held, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def compile_run_file(labscript_file, path):
+            held.set()
+            release.wait(5)
+            return True, ''
+
+        manager.compile_run_file_callback = compile_run_file
+        since = {}
+
+        def submit(*shot_ids):
+            manager.compile_shots(
+                [
+                    {
+                        'path': os.path.join(self.directory, '%s.h5' % shot_id),
+                        'shot_id': shot_id,
+                        'compile_mode': COMPILE_MODE_EAGER,
+                        'compiled': False,
+                    }
+                    for shot_id in shot_ids
+                ],
+                True,
+                False,
+            )
+
+        def ask():
+            answer = self.request(self.client.shot_status, ids)
+            listed = self.request(self.client.get_queue)
+            for record in [record for record in answer.values() if record] + listed:
+                self.assertTrue(is_legal(record), record)
+                self.assertEqual(record['pending'], may_still_complete(record), record)
+            self.assertEqual(listed, [answer[record['shot_id']] for record in listed])
+            return answer
+
+        def expect(shot_id, *expected):
+            """The shot has just changed, and now stands like this."""
+            record = ask()[shot_id]
+            self.assertEqual(steps(record), expected)
+            self.assertGreater(record['since'], since.get(shot_id, 0))
+            since[shot_id] = record['since']
+
+        submit('retried', 'behind', 'cancelled')
+        self.assertTrue(held.wait(5), 'the first shot is compiling')
+        expect('retried', 'compiling', 'queued', 'waiting', 'waiting', True)
+        expect('behind', 'waiting', 'queued', 'waiting', 'waiting', True)
+        release.set()
+        wait_for(
+            lambda: all(
+                row['compile'] == 'compiled'
+                for row in self.app.queue_controller.get_queue()
+            )
+        )
+        expect('retried', 'compiled', 'queued', 'waiting', 'waiting', True)
+        expect('behind', 'compiled', 'queued', 'waiting', 'waiting', True)
+
+        manager.offer_next()
+        expect('retried', 'compiled', 'queued', 'running', 'waiting', True)
+        manager.shot_finished('retried', 'aborted', 'The shot aborted.')
+        expect('retried', 'compiled', 'queued', 'aborted', 'waiting', True)
+
+        manager.offer_next()
+        manager.shot_finished('retried', 'rejected', 'The shot cannot be read.')
+        expect('retried', 'compiled', 'queued', 'rejected', 'waiting', False)
+        self.assertEqual(
+            steps(ask()['behind']), ('compiled', 'blocked', 'waiting', 'waiting', False)
+        )
+
+        manager.delete_rows(['retried'])
+        expect('retried', 'compiled', 'left', 'rejected', None, False)
+        self.assertEqual(
+            steps(ask()['behind']), ('compiled', 'queued', 'waiting', 'waiting', True)
+        )
+
+        manager.offer_next()
+        manager.shot_finished('behind', 'completed', 'The shot ran.')
+        expect('behind', 'compiled', 'left', 'completed', 'waiting', False)
+
+        manager.offer_next()
+        expect('cancelled', 'compiled', 'queued', 'running', 'waiting', True)
+        manager.delete_rows(['cancelled'])
+        expect('cancelled', 'compiled', 'queued', 'cancelled', 'waiting', True)
+
+        # Emptied while it compiles, so it never reached BLACS or compiled:
+        release.clear()
+        held.clear()
+        submit('emptied')
+        self.assertTrue(held.wait(5), 'the last shot is compiling')
+        manager.clear()
+        expect('emptied', None, 'left', None, None, False)
+
+        manager.offer_next()
+        expect('cancelled', 'compiled', 'left', 'cancelled', None, False)
 
 
 class EmptyQueueTests(RemoteCommandTestCase):
@@ -1028,13 +1160,13 @@ class CompileErrorTests(RemoteCommandTestCase):
     def test_a_shot_that_fails_to_compile_lists_its_error_in_the_queue(self):
         [receipt] = self.request(self.client.engage)
         wait_for(
-            lambda: self.app.queue_controller.get_queue()[0]['state'] == 'compile_failed'
+            lambda: self.app.queue_controller.get_queue()[0]['compile'] == 'failed'
         )
 
         [row] = self.request(self.client.get_queue)
 
         self.assertEqual(row['shot_id'], receipt['shot_id'])
-        self.assertEqual(row['state'], 'compile_failed')
+        self.assertEqual(row['compile'], 'failed')
         self.assertIn(self.ERROR, row['message'])
 
     def test_a_test_compile_answers_with_the_error_and_queues_nothing(self):

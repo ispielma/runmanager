@@ -21,23 +21,6 @@ SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE = 'last_sequence_clear_queue'
 # leaves the row at the head of the queue in red; see shot_finished() in
 # queueing.py:
 SHOT_OUTCOME_STATUSES = ('completed', 'aborted', 'failed', 'rejected')
-# What a row the queue would hand over is answered with while a row it will
-# not hand over sits in front of it. Only the head is ever offered, so such a
-# row is not going anywhere either, and the empty state it is in would read as
-# work about to be done.
-BLOCKED_SHOT_STATE = 'blocked'
-# What a shot BLACS completed is answered with once it has left the queue.
-COMPLETED_SHOT_STATE = 'completed'
-# What a shot that left the queue without completing is answered with.
-REMOVED_SHOT_STATE = 'removed'
-# What an id the queue has not held since runmanager started is answered with:
-# one never queued, such as a shot engaged with 'BLACS' unticked, or one from
-# before a restart. Not the empty state, which a row waiting its turn has.
-UNKNOWN_SHOT_STATE = 'unknown'
-# What get_queue calls a row in the empty state while its shot compiles.
-COMPILING_SHOT_STATE = 'compiling'
-# What get_queue calls a row in the empty state while it waits its turn.
-QUEUED_SHOT_STATE = 'queued'
 
 
 class SequenceRefused(ValueError):
@@ -108,7 +91,7 @@ class RunmanagerClient(ZMQClient):
         the batch is made, before its shots compile, so each ``path`` is where
         a file will be written and not a file that is there yet. With 'BLACS'
         unticked the shots are not queued, so ``get_queue`` does not list them,
-        ``shot_status`` answers ``'unknown'`` for them and a compile error
+        ``shot_status`` answers ``None`` for them and a compile error
         reaches only the output box. ``test_compile`` is how to check that a
         script compiles.
 
@@ -294,27 +277,96 @@ class RunmanagerClient(ZMQClient):
         )
 
     def shot_status(self, shot_ids):
-        """Whether each of these shots can still produce a result.
+        """Say how far each of these shots has got, step by step.
 
-        Answers ``{shot_id: {'pending': bool, 'state': str}}``, one entry per
-        id asked about. ``pending`` is false once nothing further will happen
-        to that shot -- it completed and left the queue, or it is held waiting
-        on an operator. A shot cancelled while BLACS has it is pending until
-        BLACS is done with it, as it can still complete.
+        A shot is compiled, queued, run by BLACS and, once BLACS completes it,
+        analysed by lyse. Its record says where it stands in each of those
+        steps. Reads only: nothing is consumed by asking, so the same ids can
+        be asked about as often as wanted.
 
-        ``state`` is the queue row's own state, for a human reading a log,
-        plus four answers no row is ever in. ``'blocked'`` is a row runmanager
-        would hand over sitting behind one it will not, which is not pending
-        until an operator moves what is in front of it. The other three are for
-        an id with no row, and say why: ``'completed'`` is a shot BLACS
-        completed, which goes on to lyse if analysis is on; ``'removed'`` is
-        one that left the queue without completing, whether deleted, emptied
-        out by a replacing Engage or dropped; ``'unknown'`` is an id the queue
-        has not held since runmanager started: one never queued, such as a shot
-        engaged with 'BLACS' unticked, or one from before a restart.
+        Parameters
+        ----------
+        shot_ids : list of str
+            The ``shot_id`` of each shot to ask about, as ``submit_shots`` and
+            ``engage`` return it.
 
-        Reads only: nothing is consumed by asking, so the same ids can be asked
-        about as often as wanted."""
+        Returns
+        -------
+        dict
+            ``{shot_id: record}``, one entry per id asked about. ``record`` is
+            ``None`` for an id runmanager has not held since it started, or
+            held before a restart, because what it remembers of shots is not
+            saved. Otherwise it is a dict with these keys:
+
+            ``shot_id``, ``sequence_id``, ``sequence_index``, ``run_number``, ``path``
+                As ``submit_shots`` returns them.
+            ``compile``
+                ``'waiting'``, ``'compiling'``, ``'compiled'`` or ``'failed'``.
+                A shot that fails to compile stays in the queue and holds up
+                the shots behind it until an operator deletes it or asks for
+                another compile. ``None`` for a shot that left the queue
+                without having compiled or failed to compile.
+            ``queue``
+                ``'queued'`` while the shot is in the queue, including a shot
+                that itself holds the queue up. ``'blocked'`` when it is in the
+                queue behind a shot only an operator can clear, one whose
+                ``blacs`` is ``'rejected'`` or whose ``compile`` is
+                ``'failed'``, so that it is not offered to BLACS until they do.
+                ``'left'`` once it is no longer in the queue.
+            ``blacs``
+                ``'waiting'`` for a shot not yet offered to BLACS, and
+                ``'running'`` once it is offered and BLACS has reported no
+                outcome. Then ``'completed'``, or ``'aborted'`` or ``'failed'``
+                when BLACS reported that it did not complete, after which it is
+                offered again, or ``'rejected'`` when BLACS could not read it,
+                which holds the queue up until an operator clears it. A shot
+                deleted while BLACS had it is ``'cancelled'``: it is not
+                offered again, but BLACS may still complete it. A shot that
+                left keeps the last of these it had, and is ``None`` if it was
+                never offered.
+            ``lyse``
+                ``'waiting'`` for every shot in the queue and for a shot BLACS
+                completed whose submission to lyse is still to be settled, then
+                ``'sent'``, ``'rejected'`` or ``'not sent'``. ``None`` for a
+                shot that left without BLACS completing it, which lyse never
+                gets.
+            ``pending``
+                Whether the shot may still reach ``blacs`` ``'completed'``, as
+                far as runmanager can tell, and nothing about lyse. True for a
+                shot the queue would still hand over to BLACS, and for a
+                ``'cancelled'`` one, which BLACS may still complete. False for
+                a ``'blocked'`` shot, a shot waiting on an operator and every
+                shot that has left.
+            ``since``
+                ``time.time()`` of the latest change to the shot's ``compile``,
+                ``blacs``, ``lyse`` or ``message``, or of its leaving the
+                queue. It does not move when another shot's change blocks or
+                unblocks this one.
+            ``message``
+                Why the shot last changed: what BLACS said of its outcome, the
+                compile's error, or why it left the queue. ``''`` if none.
+
+        Notes
+        -----
+        Only some combinations of these values occur. A shot is in the queue
+        when ``queue`` is ``'queued'`` or ``'blocked'``, and has left when it
+        is ``'left'``:
+
+        ========  ======================  =============================================
+        Where     When                    Then
+        ========  ======================  =============================================
+        in queue  always                  lyse 'waiting'
+        in queue  blacs not 'waiting'     compile 'compiled'
+        in queue  compile 'failed'        blacs 'waiting', pending False
+        in queue  blacs 'rejected'        pending False
+        in queue  blacs 'cancelled'       pending True
+        in queue  queue 'blocked'         pending False
+        left      always                  pending False
+        left      blacs 'completed'       compile 'compiled'; lyse 'waiting', 'sent',
+                                          'rejected' or 'not sent'
+        left      blacs not 'completed'   lyse None
+        ========  ======================  =============================================
+        """
         return self.request('shot_status', list(shot_ids))
 
     def get_queue(self):
@@ -327,19 +379,8 @@ class RunmanagerClient(ZMQClient):
         Returns
         -------
         list of dict
-            One dict per queue row. ``shot_id``, ``sequence_id``,
-            ``sequence_index``, ``run_number`` and ``path`` are as
-            ``submit_shots`` and ``engage`` return them. ``state`` is the row's
-            own state: ``'running'`` once BLACS has been offered the shot;
-            ``'failed'`` when BLACS reported that it did not complete, and it
-            will be offered again; ``'rejected'`` and ``'compile_failed'`` when
-            it waits on an operator, holding up the rows behind it;
-            ``'cancelled'`` when it was deleted while BLACS had it; ``'blocked'``
-            when it would be handed over but sits behind a ``'rejected'`` or
-            ``'compile_failed'`` row, as ``shot_status`` also says. A row in
-            none of these is ``'compiling'`` while its shot compiles and
-            ``'queued'`` while it waits its turn. ``message`` is the reason a
-            row gives for being in its state, and empty when it gives none.
+            The record ``shot_status`` gives for each shot in the queue, in
+            queue order.
         """
         return self.request('get_queue')
 

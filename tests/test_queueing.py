@@ -39,14 +39,12 @@ from runmanager.client import PROVIDER_PAUSED, PROVIDER_PENDING
 from runmanager.queueing import (
     COMPILE_MODE_EAGER,
     COMPILE_MODE_LAZY,
-    COMPLETED_SHOT_STATE,
     EMPTY_QUEUE_DEFAULT_LABSCRIPT,
     EMPTY_QUEUE_NOTHING,
     PROVIDER_NONE,
     PROVIDER_SHOT,
     ROW_BACKGROUNDS,
     TINTED_ROW_FOREGROUND,
-    UNKNOWN_SHOT_STATE,
     QueueController,
     QueueManager,
     RunmanagerQueueWidget,
@@ -805,9 +803,8 @@ class SubmittedShotTests(unittest.TestCase):
         [shot_id] = self.submit()
 
         self.assertEqual(len(self.controller.get_queue_paths()), 1)
-        self.assertEqual(
-            self.status([shot_id])[shot_id], {'pending': True, 'state': ''}
-        )
+        record = self.status([shot_id])[shot_id]
+        self.assertEqual((record['queue'], record['pending']), ('queued', True))
 
     def test_a_shot_that_completed_before_its_batch_did_is_finished_with(self):
         # The shots ahead of a long batch are compiled, offered and completed
@@ -822,9 +819,10 @@ class SubmittedShotTests(unittest.TestCase):
         offered = self.manager.offer_next()
         self.manager.shot_finished(offered['shot_id'], 'completed')
 
+        record = self.status([first])[first]
         self.assertEqual(
-            self.status([first])[first],
-            {'pending': False, 'state': COMPLETED_SHOT_STATE},
+            (record['queue'], record['blacs'], record['pending']),
+            ('left', 'completed', False),
         )
 
     def test_a_shot_that_will_not_compile_is_marked_and_the_rest_still_compile(self):
@@ -851,10 +849,7 @@ class SubmittedShotTests(unittest.TestCase):
             self.wait_until(self.compiling.is_set), 'the worker has the batch'
         )
 
-        self.assertEqual(
-            self.status([shot_id])[shot_id],
-            {'pending': False, 'state': UNKNOWN_SHOT_STATE},
-        )
+        self.assertIsNone(self.status([shot_id])[shot_id])
 
 
 class ContinuingSequenceAnchorTests(unittest.TestCase):
