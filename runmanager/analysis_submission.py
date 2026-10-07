@@ -31,6 +31,8 @@ from qtutils.qt.QtCore import Qt
 from zprocess import TimeoutError, raise_exception_in_thread
 from zprocess.security import AuthenticationFailure
 
+from runmanager.client import LYSE_NOT_SENT, LYSE_REJECTED, LYSE_SENT
+
 
 def set_icon_label_pixmap(label, icon_path, size=16):
     icon = QtGui.QIcon(str(icon_path))
@@ -51,10 +53,9 @@ class AnalysisSubmission(object):
         runmanager's main window.
     on_lyse_outcome : callable
         Called as ``on_lyse_outcome(path, lyse, message)``, from the submission's
-        thread or the GUI thread, once a shot's file is settled: ``lyse`` is
-        ``'sent'``, ``'rejected'`` or ``'not sent'``, and ``message`` says why.
-        A file lyse could not be reached for is not reported, because it is
-        retried.
+        thread, once a shot's file is settled: ``lyse`` is ``'sent'``,
+        ``'rejected'`` or ``'not sent'``, and ``message`` says why. A file lyse
+        could not be reached for is not reported, because it is retried.
     """
 
     def __init__(self, ui, on_lyse_outcome):
@@ -68,10 +69,7 @@ class AnalysisSubmission(object):
         )
         self.lyse_link = LinkIndicator('lyse', self.lyse.host, self.lyse.port)
         self.ui.lyse_link_layout.addWidget(self.lyse_link)
-        if self.lyse.host:
-            self.lyse_link.start()
-        else:
-            self.lyse_link.show_disabled('No lyse host is configured')
+        self.lyse_link.start()
 
         elide_label(
             self.ui.resend_shots_label,
@@ -147,12 +145,8 @@ class AnalysisSubmission(object):
         else:
             self.ui.failed_to_send_frame.hide()
 
-    @inmain_decorator(True)
     def clear_waiting_files(self):
-        for path in self._waiting_for_submission:
-            self.on_lyse_outcome(path, 'not sent', 'Cleared before it was sent to lyse.')
-        self._waiting_for_submission = []
-        self.update_waiting_files_message()
+        self.inqueue.put(['clear', None])
 
     @inmain_decorator(True)
     def check_retry(self):
@@ -205,7 +199,16 @@ class AnalysisSubmission(object):
                         else:
                             self.submit_waiting_files()
                     else:
-                        self.on_lyse_outcome(data, 'not sent', 'Analysis is off.')
+                        self.on_lyse_outcome(data, LYSE_NOT_SENT, 'Analysis is off.')
+                elif signal == 'clear':
+                    # Here, between sends, so that a clear never reports the
+                    # file being sent as not sent.
+                    for path in self._waiting_for_submission:
+                        self.on_lyse_outcome(
+                            path, LYSE_NOT_SENT, 'Cleared before it was sent to lyse.'
+                        )
+                    self._waiting_for_submission = []
+                    self.update_waiting_files_message()
                 elif signal == 'close':
                     break
                 else:
@@ -232,15 +235,12 @@ class AnalysisSubmission(object):
                 # lyse answered and refused the shot, which a retry would not change:
                 self._mainloop_logger.exception('lyse refused %s', path)
                 self.lyse_link.show_state(None, [str(e)])
-                self.on_lyse_outcome(path, 'rejected', str(e))
+                self.on_lyse_outcome(path, LYSE_REJECTED, str(e))
             else:
-                self.on_lyse_outcome(path, 'sent', '')
+                self.on_lyse_outcome(path, LYSE_SENT, '')
             if not success:
                 break
-            try:
-                self._waiting_for_submission.pop(0)
-            except IndexError:
-                pass
+            self._waiting_for_submission.pop(0)
 
         self.server_online = 'online' if success else 'offline'
         self.update_waiting_files_message()

@@ -35,7 +35,7 @@ from fixtures import (
     submit_to_lyse,
     wait_for,
 )
-from runmanager.client import PROVIDER_PAUSED, PROVIDER_PENDING
+from runmanager.client import LYSE_SENT, PROVIDER_PAUSED, PROVIDER_PENDING
 from runmanager.queueing import (
     COMPILE_MODE_EAGER,
     COMPILE_MODE_LAZY,
@@ -384,7 +384,9 @@ class FakeRunManager(object):
             filebox=types.SimpleNamespace(incoming_queue=self.analysed)
         )
         lyse = serve_lyse(testcase, lyse_app)
-        self.analysis_submission = submit_to_lyse(testcase, lyse.port)
+        self.analysis_submission = submit_to_lyse(
+            testcase, lyse.port, self.queue_controller.record_lyse
+        )
         self.default_shot_file = default_shot_file
         self.default_shots_taken = 0
 
@@ -1386,6 +1388,15 @@ class OutcomeAppliedOnceTests(unittest.TestCase):
             [os.path.abspath('/tmp/shot_a.h5')],
         )
         self.assertEqual(self.rows(app), [], 'and the row is retired as usual')
+
+    def test_a_completed_shot_lyse_took_is_recorded_as_sent(self):
+        app, shot_id = self.app_with_shot()
+
+        app.queue_exchange(self.outcome(shot_id, 'completed'), False)
+        app.analysed_paths()
+
+        record = app.queue_controller.get_shot_statuses([shot_id])[shot_id]
+        self.assertEqual(record['lyse'], LYSE_SENT)
 
 
 class CancelledShotTests(unittest.TestCase):

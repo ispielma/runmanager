@@ -40,8 +40,8 @@ if __name__ == '__main__':
     # Test
     import time
 
-    current = get_values()
+    current = get_values(raw=True)
     print("get globals:", current)
     print("set globals", set_values({'test': current['test']}, raw=True))
-    assert get_values()['test'] == current['test']
+    assert get_values(raw=True)['test'] == current['test']
     engage()

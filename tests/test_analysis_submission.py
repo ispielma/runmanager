@@ -116,6 +116,7 @@ class AnalysisSubmissionTests(unittest.TestCase):
             wait_for(lambda: submission.server_online == 'offline')
             self.assertEqual(outcomes, [], 'a connection failure is retried, not reported')
             submission.clear_waiting_files()
+            wait_for(lambda: outcomes)
 
             self.assertEqual(
                 outcomes,

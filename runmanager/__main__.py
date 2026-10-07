@@ -2978,7 +2978,7 @@ class RunManager(LabscriptApplication):
         output_folder = self.ui.lineEdit_shot_output_folder.text()
         if not output_folder:
             raise ValueError('No output folder is selected.')
-        active_groups = self.get_active_groups()
+        active_groups = self.get_active_groups(interactive=False)
         index_start = None
         sequence_attrs = None
         name_format = None
@@ -3071,8 +3071,9 @@ class RunManager(LabscriptApplication):
         """Empty the queue, as the replacement modes' Clear does.
 
         Every waiting row goes, and a row still compiling has its file deleted
-        once its compile finishes. A shot BLACS has is kept. A batch being
-        compiled for runviewer alone stops after the shot it is on."""
+        once its compile finishes. Running, failed, rejected and cancelled rows
+        are kept. A batch being compiled for runviewer alone stops after the
+        shot it is on."""
         self.queue_manager.stop_compile_shots()
         self.queue_manager.clear()
 
@@ -5391,9 +5392,9 @@ class RunmanagerServer(ZMQServer):
 
     @staticmethod
     def _with_trailing_comment(expression, previous):
-        """``expression`` followed by the comment ``previous`` ends with, if any."""
+        """``expression``, with the comment ``previous`` ends with if it has none."""
         comments = runmanager.find_comments(previous)
-        if comments:
+        if comments and not runmanager.find_comments(expression):
             comment_start, comment_end = comments[-1]
             if comment_end == len(previous):
                 expression += previous[comment_start:comment_end]
@@ -5419,8 +5420,16 @@ class RunmanagerServer(ZMQServer):
                 )
 
     @inmain_decorator()
-    def _set_expression_field_values(self, field, changer, globals, raw=False):
+    def _set_expression_field_values(
+        self, field, changer, globals, raw=False, skip_missing=False
+    ):
         _, _, locations = self._get_active_global_locations(globals)
+        skipped = []
+        if skip_missing:
+            skipped = [name for name in globals if name not in locations]
+            globals = {
+                name: value for name, value in globals.items() if name in locations
+            }
         self._check_before_writing(locations, globals, raw)
         try:
             for global_name, new_value in globals.items():
@@ -5443,6 +5452,7 @@ class RunmanagerServer(ZMQServer):
                     )
         finally:
             app.globals_changed()
+        return skipped
 
     @inmain_decorator()
     def _set_boolean_field_values(self, field, changer, globals):
@@ -5487,14 +5497,14 @@ class RunmanagerServer(ZMQServer):
     def handle_get_jit_enabled(self):
         return self._get_global_field_values('jit_enabled')
 
-    def handle_set_values(self, globals, raw=False):
+    def handle_set_values(self, globals, raw=False, skip_missing=False):
         return self._set_expression_field_values(
-            'default', GroupTab.change_global_default, globals, raw=raw
+            'default', GroupTab.change_global_default, globals, raw, skip_missing
         )
 
-    def handle_set_scans(self, globals, raw=False):
+    def handle_set_scans(self, globals, raw=False, skip_missing=False):
         return self._set_expression_field_values(
-            'scan', GroupTab.change_global_scan, globals, raw=raw
+            'scan', GroupTab.change_global_scan, globals, raw, skip_missing
         )
 
     def handle_set_scan_enabled(self, globals):
@@ -5623,6 +5633,10 @@ class RunmanagerServer(ZMQServer):
         run number are claimed by the batch being made, so entries submitted
         one at a time would each find the same number free.
 
+        A global an entry names must have its Scan? and JIT? boxes unticked,
+        since the shot would not run the value submitted otherwise: the batch
+        is refused.
+
         A batch refused while its entries are evaluated sets no global; one
         refused as it is queued is left set to its last entry. Nothing is
         queued and nothing runs.
@@ -5647,6 +5661,19 @@ class RunmanagerServer(ZMQServer):
         missing = sorted(names - set(group_of))
         if missing:
             raise ValueError('Global %s not found in any active group' % missing[0])
+        # The shot would run the scan, or a value read at compile time, and not
+        # the one filed and receipted for it:
+        held = sorted(
+            name
+            for name in names
+            if globals_details[group_of[name]][name]['scan_enabled']
+            or globals_details[group_of[name]][name]['jit_enabled']
+        )
+        if held:
+            raise ValueError(
+                'Cannot submit a value for a global with its Scan? or JIT? box '
+                'ticked, since the shot would not run it: %s.' % ', '.join(held)
+            )
         send_to_runviewer = self.handle_get_view_shots()
         batch = []
         for entry in entries:
@@ -5683,7 +5710,7 @@ class RunmanagerServer(ZMQServer):
         return [shot_receipt(record) for record in records]
 
     def handle_shot_status(self, shot_ids):
-        """Whether each of these shots can still produce a result.
+        """The record of each of these shots, as ``shot_status`` returns them.
 
         Read-only and batched: a caller waiting on many shots asks once. The
         queue controller is safe to ask from any thread, so this is not a GUI

@@ -17,10 +17,29 @@ SUBMISSION_MODE_NEW_SEQUENCE = 'new_sequence'
 SUBMISSION_MODE_LAST_SEQUENCE = 'last_sequence'
 SUBMISSION_MODE_NEW_SEQUENCE_CLEAR_QUEUE = 'new_sequence_clear_queue'
 SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE = 'last_sequence_clear_queue'
+# The values of each step in a shot's record. See shot_status():
+COMPILE_WAITING = 'waiting'
+COMPILE_COMPILING = 'compiling'
+COMPILE_COMPILED = 'compiled'
+COMPILE_FAILED = 'failed'
+QUEUE_QUEUED = 'queued'
+QUEUE_BLOCKED = 'blocked'
+QUEUE_LEFT = 'left'
+BLACS_WAITING = 'waiting'
+BLACS_RUNNING = 'running'
+BLACS_COMPLETED = 'completed'
+BLACS_ABORTED = 'aborted'
+BLACS_FAILED = 'failed'
+BLACS_REJECTED = 'rejected'
+BLACS_CANCELLED = 'cancelled'
+LYSE_WAITING = 'waiting'
+LYSE_SENT = 'sent'
+LYSE_REJECTED = 'rejected'
+LYSE_NOT_SENT = 'not sent'
 # How BLACS may say a shot it was offered turned out. Every one but 'completed'
 # leaves the row at the head of the queue in red; see shot_finished() in
 # queueing.py:
-SHOT_OUTCOME_STATUSES = ('completed', 'aborted', 'failed', 'rejected')
+SHOT_OUTCOME_STATUSES = (BLACS_COMPLETED, BLACS_ABORTED, BLACS_FAILED, BLACS_REJECTED)
 
 
 class SequenceRefused(ValueError):
@@ -51,9 +70,38 @@ class RunmanagerClient(ZMQClient):
         the evaluated Python values."""
         return self.request('get_globals', raw=raw)
 
-    def set_values(self, globals, raw=False):
-        """Set Default expressions for active globals."""
-        return self.request('set_values', globals, raw=raw)
+    def set_values(self, globals, raw=False, skip_missing=False):
+        """Set Default expressions for active globals.
+
+        Parameters
+        ----------
+        globals : dict
+            ``{global_name: value}``. Nothing is written if any is refused.
+        raw : bool
+            If True, each value is a string, the expression to store. Otherwise
+            the ``repr`` of each value is stored. A comment the stored
+            expression ends with is kept, unless the new one has its own.
+        skip_missing : bool
+            If True, a name in no active group is skipped and the others are
+            written. Otherwise it is refused.
+
+        Returns
+        -------
+        list of str
+            The names skipped for being in no active group, in the order
+            given. Always empty unless ``skip_missing`` is True.
+
+        Raises
+        ------
+        ValueError
+            For a name in no active group while ``skip_missing`` is False, or
+            one in a legacy HDF5 globals file.
+        TypeError
+            For a value that is not a string while ``raw`` is True.
+        RuntimeError
+            For a name defined in more than one active group.
+        """
+        return self.request('set_values', globals, raw=raw, skip_missing=skip_missing)
 
     def get_scans(self, raw=False):
         """Return all active globals' Scan values.
@@ -62,9 +110,30 @@ class RunmanagerClient(ZMQClient):
         evaluated Python values."""
         return self.request('get_scans', raw=raw)
 
-    def set_scans(self, globals, raw=False):
-        """Set Scan expressions for active globals."""
-        return self.request('set_scans', globals, raw=raw)
+    def set_scans(self, globals, raw=False, skip_missing=False):
+        """Set Scan expressions for active globals.
+
+        Parameters
+        ----------
+        globals : dict
+            ``{global_name: value}``, as for ``set_values``.
+        raw : bool
+            As for ``set_values``.
+        skip_missing : bool
+            As for ``set_values``.
+
+        Returns
+        -------
+        list of str
+            The names skipped for being in no active group, as ``set_values``
+            returns them.
+
+        Raises
+        ------
+        ValueError, TypeError, RuntimeError
+            As ``set_values`` raises them.
+        """
+        return self.request('set_scans', globals, raw=raw, skip_missing=skip_missing)
 
     def get_scan_enabled(self):
         """Return all active globals' Scan? state."""
@@ -266,9 +335,11 @@ class RunmanagerClient(ZMQClient):
         evaluated sets no global, and one refused as it is queued is left at
         its last entry; either way nothing is queued and nothing runs.
 
-        The Scan? and JIT? boxes of the globals an entry names are the
-        caller's to manage, through get_scan_enabled, set_scan_enabled,
-        get_jit_enabled and set_jit_enabled."""
+        An entry naming a global whose Scan? or JIT? box is ticked is refused
+        too, with a ValueError that names the globals: the shot would run the
+        scan, or a value read at compile time, and not the one submitted. The
+        boxes are the caller's to manage, through get_scan_enabled,
+        set_scan_enabled, get_jit_enabled and set_jit_enabled."""
         return self.request(
             'submit_shots',
             list(entries),
@@ -294,9 +365,16 @@ class RunmanagerClient(ZMQClient):
         -------
         dict
             ``{shot_id: record}``, one entry per id asked about. ``record`` is
-            ``None`` for an id runmanager has not held since it started, or
-            held before a restart, because what it remembers of shots is not
-            saved. Otherwise it is a dict with these keys:
+            ``None`` for an id runmanager has no record of, which includes a
+            shot that left the queue before runmanager last restarted, since
+            what it remembers of departed shots is not saved. A shot still
+            queued at a restart is saved with its ``shot_id`` and restored with
+            a full record, its BLACS and lyse progress reset: ``compile`` is
+            ``'compiled'`` if it had compiled and ``'waiting'`` if not, and
+            ``blacs`` and ``lyse`` are ``'waiting'``. Any other record is a
+            dict with these keys, whose ``compile``, ``queue``, ``blacs`` and
+            ``lyse`` values are this module's ``COMPILE_*``, ``QUEUE_*``,
+            ``BLACS_*`` and ``LYSE_*`` constants:
 
             ``shot_id``, ``sequence_id``, ``sequence_index``, ``run_number``, ``path``
                 As ``submit_shots`` returns them.

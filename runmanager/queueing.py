@@ -36,9 +36,18 @@ from zprocess import raise_exception_in_thread
 
 from runmanager import _plain_value
 from runmanager.client import (
+    BLACS_WAITING,
+    COMPILE_COMPILED,
+    COMPILE_COMPILING,
+    COMPILE_FAILED,
+    COMPILE_WAITING,
+    LYSE_WAITING,
     PROVIDER_NONE,
     PROVIDER_PAUSED,
     PROVIDER_SHOT,
+    QUEUE_BLOCKED,
+    QUEUE_LEFT,
+    QUEUE_QUEUED,
     SHOT_OUTCOME_STATUSES,
 )
 
@@ -353,8 +362,9 @@ class QueueController(object):
         record['blacs_outcome'] = ''
         record['since'] = time.time()
         # What runmanager did with the file for lyse, once BLACS completes the
-        # shot; see record_lyse(). It stays 'waiting' in the queue:
-        record['lyse'] = 'waiting'
+        # shot; see record_lyse(). shot_status reports it 'waiting' until the
+        # row leaves:
+        record['lyse'] = LYSE_WAITING
         record['lyse_message'] = ''
         return record
 
@@ -432,10 +442,7 @@ class QueueController(object):
                     keep.append(item)
                 else:
                     removed_paths.append(item['path'])
-                    self._departed[item['shot_id']] = dict(
-                        self._record(item, 'left', False),
-                        message='Deleted from the queue.',
-                    )
+                    self._leave(item, 'Deleted from the queue.')
             self._items = keep
             return removed_paths, protected
 
@@ -459,10 +466,7 @@ class QueueController(object):
             kept = [item for item in self._items if sent_to_blacs(item)]
             dropped = [item for item in self._items if not sent_to_blacs(item)]
             for item in dropped:
-                self._departed[item['shot_id']] = dict(
-                    self._record(item, 'left', False),
-                    message='Emptied from the queue.',
-                )
+                self._leave(item, 'Emptied from the queue.')
             removed_paths = [item['path'] for item in dropped]
             self._items = kept
             return removed_paths, [dict(item) for item in kept]
@@ -479,46 +483,54 @@ class QueueController(object):
                 if include_default_shots or not item['default_shot']
             ]
 
-    def _record(self, item, queue, pending):
+    def _status(self, item, queue_step, pending=False):
         """The shot_status record of a row. Call with the lock held.
 
         For a row that has left the queue, a step it never reached and lyse
-        read None, and ``since`` is when it left. The caller adds what BLACS
-        completing it changes.
+        read None, and ``since`` is when it left.
         """
         state = item['state']
         if item['compiling']:
-            compile_step = 'compiling'
+            compile_step = COMPILE_COMPILING
         elif state == 'compile_failed':
-            compile_step = 'failed'
+            compile_step = COMPILE_FAILED
         elif item['compiled']:
-            compile_step = 'compiled'
+            compile_step = COMPILE_COMPILED
         else:
-            compile_step = 'waiting'
+            compile_step = COMPILE_WAITING
         if state == 'failed':
             blacs = item['blacs_outcome']
         elif sent_to_blacs(item):
             blacs = state
         else:
-            blacs = 'waiting'
-        lyse = 'waiting'
+            blacs = BLACS_WAITING
+        lyse = LYSE_WAITING
         since = item['since']
-        if queue == 'left':
-            if compile_step not in ('compiled', 'failed'):
+        if queue_step == QUEUE_LEFT:
+            if compile_step not in (COMPILE_COMPILED, COMPILE_FAILED):
                 compile_step = None
-            if blacs == 'waiting':
+            if blacs == BLACS_WAITING:
                 blacs = None
             lyse = None
             since = time.time()
         return dict(
             shot_receipt(item),
             compile=compile_step,
-            queue=queue,
+            queue=queue_step,
             blacs=blacs,
             lyse=lyse,
             pending=pending,
             since=since,
             message=item['message'],
+        )
+
+    def _leave(self, item, message, **changes):
+        """Record that a row has left the queue, with ``changes`` to its record.
+
+        Call with the lock held.
+        """
+        self._departed[item['shot_id']] = dict(
+            self._status(item, QUEUE_LEFT), message=message, **changes
         )
 
     def _row_statuses(self):
@@ -533,11 +545,11 @@ class QueueController(object):
             if state in REFUSED_STATES:
                 # Never blocked: its own record is what an operator acts on.
                 held = held or REFUSED_STATES[state]
-                yield self._record(item, 'queued', state == 'cancelled')
+                yield self._status(item, QUEUE_QUEUED, state == 'cancelled')
             elif held:
-                yield self._record(item, 'blocked', False)
+                yield self._status(item, QUEUE_BLOCKED)
             else:
-                yield self._record(item, 'queued', True)
+                yield self._status(item, QUEUE_QUEUED, True)
 
     def expect_lyse(self, shot_id, path):
         """Note that this shot's file is being handed to lyse as ``path``."""
@@ -547,11 +559,11 @@ class QueueController(object):
     def record_lyse(self, path, lyse, message):
         """Record what runmanager did with a completed shot's file for lyse.
 
-        Called from the analysis submission's thread or the GUI thread, for a
-        path given to expect_lyse. The file is handed over before the row is
-        retired, so the outcome can arrive either side of that: a queued row
-        keeps it for when it leaves, and a record that has left takes it. Each
-        outcome is final, so the path is forgotten with it."""
+        Called from the analysis submission's thread, for a path given to
+        expect_lyse. The file is handed over before the row is retired, so the
+        outcome can arrive either side of that: a queued row keeps it for when
+        it leaves, and a record that has left takes it while it is still
+        waiting. Each outcome is final, so the path is forgotten with it."""
         with self._lock:
             shot_id = self._lyse_paths.pop(os.path.abspath(path), None)
             if shot_id is None:
@@ -562,16 +574,11 @@ class QueueController(object):
                     item['lyse_message'] = message
                     return
             record = self._departed.get(shot_id)
-            if record is not None and record['blacs'] == 'completed':
+            if record is not None and record['lyse'] == LYSE_WAITING:
                 record.update(lyse=lyse, message=message, since=time.time())
 
     def get_shot_statuses(self, shot_ids):
-        """Give the record of each of these shot ids, as ``shot_status`` does.
-
-        ``{shot_id: record}``, one entry per id asked about, and None for an
-        id the queue has not held this session. Reads only: a caller may ask as
-        often as it likes, about shots that finished long ago, and the queue is
-        no different afterwards."""
+        """Give the record of each of these shot ids, as ``shot_status`` does."""
         with self._lock:
             live = {record['shot_id']: record for record in self._row_statuses()}
             answer = {}
@@ -788,9 +795,8 @@ class QueueController(object):
                     item for item in self._items[1:] if not item['default_shot']
                 ]
             for item in dropped:
-                self._departed[item['shot_id']] = dict(
-                    self._record(item, 'left', False),
-                    message='Dropped: work was queued ahead of this default shot.',
+                self._leave(
+                    item, 'Dropped: work was queued ahead of this default shot.'
                 )
             return [item['path'] for item in dropped]
 
@@ -806,10 +812,7 @@ class QueueController(object):
             if not self._items or self._items[0]['state'] != 'cancelled':
                 return []
             item = self._items.pop(0)
-            self._departed[item['shot_id']] = dict(
-                self._record(item, 'left', False),
-                message='Cancelled; released when BLACS asked for more work.',
-            )
+            self._leave(item, 'Cancelled; released when BLACS asked for more work.')
             return [item['path']]
 
     def offer_next(self):
@@ -867,7 +870,8 @@ class QueueController(object):
                 return None
             reclaimed = item['state'] == 'running'
             item['state'] = 'running'
-            item['since'] = time.time()
+            if not reclaimed:
+                item['since'] = time.time()
             # Whatever went wrong last time is being attempted again, so the
             # row goes back to the running appearance rather than keeping a
             # reason that no longer describes it:
@@ -903,17 +907,13 @@ class QueueController(object):
                     # an invitation to try it again -- and a completed one is
                     # still reported onward by the caller, the cancel being
                     # about the queue and not about physics already done.
-                    departed = dict(
-                        self._record(item, 'left', False),
-                        blacs=status,
-                        message=message,
-                    )
+                    changes = {'blacs': status}
                     if status == 'completed':
-                        departed.update(compile='compiled', lyse=item['lyse'])
+                        changes.update(compile=COMPILE_COMPILED, lyse=item['lyse'])
                         # The latest change to the shot is what its message says:
-                        if item['lyse'] != 'waiting':
-                            departed['message'] = item['lyse_message']
-                    self._departed[shot_id] = departed
+                        if item['lyse'] != LYSE_WAITING:
+                            message = item['lyse_message']
+                    self._leave(item, message, **changes)
                     return self._items.pop(index)
                 state = 'rejected' if status == 'rejected' else 'failed'
                 # This catches a resend only while the row still shows the

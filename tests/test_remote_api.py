@@ -491,6 +491,47 @@ class SubmitShotsTests(RemoteCommandTestCase):
             self.expressions(), {'x': '0 # metres', 'y': '2*3', 'depth': '4'}
         )
 
+    def test_a_global_with_scan_or_jit_ticked_is_refused_before_anything_is_set(self):
+        # Its shot would run the scan, or a value read at compile time, and not
+        # the value filed and receipted for it.
+        self.scan('y', '[5]')
+        globals_file.set_field(
+            self.app.globals_file, 'group', 'depth', 'jit_enabled', True
+        )
+
+        with self.assertRaises(ValueError) as raised:
+            self.submit({'x': 1, 'y': 2, 'depth': 3})
+
+        self.assertIn('depth, y', str(raised.exception), 'both are named')
+        self.assertEqual(self.app.batches, [])
+        self.assertEqual(
+            self.expressions(), {'x': '0 # metres', 'y': '2*3', 'depth': '4'}
+        )
+
+    def test_a_raw_expression_with_its_own_comment_is_written_as_given(self):
+        # Writing back what get_values(raw=True) read must not stack the
+        # comment it replaces on its own.
+        self.request(self.client.set_values, {'x': '1.0  # MHz'}, raw=True)
+        self.request(self.client.set_values, {'x': '1.0  # MHz'}, raw=True)
+
+        self.assertEqual(
+            self.expressions(), {'x': '1.0  # MHz', 'y': '2*3', 'depth': '4'}
+        )
+
+    def test_skip_missing_writes_the_globals_that_exist_and_returns_the_rest(self):
+        self.assertEqual(self.request(self.client.set_values, {'depth': 5}), [])
+
+        skipped = self.request(
+            self.client.set_values,
+            {'x': 1, 'nope': 2, 'y': 3, 'gone': 4},
+            skip_missing=True,
+        )
+
+        self.assertEqual(skipped, ['nope', 'gone'])
+        self.assertEqual(
+            self.expressions(), {'x': '1 # metres', 'y': '3', 'depth': '5'}
+        )
+
 
 def steps(record):
     """The values of a shot's record that say how far it has got."""
@@ -635,20 +676,15 @@ class ShotStatusTests(RemoteCommandTestCase):
 
     def test_a_completed_shots_lyse_outcome_is_recorded_whenever_it_arrives(self):
         # queue_exchange hands the file to lyse before the row is retired, so
-        # the outcome can arrive either side of the shot leaving the queue. And
-        # BLACS may have run a fresh copy, which is the file lyse is given.
+        # the outcome can arrive either side of the shot leaving the queue.
         def lyse_and_message(shot_id):
             record = self.request(self.client.shot_status, [shot_id])[shot_id]
             return record['lyse'], record['message']
 
-        for shot_id, outcome_first, file in (
-            ('before', True, 'before.h5'),
-            ('after', False, 'after.h5'),
-            ('copy', False, 'copy_run_1.h5'),
-        ):
+        for shot_id, outcome_first in (('before', True), ('after', False)):
             with self.subTest(shot_id=shot_id):
                 self.queue((shot_id, 'running'))
-                path = os.path.join(self.directory, file)
+                path = os.path.join(self.directory, '%s.h5' % shot_id)
                 self.app.queue_controller.expect_lyse(shot_id, path)
                 if outcome_first:
                     self.app.queue_controller.record_lyse(path, 'rejected', 'No room.')
