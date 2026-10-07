@@ -37,10 +37,12 @@ from runmanager import _plain_value
 from runmanager.client import (
     BLOCKED_SHOT_STATE,
     COMPILING_SHOT_STATE,
+    COMPLETED_SHOT_STATE,
     PROVIDER_NONE,
     PROVIDER_PAUSED,
     PROVIDER_SHOT,
     QUEUED_SHOT_STATE,
+    REMOVED_SHOT_STATE,
     SHOT_OUTCOME_STATUSES,
     UNKNOWN_SHOT_STATE,
 )
@@ -266,6 +268,8 @@ class QueueController(object):
         # Kept so that a batch added to that shot's sequence reads no file.
         self.last_sent_sequence_attrs = None
         self._items = []
+        # The shots that left the queue this session, each with why it left.
+        self._departed = {}
         # Whether or not their rows are still queued: a compile that finishes
         # after its row has gone writes its file and then deletes it.
         self._compiling_paths = set()
@@ -404,6 +408,7 @@ class QueueController(object):
                     keep.append(item)
                 else:
                     removed_paths.append(item['path'])
+                    self._departed[item['shot_id']] = REMOVED_SHOT_STATE
             self._items = keep
             return removed_paths, protected
 
@@ -424,9 +429,10 @@ class QueueController(object):
         thing that does it. Returns ``(removed_paths, protected)``."""
         with self._lock:
             kept = [item for item in self._items if sent_to_blacs(item)]
-            removed_paths = [
-                item['path'] for item in self._items if not sent_to_blacs(item)
-            ]
+            dropped = [item for item in self._items if not sent_to_blacs(item)]
+            for item in dropped:
+                self._departed[item['shot_id']] = REMOVED_SHOT_STATE
+            removed_paths = [item['path'] for item in dropped]
             self._items = kept
             return removed_paths, [dict(item) for item in kept]
 
@@ -457,7 +463,10 @@ class QueueController(object):
         results needs.
 
         ``state`` is for a human reading it. An id with no row is not pending,
-        because nothing further will happen to it.
+        because nothing further will happen to it. It reads
+        ``COMPLETED_SHOT_STATE`` if BLACS completed the shot,
+        ``REMOVED_SHOT_STATE`` if the shot left the queue without completing,
+        and ``UNKNOWN_SHOT_STATE`` if the queue has not held it this session.
 
         Reads only. A caller may ask as often as it likes, about shots that
         finished long ago, and the queue is no different afterwards."""
@@ -480,12 +489,15 @@ class QueueController(object):
                     }
                 else:
                     statuses[item['shot_id']] = {'pending': True, 'state': state}
-        answer = {}
-        for shot_id in shot_ids:
-            if shot_id in statuses:
-                answer[shot_id] = dict(statuses[shot_id])
-            else:
-                answer[shot_id] = {'pending': False, 'state': UNKNOWN_SHOT_STATE}
+            answer = {}
+            for shot_id in shot_ids:
+                if shot_id in statuses:
+                    answer[shot_id] = dict(statuses[shot_id])
+                else:
+                    answer[shot_id] = {
+                        'pending': False,
+                        'state': self._departed.get(shot_id, UNKNOWN_SHOT_STATE),
+                    }
         return answer
 
     def get_queue(self):
@@ -719,6 +731,8 @@ class QueueController(object):
                 self._items = [self._items[0]] + [
                     item for item in self._items[1:] if not item['default_shot']
                 ]
+            for item in dropped:
+                self._departed[item['shot_id']] = REMOVED_SHOT_STATE
             return [item['path'] for item in dropped]
 
     def drop_cancelled_head(self):
@@ -732,7 +746,9 @@ class QueueController(object):
         with self._lock:
             if not self._items or self._items[0]['state'] != 'cancelled':
                 return []
-            return [self._items.pop(0)['path']]
+            item = self._items.pop(0)
+            self._departed[item['shot_id']] = REMOVED_SHOT_STATE
+            return [item['path']]
 
     def offer_next(self):
         """Offer the shot at the head of the queue if it is ready to hand over.
@@ -824,6 +840,11 @@ class QueueController(object):
                     # an invitation to try it again -- and a completed one is
                     # still reported onward by the caller, the cancel being
                     # about the queue and not about physics already done.
+                    self._departed[shot_id] = (
+                        COMPLETED_SHOT_STATE
+                        if status == 'completed'
+                        else REMOVED_SHOT_STATE
+                    )
                     return self._items.pop(index)
                 state = 'rejected' if status == 'rejected' else 'failed'
                 # This catches a resend only while the row still shows the

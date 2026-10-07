@@ -26,8 +26,12 @@ SHOT_OUTCOME_STATUSES = ('completed', 'aborted', 'failed', 'rejected')
 # row is not going anywhere either, and the empty state it is in would read as
 # work about to be done.
 BLOCKED_SHOT_STATE = 'blocked'
-# What a shot id with no row in the queue is answered with. Not the empty
-# state, which a row waiting its turn has.
+# What a shot BLACS completed is answered with once it has left the queue.
+COMPLETED_SHOT_STATE = 'completed'
+# What a shot that left the queue without completing is answered with.
+REMOVED_SHOT_STATE = 'removed'
+# What a shot id that never had a row this session is answered with. Not the
+# empty state, which a row waiting its turn has.
 UNKNOWN_SHOT_STATE = 'unknown'
 # What get_queue calls a row in the empty state while its shot compiles.
 COMPILING_SHOT_STATE = 'compiling'
@@ -291,10 +295,15 @@ class RunmanagerClient(ZMQClient):
         BLACS is done with it, as it can still complete.
 
         ``state`` is the queue row's own state, for a human reading a log,
-        plus one answer no row is ever in: ``'blocked'`` is a row runmanager
+        plus four answers no row is ever in. ``'blocked'`` is a row runmanager
         would hand over sitting behind one it will not, which is not pending
-        until an operator moves what is in front of it. An id runmanager
-        knows nothing of at all is reported as ``'unknown'``.
+        until an operator moves what is in front of it. The other three are for
+        an id with no row, and say why: ``'completed'`` is a shot BLACS
+        completed, which goes on to lyse if analysis is on; ``'removed'`` is
+        one that left the queue without completing, whether deleted, emptied
+        out by a replacing Engage or dropped; ``'unknown'`` is an id runmanager
+        has not had since it started, so one that left before a restart reads
+        this too.
 
         Reads only: nothing is consumed by asking, so the same ids can be asked
         about as often as wanted."""

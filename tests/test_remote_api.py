@@ -587,11 +587,26 @@ class ShotStatusTests(RemoteCommandTestCase):
         )
 
     def test_a_shot_the_queue_no_longer_has_is_not_pending(self):
-        answer = self.request(self.client.shot_status, ['never-heard-of-it'])
+        # Told apart by how each left the queue, because a result is coming
+        # only from the shot BLACS completed.
+        self.queue(('ran', 'running'), ('deleted', ''), ('emptied', ''))
+        self.app.queue_manager.shot_finished('ran', 'completed')
+        self.app.queue_manager.delete_rows(['deleted'])
+        self.app.queue_manager.clear()
+
+        answer = self.request(
+            self.client.shot_status,
+            ['ran', 'deleted', 'emptied', 'never-heard-of-it'],
+        )
 
         self.assertEqual(
-            answer['never-heard-of-it'],
-            {'pending': False, 'state': 'unknown'},
+            answer,
+            {
+                'ran': {'pending': False, 'state': 'completed'},
+                'deleted': {'pending': False, 'state': 'removed'},
+                'emptied': {'pending': False, 'state': 'removed'},
+                'never-heard-of-it': {'pending': False, 'state': 'unknown'},
+            },
             'nothing more will happen to a shot with no row, and no row state '
             'describes it -- least of all the empty one, which means waiting',
         )

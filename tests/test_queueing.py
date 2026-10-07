@@ -39,6 +39,7 @@ from runmanager.client import PROVIDER_PAUSED, PROVIDER_PENDING
 from runmanager.queueing import (
     COMPILE_MODE_EAGER,
     COMPILE_MODE_LAZY,
+    COMPLETED_SHOT_STATE,
     EMPTY_QUEUE_DEFAULT_LABSCRIPT,
     EMPTY_QUEUE_NOTHING,
     PROVIDER_NONE,
@@ -823,7 +824,7 @@ class SubmittedShotTests(unittest.TestCase):
 
         self.assertEqual(
             self.status([first])[first],
-            {'pending': False, 'state': UNKNOWN_SHOT_STATE},
+            {'pending': False, 'state': COMPLETED_SHOT_STATE},
         )
 
     def test_a_shot_that_will_not_compile_is_marked_and_the_rest_still_compile(self):
