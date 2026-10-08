@@ -4548,6 +4548,8 @@ class RunManager(LabscriptApplication):
         with self.compiler_lock:
             self.child_ready.wait()
             self.to_child.put(['compile', [labscript_file, run_file]])
+            # compile_labscript_async and compile_multishot_async read this reply too
+            # (BLACS compile-and-restart, labscript-utils profiles): change all three.
             signal, success, error = self.from_child.get()
         assert signal == 'done'
         return success, error

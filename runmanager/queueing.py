@@ -19,6 +19,9 @@ Engage, and the queue edits that delete files or redraw the queue tab. Queue
 state is in QueueController, which the application holds.
 Queue items are stored as shot records. The queue widget shows each one's file
 name and compile mode, and reddens a row that needs an operator.
+
+blacs' ``docs/source/shot-management.rst`` is the contract of record for the
+BLACS handover, so change either side against it.
 """
 
 import os
