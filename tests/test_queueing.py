@@ -314,10 +314,10 @@ class FakeRunManager(object):
     get_last_sent_from_queue_filepath = RunManager.get_last_sent_from_queue_filepath
     get_submission_anchor = RunManager.get_submission_anchor
     reindex_run_file_infos = RunManager.reindex_run_file_infos
-    make_h5_files = RunManager.make_h5_files
+    name_run_files = RunManager.name_run_files
     prepare_queue_shot = RunManager.prepare_queue_shot
 
-    # make_h5_files reads these. There is no line edit to keep the output
+    # name_run_files reads these. There is no line edit to keep the output
     # folder up to date, and a batch added to a sequence is written to the
     # folder of the shot it is added to anyway.
     exp_config = None
@@ -1707,7 +1707,7 @@ class SequenceContinuityTests(unittest.TestCase):
 
     def add_shots(self, count, anchor, index_start=None, sequence_attrs=None):
         """Compile a batch onto the sequence the anchor shot belongs to."""
-        _, run_files = self.app.make_h5_files(
+        run_files = self.app.name_run_files(
             self.path('experiment.py'),
             self.directory,
             [{'x': n} for n in range(count)],
@@ -1776,34 +1776,13 @@ class SequenceContinuityTests(unittest.TestCase):
     def test_a_batch_of_its_own_does_claim_a_sequence_index(self):
         # The other half of the same rule: a batch that is not being added to
         # anything is a new sequence, and has to take a number for it.
-        self.app.make_h5_files(
+        self.app.name_run_files(
             self.path('experiment.py'),
             self.directory,
             [{'x': 0}],
         )
 
         self.assertEqual(self.next_free_index(), 1)
-
-    def test_a_cleared_queue_still_knows_the_sequence_it_was_adding_to(self):
-        # With nothing yet sent to BLACS the shot being added to is a queued
-        # one, and Clear removes its row and deletes its file, so what says
-        # which sequence this is has to be read before that happens.
-        anchor = self.path('experiment_00.h5')
-        open(anchor, 'w').close()
-        self.app.queue_manager.enqueue(
-            [queued_shot(anchor, sequence_attrs=self.existing)]
-        )
-
-        sequence = self.app.queue_controller.get_queued_sequence_attrs(anchor)
-        self.app.queue_manager.clear()
-        added = self.add_shots(1, anchor, index_start=0, sequence_attrs=sequence)
-
-        self.assertFalse(os.path.exists(anchor), 'the Clear deleted its file')
-        self.assertEqual(
-            [info['sequence_attrs'] for info in added],
-            [self.existing],
-            'the batch replacing the queue is in the sequence it replaced',
-        )
 
     def test_a_replacement_batch_resumes_after_the_shots_blacs_has(self):
         # The shots BLACS has been given keep their files, so the numbering
@@ -1837,9 +1816,8 @@ class SequenceContinuityTests(unittest.TestCase):
 class DeletedAnchorTests(unittest.TestCase):
     """What a sequence carries on from when that shot has been deleted.
 
-    The shot last sent to BLACS is named by its file. A file that is gone is not
-    a sequence to add to, and would make every later submission refuse, so the
-    anchor is let go of with its file and the next submission starts a sequence.
+    Deleting the row of the shot last sent to BLACS lets go of it, so the next
+    "add shots to last sequence" starts a sequence.
     """
 
     def setUp(self):

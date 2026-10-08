@@ -252,7 +252,10 @@ def get_shots_with_frozen_globals(globals_details, expansion_order=None):
     sequence_globals = _details_to_sequence_globals(globals_details)
     evaled_globals, _, expansions = evaluate_globals(sequence_globals)
     shots = expand_globals(sequence_globals, evaled_globals, expansion_order)
-    return [(shot, get_frozen_globals(globals_details, shot)) for shot in shots], expansions
+    return (
+        [(shot, get_frozen_globals(globals_details, shot)) for shot in shots],
+        expansions,
+    )
 
 
 def get_queue_compile_globals(groups, frozen_globals=None, default_globals=False):

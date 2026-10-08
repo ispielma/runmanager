@@ -131,7 +131,7 @@ class SubmittingApp(object):
     get_submission_anchor = RunManager.get_submission_anchor
     compile_and_queue_shots = RunManager.compile_and_queue_shots
     reindex_run_file_infos = RunManager.reindex_run_file_infos
-    make_h5_files = RunManager.make_h5_files
+    name_run_files = RunManager.name_run_files
     prepare_queue_shot = RunManager.prepare_queue_shot
     on_abort_clicked = RunManager.on_abort_clicked
     on_engage_clicked = RunManager.on_engage_clicked
@@ -1015,6 +1015,19 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
             [record['sequence_attrs']['sequence_index'] for record in records],
             [0],
         )
+
+    def test_a_replacement_onto_a_row_with_no_sequence_is_refused_before_the_clear(self):
+        # A row restored from a path alone has no sequence on record, and the
+        # Clear would delete its file.
+        path = os.path.join(self.directory, 'experiment_007.h5')
+        open(path, 'w').close()
+        self.app.queue_manager.restore_state({'items': [path]})
+
+        with self.assertRaises(SequenceRefused):
+            self.app.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE_CLEAR_QUEUE)
+
+        self.assertEqual(self.app.queue_controller.get_queue_paths(), [path])
+        self.assertTrue(os.path.exists(path))
 
     def test_the_queue_is_read_once_for_the_sequence_being_added_to(self):
         # BLACS empties the queue on the server thread while a batch is made,

@@ -39,11 +39,10 @@ class FrozenGlobalsTests(unittest.TestCase):
         )
         globals_file.set_field(path, 'group', 'x', 'scan_enabled', True)
         groups = {'group': path}
-        details = globals_file.get_globals_details(groups)
-        sequence_globals = runmanager.get_globals(groups)
-        evaled, _, _ = runmanager.evaluate_globals(sequence_globals)
+        pending, _ = runmanager.get_shots_with_frozen_globals(
+            globals_file.get_globals_details(groups)
+        )
 
-        for shot in runmanager.expand_globals(sequence_globals, evaled):
-            frozen = runmanager.get_frozen_globals(details, shot)
+        for shot, frozen in pending:
             _, compiled = runmanager.get_queue_compile_globals(groups, frozen)
             np.testing.assert_array_equal(compiled['x'], shot['x'])

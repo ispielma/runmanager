@@ -147,9 +147,7 @@ SubmissionMode = collections.namedtuple(
     'SubmissionMode', ['joins_sequence', 'clears_queue']
 )
 
-# What each submission mode decides: whether the batch joins the last sequence,
-# and whether it first empties the queue. See get_submission_anchor for which
-# shot a joining batch is numbered after.
+# See get_submission_anchor for which shot a joining batch is numbered after.
 SUBMISSION_MODES = {
     SUBMISSION_MODE_NEW_SEQUENCE: SubmissionMode(
         joins_sequence=False, clears_queue=False
@@ -2733,10 +2731,9 @@ class RunManager(LabscriptApplication):
         )
 
     def get_queue_append_filepath(self):
-        # Runmanager's own default shots are passed over: a default shot is not
-        # part of a sequence, so the next batch must not be numbered alongside
-        # it, and a queue holding nothing else is one there is nothing to add
-        # shots to. See offer_shot().
+        # A default shot belongs to the day's default sequence, which no batch
+        # joins, so it is passed over here and offer_shot() does not record one
+        # as the shot last sent.
         queue_paths = self.queue_controller.get_queue_paths(include_default_shots=False)
         if not queue_paths:
             return None
@@ -2749,10 +2746,11 @@ class RunManager(LabscriptApplication):
         """The shot this mode numbers its batch after, or None for a new one.
 
         A mode that joins a sequence tries the last queued shot, then the shot
-        last sent, or the reverse if it empties the queue. The queue drains as
-        BLACS works through it, and the shot last sent then ends the last
-        sequence. None means there is no sequence to join, and a batch with
-        nothing to be numbered after starts one of its own.
+        last sent, or the reverse if it empties the queue: the queued rows are
+        about to be deleted, so the batch joins the sequence BLACS is running.
+        The queue drains as BLACS works through it, and the shot last sent then
+        ends the last sequence. None means there is no sequence to join, and a
+        batch with nothing to be numbered after starts one of its own.
 
         Read here, where the answer is used, and once. The queue moves on its
         own -- BLACS takes the last shot on the server thread -- so a mode
@@ -2934,6 +2932,8 @@ class RunManager(LabscriptApplication):
         sequence_attrs = None
         name_format = None
         if indexed_path_base is not None and (mode.clears_queue or sequence is None):
+            # Read before the Clear, which takes the anchor's row and the
+            # sequence recorded with it.
             sequence_attrs = self.queue_controller.get_queued_sequence_attrs(
                 indexed_path_base
             )
@@ -2948,7 +2948,6 @@ class RunManager(LabscriptApplication):
                 # there are skipped over.
                 index_start = 0
             else:
-                # Numbered from the sequence's record if it has one.
                 key = (sequence_attrs['sequence_id'], sequence_attrs['sequence_index'])
                 if key in self.sequences:
                     sequence = key
@@ -2979,7 +2978,7 @@ class RunManager(LabscriptApplication):
         if mode.clears_queue:
             self.queue_manager.clear()
         logger.info('Making h5 files')
-        labscript_file, run_files = self.make_h5_files(
+        run_files = self.name_run_files(
             labscript_file,
             output_folder,
             [shot_globals for shot_globals, _ in batch],
@@ -4778,7 +4777,7 @@ class RunManager(LabscriptApplication):
 
         return expansion_types_changed
 
-    def make_h5_files(
+    def name_run_files(
         self,
         labscript_file,
         output_folder,
@@ -4788,7 +4787,9 @@ class RunManager(LabscriptApplication):
         sequence_attrs=None,
         name_format=None,
     ):
-        """Return a record per entry of ``shots``, for the shot files written later.
+        """Name and number the shot files of a batch, without writing them.
+
+        Returns a record per entry of ``shots``, for the files written later.
 
         ``indexed_path_base`` is a shot whose sequence this batch is joining,
         with ``sequence_attrs`` the sequence of that shot, or None for a
@@ -4841,7 +4842,7 @@ class RunManager(LabscriptApplication):
             name_format = (output_folder, filename_prefix)
             run_files = [dict(info, name_format=name_format) for info in run_files]
         logger.debug(run_files)
-        return labscript_file, run_files
+        return run_files
 
     def prepare_queue_shot(self, item, default_globals=False):
         active_groups = item.get('active_groups') or inmain(
@@ -5202,9 +5203,6 @@ class RunManager(LabscriptApplication):
             self.discard_default_shot()
         agnostic_path = shared_drive.path_to_agnostic(item['path'])
         if not item['default_shot']:
-            # Only shots a user engaged are recorded here. A default shot
-            # belongs to the day's default sequence, which no batch joins, so
-            # it must not become the anchor "add shots to last sequence" uses:
             self.queue_manager.set_last_sent_from_queue(
                 agnostic_path, item['sequence_attrs']
             )

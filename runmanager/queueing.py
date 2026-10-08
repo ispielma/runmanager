@@ -322,7 +322,7 @@ class QueueController(object):
             compile_mode = COMPILE_MODE_EAGER
         record['compile_mode'] = compile_mode
         record['compiled'] = bool(record.get('compiled', compile_mode == COMPILE_MODE_EAGER))
-        # A shot runmanager made for an empty queue; no batch joins its sequence.
+        # A shot runmanager made for an empty queue.
         record['default_shot'] = bool(record.get('default_shot', False))
         # Whether runviewer was ticked when this shot was engaged. The
         # compile reads it from here, not from the checkbox as it stands then.

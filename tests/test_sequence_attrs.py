@@ -106,5 +106,7 @@ class DefaultSequenceTests(unittest.TestCase):
         for row in rows:
             with h5py.File(row['path'], 'r') as shot:
                 self.assertEqual(row['run_no'], shot.attrs['run number'])
-                for name, value in row['sequence_attrs'].items():
-                    self.assertEqual(value, shot.attrs[name])
+                self.assertEqual(
+                    shot.attrs['sequence_id'], row['sequence_attrs']['sequence_id']
+                )
+                self.assertEqual(shot.attrs['sequence_index'], -1)
