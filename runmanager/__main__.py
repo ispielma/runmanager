@@ -3029,7 +3029,6 @@ class RunManager(LabscriptApplication):
             labscript_file,
             output_folder,
             [shot_globals for shot_globals, _ in batch],
-            with_metadata=True,
             indexed_path_base=indexed_path_base,
             index_start=index_start,
             sequence_attrs=sequence_attrs,
@@ -4864,35 +4863,21 @@ class RunManager(LabscriptApplication):
         labscript_file,
         output_folder,
         shots,
-        sequence_globals=None,
-        with_metadata=False,
         indexed_path_base=None,
         index_start=None,
         sequence_attrs=None,
         name_format=None,
     ):
-        """Make one shot file per entry of ``shots``, in the order given.
+        """Return a record per entry of ``shots``, for the shot files written later.
 
         ``indexed_path_base`` is a shot whose sequence this batch is joining,
-        or None for a sequence of its own.
-
-        ``sequence_globals`` are written into the files, so they are needed
-        only when this writes them. With ``with_metadata`` it does not: it
-        hands back a record per shot for a caller to write later, from
-        whatever globals that caller is holding.
+        with ``sequence_attrs`` the sequence of that shot, or None for a
+        sequence of its own.
         """
         if indexed_path_base is not None:
-            # A batch given a shot to be numbered after is being added to that
-            # shot's sequence, so everything a new sequence would be given
-            # comes from that shot instead: the folder it is in, the filename
-            # stem it is one of, and the sequence it belongs to. None of it is
-            # asked of new_sequence_details, which takes a lock on shot storage
-            # and claims a sequence index -- and an index claimed for a
-            # sequence that is never started is one no sequence will ever
-            # carry. A caller that had to read the sequence earlier than this
-            # passes it in; see compile_and_queue_shots.
-            if sequence_attrs is None:
-                sequence_attrs = self.get_sequence_attrs_to_extend(indexed_path_base)
+            # The shot being added to supplies the folder, filename stem and
+            # sequence a new sequence would be given, so new_sequence_details
+            # is not asked: it would claim a sequence index never used.
             run_files = self.reindex_run_file_infos(
                 [
                     {
@@ -4905,17 +4890,6 @@ class RunManager(LabscriptApplication):
                 index_start=index_start,
                 name_format=name_format,
             )
-            if not with_metadata:
-                for run_file_info in run_files:
-                    runmanager.make_single_run_file(
-                        run_file_info['path'],
-                        sequence_globals,
-                        run_file_info['shot_globals'],
-                        run_file_info['sequence_attrs'],
-                        run_file_info['run_no'],
-                        run_file_info['n_runs'],
-                    )
-                run_files = [run_file_info['path'] for run_file_info in run_files]
         else:
             using_default = output_folder == self.previous_default_output_folder
             # A folder the user chose is used as it is. Only the default one has
@@ -4929,26 +4903,23 @@ class RunManager(LabscriptApplication):
                 )
             )
             if using_default:
-                # The user is using the default output folder. Just in case the
-                # sequence index has been updated or the date has changed, use the
-                # default_output dir obtained from new_sequence_details, as it is
-                # race-free, whereas the one from the UI may be out of date since we
-                # only update it once a second.
+                # The UI's default folder is refreshed only once a second, so
+                # take the race-free one from new_sequence_details in case the
+                # date or sequence index has moved on.
                 output_folder = default_output_dir
             self.check_output_folder_update()
             run_files = runmanager.make_run_files(
                 output_folder,
-                sequence_globals,
+                None,
                 shots,
                 sequence_attrs,
                 filename_prefix,
-                return_infos=with_metadata,
-                create_files=not with_metadata,
+                return_infos=True,
+                create_files=False,
             )
-            if with_metadata:
-                # How a later batch joining this sequence names its shots.
-                name_format = (output_folder, filename_prefix)
-                run_files = [dict(info, name_format=name_format) for info in run_files]
+            # How a later batch joining this sequence names its shots.
+            name_format = (output_folder, filename_prefix)
+            run_files = [dict(info, name_format=name_format) for info in run_files]
         logger.debug(run_files)
         return labscript_file, run_files
 

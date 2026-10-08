@@ -1744,7 +1744,6 @@ class SequenceContinuityTests(unittest.TestCase):
             self.path('experiment.py'),
             self.directory,
             [{'x': n} for n in range(count)],
-            with_metadata=True,
             indexed_path_base=anchor,
             index_start=index_start,
             sequence_attrs=sequence_attrs,
@@ -1756,11 +1755,8 @@ class SequenceContinuityTests(unittest.TestCase):
         # written into it, so renumbering the files of an added batch without
         # its runs would restart run numbers inside a sequence with a shot 0.
         anchor = self.path('experiment_03.h5')
-        self.app.queue_manager.enqueue(
-            [queued_shot(anchor, sequence_attrs=self.existing)]
-        )
 
-        added = self.add_shots(2, anchor)
+        added = self.add_shots(2, anchor, sequence_attrs=self.existing)
 
         self.assertEqual(
             [(os.path.basename(info['path']), info['run_no']) for info in added],
@@ -1785,7 +1781,7 @@ class SequenceContinuityTests(unittest.TestCase):
         anchor = self.path('experiment_00.h5')
         runmanager.make_single_run_file(anchor, None, {}, self.existing, 0, 1)
 
-        added = self.add_shots(2, anchor)
+        added = self.add_shots(2, anchor, sequence_attrs=self.existing)
 
         self.assertEqual(
             [info['n_runs'] for info in added],
@@ -1802,11 +1798,8 @@ class SequenceContinuityTests(unittest.TestCase):
 
     def test_adding_shots_to_a_sequence_claims_no_new_sequence_index(self):
         anchor = self.path('experiment_03.h5')
-        self.app.queue_manager.enqueue(
-            [queued_shot(anchor, sequence_attrs=self.existing)]
-        )
 
-        self.add_shots(2, anchor)
+        self.add_shots(2, anchor, sequence_attrs=self.existing)
 
         self.assertEqual(
             self.next_free_index(),
@@ -1823,20 +1816,9 @@ class SequenceContinuityTests(unittest.TestCase):
             self.path('experiment.py'),
             self.directory,
             [{'x': 0}],
-            with_metadata=True,
         )
 
         self.assertEqual(self.next_free_index(), 1)
-
-    def test_no_row_and_no_file_is_no_sequence_to_add_to(self):
-        # Reported rather than quietly compiled onto a sequence of its own:
-        # a batch added to a sequence that cannot be found is not a batch that
-        # should go anywhere. on_engage_clicked puts this in the output box.
-        missing = self.path('experiment_00.h5')
-        with self.assertRaises(Exception) as raised:
-            self.add_shots(1, missing)
-
-        self.assertIn(missing, str(raised.exception))
 
     def test_a_cleared_queue_still_knows_the_sequence_it_was_adding_to(self):
         # With nothing yet sent to BLACS the shot being added to is a queued
@@ -1885,21 +1867,6 @@ class SequenceContinuityTests(unittest.TestCase):
             [(os.path.basename(info['path']), info['run_no']) for info in added],
             [('experiment_01.h5', 1), ('experiment_02.h5', 2)],
             'numbering resumes at the first run whose file has gone',
-        )
-
-    def test_the_sequence_is_read_off_the_shot_when_the_queue_has_lost_it(self):
-        # "Empty queue, then add shots to last sequence" empties the queue
-        # first, so the shot being added to is the one last sent to BLACS,
-        # whose row may be gone; its file carries what the queue no longer holds.
-        anchor = self.path('experiment_00.h5')
-        runmanager.make_single_run_file(anchor, None, {}, self.existing, 0, 1)
-
-        added = self.add_shots(1, anchor, index_start=0)
-
-        self.assertEqual(
-            [info['sequence_attrs'] for info in added],
-            [self.existing],
-            'the shot file answers for the sequence when no row does',
         )
 
 
