@@ -2897,21 +2897,11 @@ class RunManager(LabscriptApplication):
         )
 
     def expand_pending_shots(self):
-        """The shots the window's globals stand for, in the order to make them.
+        """The window's shot globals paired with the globals to freeze, in making order.
 
-        One ``(shot globals, globals to freeze)`` pair per shot. The pair is
-        the unit because a shot's globals have to travel with it: the file it
-        is written to is named from the globals it is made with, and the
-        record it is compiled from carries the same ones frozen. Two lists
-        side by side are two things that can be reordered apart, and a shot
-        named for one set of parameters and run with another is a result
-        recorded against parameters that never ran.
-
-        The shuffle button reorders the pairs, which is the only place
-        anything is reordered: everything downstream makes the batch in the
-        order it is given."""
+        Pairs, so that a shot's globals cannot be reordered apart from the ones
+        frozen for it."""
         active_groups = self.get_active_groups(interactive=False)
-        # Get ordering of expansion globals
         expansion_order = {}
         for i in range(self.axes_model.rowCount()):
             item = self.axes_model.item(i, self.AXES_COL_NAME)
@@ -2920,26 +2910,17 @@ class RunManager(LabscriptApplication):
             expansion_order[name] = {'order':i, 'shuffle':shuffle_item.checkState() == QtCore.Qt.CheckState.Checked}
         logger.info('Parsing globals...')
         try:
-            _, shots, _, _, _ = self.parse_globals(
-                active_groups, expansion_order=expansion_order
+            pending, _ = runmanager.get_shots_with_frozen_globals(
+                runmanager.globals_file.get_globals_details(active_groups),
+                expansion_order,
             )
         except Exception as e:
             raise ValueError(f'The globals could not be evaluated: {e}') from e
-        globals_details = runmanager.globals_file.get_globals_details(active_groups)
-        pending = [
-            (
-                shot_globals,
-                runmanager.get_frozen_globals(globals_details, shot_globals),
-            )
-            for shot_globals in shots
-        ]
         if not pending:
             raise ValueError('The globals expand into no shots.')
         if self.ui.pushButton_shuffle.checkState() == QtCore.Qt.Checked:
-            # Globals are shuffled one expansion at a time as they are
-            # expanded, so even with every one of them shuffled the batch is
-            # still ordered by the outermost. Shuffling the whole batch is
-            # what takes the last of that order out of it.
+            # Per-global shuffles leave the batch ordered by the outermost
+            # global; only shuffling the whole batch takes that out.
             random.shuffle(pending)
         return pending
 
@@ -5624,17 +5605,15 @@ class RunmanagerServer(ZMQServer):
                 previous = group_records[name]['default']
                 default = self._with_trailing_comment(repr(value), previous)
                 group_records[name] = dict(group_records[name], default=default)
-            sequence_globals = runmanager._details_to_sequence_globals(details)
-            evaled_globals, _, expansions = runmanager.evaluate_globals(sequence_globals)
-            shots = runmanager.expand_globals(sequence_globals, evaled_globals)
-            if len(shots) != 1:
+            pairs, expansions = runmanager.get_shots_with_frozen_globals(details)
+            if len(pairs) != 1:
                 expanding = sorted(name for name in expansions if expansions[name])
                 raise ValueError(
                     'Cannot submit %r as one shot: the globals as they stand '
                     'produce %d. Expanded by: %s.'
-                    % (entry, len(shots), ', '.join(expanding) or 'none')
+                    % (entry, len(pairs), ', '.join(expanding) or 'none')
                 )
-            batch.append((shots[0], runmanager.get_frozen_globals(details, shots[0])))
+            batch.append(pairs[0])
         self.handle_set_values(entries[-1])
         # Joined by id, not by the queue's last shot, which is whoever
         # submitted last: an operator's Engage in between would otherwise take

@@ -232,6 +232,29 @@ def get_frozen_globals(globals_details, shot):
     return frozen_globals
 
 
+def get_shots_with_frozen_globals(globals_details, expansion_order=None):
+    """Expand the globals into shots, each with the globals to freeze for it.
+
+    Parameters
+    ----------
+    globals_details : dict
+        The globals as returned by ``globals_file.get_globals_details``.
+    expansion_order : dict, optional
+        How the expansions are ordered and shuffled, as ``expand_globals`` takes.
+
+    Returns
+    -------
+    list
+        One ``(shot globals, frozen globals)`` pair per shot.
+    dict
+        The expansion type of each global.
+    """
+    sequence_globals = _details_to_sequence_globals(globals_details)
+    evaled_globals, _, expansions = evaluate_globals(sequence_globals)
+    shots = expand_globals(sequence_globals, evaled_globals, expansion_order)
+    return [(shot, get_frozen_globals(globals_details, shot)) for shot in shots], expansions
+
+
 def get_queue_compile_globals(groups, frozen_globals=None, default_globals=False):
     """The globals a queued shot's file is written from.
 
