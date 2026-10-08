@@ -34,7 +34,6 @@ from labscript_utils import shared_drive
 from labscript_utils.qtwidgets.shotqueue import ShotQueueWidget
 from zprocess import raise_exception_in_thread
 
-from runmanager import _plain_value
 from runmanager.client import (
     BLACS_CANCELLED,
     BLACS_COMPLETED,
@@ -288,7 +287,7 @@ class QueueController(object):
         # unaffected and resuming offers the same head again.
         self.paused = False
         self.last_sent_from_queue = None
-        # Kept so that a batch added to that shot's sequence reads no file.
+        # The sequence of that shot, whose row has left the queue.
         self.last_sent_sequence_attrs = None
         self._items = []
         # The record of each shot that left the queue this session, as it was
@@ -338,14 +337,8 @@ class QueueController(object):
             str(name): str(expression)
             for name, expression in record.get('frozen_globals', {}).items()
         }
-        # The values as well as the names, because a record is saved into the
-        # app config: a sequence read back out of a shot file arrives as h5py
-        # answered with it, and a queue holding one of those cannot be written
-        # at all. Where the caller read them is not the queue's business; that
-        # a queued shot can be saved is.
         record['sequence_attrs'] = {
-            str(name): _plain_value(value)
-            for name, value in record.get('sequence_attrs', {}).items()
+            str(name): value for name, value in record.get('sequence_attrs', {}).items()
         }
         record['active_groups'] = {
             str(name): os.path.abspath(str(path))

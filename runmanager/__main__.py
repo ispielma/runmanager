@@ -2979,25 +2979,31 @@ class RunManager(LabscriptApplication):
         index_start = None
         sequence_attrs = None
         name_format = None
-        if mode.clears_queue:
-            if indexed_path_base is not None:
-                # Read before the Clear rather than after it. With nothing yet
-                # sent to BLACS the shot being added to is a queued one, and
-                # the Clear takes its row and deletes its file -- so asked
-                # afterwards, nothing would be left to say which sequence the
-                # replacement batch is joining.
-                sequence_attrs = self.get_sequence_attrs_to_extend(indexed_path_base)
+        if indexed_path_base is not None and (mode.clears_queue or sequence is None):
+            # Read before the Clear rather than after it. With nothing yet
+            # sent to BLACS the shot being added to is a queued one, and
+            # the Clear takes its row and deletes its file -- so asked
+            # afterwards, nothing would be left to say which sequence the
+            # replacement batch is joining.
+            sequence_attrs = self.queue_controller.get_queued_sequence_attrs(
+                indexed_path_base
+            )
+            if sequence_attrs is None:
+                raise SequenceRefused(
+                    f'Cannot add shots to the sequence of {indexed_path_base}: '
+                    'runmanager has no record of its sequence.'
+                )
+            if mode.clears_queue:
                 # Numbering starts from 0 again, taking back the names the
                 # shots being deleted gave up; the ones whose files are still
                 # there are skipped over.
                 index_start = 0
-        elif sequence is None and indexed_path_base is not None:
-            # "Add shots to last sequence" numbers from the record, as a remote
-            # join does, when there is one, and after the anchor's file if not.
-            sequence_attrs = self.get_sequence_attrs_to_extend(indexed_path_base)
-            key = (sequence_attrs['sequence_id'], sequence_attrs['sequence_index'])
-            if key in self.sequences:
-                sequence = key
+            else:
+                # "Add shots to last sequence" numbers from the record, as a remote
+                # join does, when there is one, and after the anchor's file if not.
+                key = (sequence_attrs['sequence_id'], sequence_attrs['sequence_index'])
+                if key in self.sequences:
+                    sequence = key
         if sequence is not None:
             sequence_id, sequence_index = sequence
             # An id alone names the one sequence recorded with it.
@@ -4823,40 +4829,6 @@ class RunManager(LabscriptApplication):
         self.previous_expansions = expansions
 
         return expansion_types_changed
-
-    def get_sequence_attrs_to_extend(self, path):
-        """The sequence a batch added to the shot at ``path`` belongs to.
-
-        The queue is asked first. It keeps the sequence of each queued row and
-        of the shot last sent, so a join reads no file: a queued shot may not
-        be written yet, and reading one takes h5_lock's cross-process lock on
-        the asking thread, which for a submission is the GUI thread. The file
-        is read only for a shot the queue holds no sequence for."""
-        sequence_attrs = self.queue_controller.get_queued_sequence_attrs(path)
-        if sequence_attrs is not None:
-            return sequence_attrs
-        try:
-            return runmanager.get_sequence_attrs(path)
-        except FileNotFoundError as exc:
-            # Said plainly, because on_engage_clicked shows this sentence and
-            # only this sentence to whoever pressed Engage: an h5py message
-            # about a file that would not open does not tell them that the
-            # sequence they meant to add to is the thing that has gone.
-            raise Exception(
-                'Cannot add shots to the sequence of %s: it is not in the '
-                'queue, and its file is not there to say which sequence it '
-                'is in.' % path
-            ) from exc
-        except Exception as exc:
-            # A file that is there and cannot be read for it: held by another
-            # application, not readable by this user, not a shot file, or
-            # missing the attributes. Which one it is has to reach the
-            # operator, because only the first of those goes away by itself.
-            raise Exception(
-                'Cannot add shots to the sequence of %s: it is not in the '
-                'queue, and its file could not be read for it. %s: %s'
-                % (path, type(exc).__name__, exc)
-            ) from exc
 
     def make_h5_files(
         self,

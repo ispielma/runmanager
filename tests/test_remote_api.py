@@ -129,7 +129,6 @@ class SubmittingApp(object):
     get_queue_append_filepath = RunManager.get_queue_append_filepath
     get_last_sent_from_queue_filepath = RunManager.get_last_sent_from_queue_filepath
     get_submission_anchor = RunManager.get_submission_anchor
-    get_sequence_attrs_to_extend = RunManager.get_sequence_attrs_to_extend
     compile_and_queue_shots = RunManager.compile_and_queue_shots
     reindex_run_file_infos = RunManager.reindex_run_file_infos
     make_h5_files = RunManager.make_h5_files
@@ -977,25 +976,10 @@ class SubmissionAnchorTests(RemoteCommandTestCase):
         # the item being clicked; the shot it was sent is the sequence the
         # operator was looking at, so the batch joins that.
         sent = os.path.join(self.directory, 'experiment_007.h5')
-        runmanager.make_single_run_file(sent, None, {}, self.SEQUENCE, 7, 8)
-        self.app.queue_manager.set_last_sent_from_queue(sent)
-
-        records = self.app.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
-
-        self.assertEqual(
-            [record['sequence_attrs']['sequence_id'] for record in records],
-            [self.SEQUENCE['sequence_id']],
-        )
-
-    def test_adding_to_the_last_sequence_reads_no_file_when_the_queue_knows_it(self):
-        # A file read would be on the GUI thread, and lyse can hold the file of
-        # the shot BLACS has just run for as long as it likes.
-        sent = os.path.join(self.directory, 'experiment_007.h5')
         self.app.queue_manager.set_last_sent_from_queue(sent, dict(self.SEQUENCE))
 
         records = self.app.engage(main_module.SUBMISSION_MODE_LAST_SEQUENCE)
 
-        self.assertFalse(os.path.exists(sent), 'there was no file to read')
         self.assertEqual(
             [record['sequence_attrs']['sequence_id'] for record in records],
             [self.SEQUENCE['sequence_id']],

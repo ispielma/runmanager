@@ -484,45 +484,6 @@ def expand_globals(sequence_globals, evaled_globals, expansion_config = None, re
         return shots
 
 
-#: The attributes that say which sequence a shot belongs to. Written into
-#: every shot file by make_single_run_file, and read back out of one by
-#: get_sequence_attrs when a later batch is added to an existing sequence.
-#: new_sequence_details produces exactly these.
-SEQUENCE_ATTRS = (
-    'script_basename',
-    'sequence_date',
-    'sequence_index',
-    'sequence_id',
-)
-
-
-def _plain_value(value):
-    """The plain Python value an h5 attribute stands for.
-
-    h5py answers with numpy scalars, which are equal to the numbers they stand
-    for without being them, and the difference tells wherever a value has to
-    be one rather than merely compare equal to one: a TOML app config holds
-    strings, numbers and booleans, so a queue record carrying a numpy integer
-    cannot be saved at all.
-
-    A value that is not a numpy scalar is returned untouched. This says what
-    one scalar is and makes no claim about anything else."""
-    if isinstance(value, np.generic):
-        return value.item()
-    return value
-
-
-def get_sequence_attrs(filename):
-    """Return the sequence attributes of an existing shot file.
-
-    The inverse of what make_single_run_file writes, for adding shots to the
-    sequence a shot already on disk belongs to. The values come back as the
-    plain ones that were written: they are written again into every shot added
-    to the sequence and kept in those shots' queue records, which are saved."""
-    with h5py.File(filename, 'r') as f:
-        return {name: _plain_value(f.attrs[name]) for name in SEQUENCE_ATTRS}
-
-
 def next_sequence_index(shot_basedir, dt, increment=True):
     """Return the next sequence index for sequences in the given base directory (i.e.
     <experiment_shot_storage>/<script_basename>) and the date of the given datetime

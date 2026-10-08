@@ -23,7 +23,6 @@ import runmanager
 from qtutils.qt.QtCore import Qt
 from qtutils.qt.QtWidgets import QApplication
 
-from labscript_utils.labconfig import load_appconfig, save_appconfig
 # fixtures stubs the splash and does the guarded import of the
 # application, once, for every test module. Importing
 # runmanager.__main__ here instead would show the startup banner.
@@ -114,37 +113,6 @@ class QueueIdentityTests(unittest.TestCase):
             offered['shot_id'],
             'and the id it was given is stable from then on',
         )
-
-
-class SavedQueueValueTests(unittest.TestCase):
-    """A queue can be saved whatever its shots' values came from."""
-
-    def test_a_queue_whose_sequence_came_off_a_shot_file_can_be_saved(self):
-        # The ordinary path between one submission and the next: the queue is
-        # empty, so the sequence the batch is added to is read back out of the
-        # shot file. The app config holds only strings, numbers and booleans.
-        directory = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, directory, True)
-        attrs = {
-            'script_basename': 'experiment',
-            'sequence_date': '2026-09-18',
-            'sequence_index': 11,
-            'sequence_id': '20260918T101112_experiment',
-        }
-        shot = os.path.join(directory, 'experiment_00.h5')
-        runmanager.make_single_run_file(shot, None, {}, attrs, 0, 1)
-        controller = QueueController()
-        controller.enqueue(
-            [queued_shot(shot, sequence_attrs=runmanager.get_sequence_attrs(shot))]
-        )
-
-        path = os.path.join(directory, 'runmanager.toml')
-        save_appconfig(
-            path, {'runmanager_state': {'queue_state': controller.export_state()}}
-        )
-        saved = load_appconfig(path)['runmanager_state']['queue_state']
-
-        self.assertEqual(saved['items'][0]['sequence_attrs'], attrs)
 
 
 class QueuePauseTests(unittest.TestCase):
@@ -348,7 +316,6 @@ class FakeRunManager(object):
     reindex_run_file_infos = RunManager.reindex_run_file_infos
     make_h5_files = RunManager.make_h5_files
     prepare_queue_shot = RunManager.prepare_queue_shot
-    get_sequence_attrs_to_extend = RunManager.get_sequence_attrs_to_extend
 
     # make_h5_files reads these. There is no line edit to keep the output
     # folder up to date, and a batch added to a sequence is written to the
@@ -1830,7 +1797,7 @@ class SequenceContinuityTests(unittest.TestCase):
             [queued_shot(anchor, sequence_attrs=self.existing)]
         )
 
-        sequence = self.app.get_sequence_attrs_to_extend(anchor)
+        sequence = self.app.queue_controller.get_queued_sequence_attrs(anchor)
         self.app.queue_manager.clear()
         added = self.add_shots(1, anchor, index_start=0, sequence_attrs=sequence)
 
@@ -1857,7 +1824,7 @@ class SequenceContinuityTests(unittest.TestCase):
         )
         self.app.offer_shot()
 
-        sequence = self.app.get_sequence_attrs_to_extend(sent)
+        sequence = self.app.queue_controller.get_queued_sequence_attrs(sent)
         self.app.queue_manager.clear()
         added = self.add_shots(2, sent, index_start=0, sequence_attrs=sequence)
 

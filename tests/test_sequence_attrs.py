@@ -1,9 +1,4 @@
-"""What identifies the sequence a shot belongs to.
-
-A shot file carries the attributes naming its sequence, and runmanager reads
-them back when a later batch is added to that sequence. The two ends have to
-agree on which attributes those are.
-"""
+"""The sequence a default shot belongs to."""
 import datetime
 import os
 import shutil
@@ -22,23 +17,6 @@ import runmanager
 import runmanager.globals_file as globals_file
 from fixtures import RunManager, labconfig
 from runmanager.queueing import QueueController, QueueManager
-
-
-class SequenceAttrsTests(unittest.TestCase):
-    def test_a_new_sequence_is_read_back_from_its_shot_file(self):
-        directory = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, directory, True)
-        attrs, _, _ = runmanager.new_sequence_details(
-            os.path.join(directory, 'experiment.py'), config=labconfig(directory)
-        )
-        path = os.path.join(directory, 'experiment_00.h5')
-        runmanager.make_single_run_file(path, None, {}, attrs, 0, 1)
-
-        self.assertEqual(
-            runmanager.get_sequence_attrs(path),
-            attrs,
-            'a shot added to this sequence is written with what is read here',
-        )
 
 
 class DefaultSequenceTests(unittest.TestCase):
@@ -128,6 +106,5 @@ class DefaultSequenceTests(unittest.TestCase):
         for row in rows:
             with h5py.File(row['path'], 'r') as shot:
                 self.assertEqual(row['run_no'], shot.attrs['run number'])
-            self.assertEqual(
-                row['sequence_attrs'], runmanager.get_sequence_attrs(row['path'])
-            )
+                for name, value in row['sequence_attrs'].items():
+                    self.assertEqual(value, shot.attrs[name])
