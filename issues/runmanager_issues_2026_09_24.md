@@ -44,8 +44,7 @@ until the effort merges.
   runmanager's one request thread with `submit_shots`.
 - **A join lands in the right sequence, under the right number and name:**
   Slices 2, 3, 4, 5, 9, 12, 16.
-- **Each submitted entry runs, and is accounted for, as asked:** Slices 7,
-  8.
+- **Each submitted entry runs, and is accounted for, as asked:** Slice 7.
 - **Default shots:** Slice 10.
 - **The tests and the prose:** Slices 18, 19.
 
@@ -71,7 +70,6 @@ it is met.
       labscript-optimization; runmanager already exposes both boxes
 - [x] Slice 7: A timed-out submission is not left running unaccounted (HITL)
       — decided: `submit_shots` is made practically instant; no recovery path
-- [x] Slice 8: A cancelled shot that can still complete stays pending
 - [x] Slice 9: Joined shots are named from the template and their own globals
 - [x] Slice 10: Default shots are numbered per sequence
 - [ ] ~~Slice 11: The day's default sequence sorts as current in lyse (HITL,
@@ -380,49 +378,6 @@ Slices 1, 14 and 15.
 
 - Timed-out submit still queues shots the client can't see
   (`remote.py:185`).
-
----
-
-## Slice 8: A cancelled shot that can still complete stays pending
-
-### Type
-
-`AFK`, with a notice to labscript-optimization
-
-### What to build
-
-A cancelled row is a shot the operator deleted while BLACS was running it.
-`get_shot_statuses` answers it `{'pending': False, 'state': 'cancelled'}`
-(`REFUSED_STATES`), yet BLACS goes on to complete it and runmanager sends the
-completion to lyse. The contract in `Client.shot_status` is that pending is
-false once nothing further will happen.
-
-labscript-optimization drops a cancelled shot at once, frees its budget slot,
-proposes a replacement, and later accepts the late cost. With the real Session
-and `max_num_runs=2`, the run ended with three results.
-
-Answer a cancelled row as pending, since it can still produce a result, until it
-leaves the queue. After that it is `'unknown'`, as for any shot that has left.
-The row still refuses to be offered, and still does not hold up the rows behind
-it.
-
-### Acceptance criteria
-
-- [x] Deleting a running remote shot's row leaves its status pending with
-      state `'cancelled'`.
-- [x] Once BLACS reports it, or asks with no outcome for it, its status is not
-      pending.
-- [x] Rows behind a cancelled head are still pending and offered as now.
-- [x] labscript-optimization is told that `'cancelled'` can still complete.
-
-### Blocked by
-
-None - can start immediately.
-
-### Review findings covered
-
-- Cancelled running shot reported done, still sends a cost
-  (`queueing.py:99`).
 
 ---
 
@@ -881,9 +836,6 @@ for exactly this. Several overlap slices above.
 - The anchor rules are explained in three places, and `n_runs` in three.
   Comments and docstrings in the range outnumber its code lines by about two to
   one.
-- The `shot_status` state strings and the refusal prefix exist only on
-  runmanager's side, so labscript-optimization retypes them. Exposing them from
-  `runmanager/remote.py`, which the client already imports, gives one source.
 - The shot-id text rule is written twice (`compile_shots` and
   `_normalise_item`), and `get_shot_statuses` does not coerce, so id 7 and id
   '7' answer differently.
