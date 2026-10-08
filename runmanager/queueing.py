@@ -659,18 +659,6 @@ class QueueController(object):
             self.last_sent_from_queue = value
             return True
 
-    def forget_last_sent(self, paths):
-        """Let go of the last shot sent if one of these paths is its file.
-
-        Returns True if it changed."""
-        wanted = {os.path.abspath(path) for path in paths}
-        with self._lock:
-            if self.last_sent_from_queue not in wanted:
-                return False
-            self.last_sent_from_queue = None
-            self.last_sent_sequence_attrs = None
-            return True
-
     def export_state(self):
         with self._lock:
             return {
@@ -731,8 +719,6 @@ class QueueController(object):
             # A configuration written before there was a pause control opens
             # with the queue running, rather than silently stopped:
             self.paused = bool(state.get('paused', False))
-            self.last_sent_from_queue = None
-            self.last_sent_sequence_attrs = None
             if restore_rows:
                 self._items = [
                     self._normalise_item(item) for item in state.get('items', [])
@@ -1173,10 +1159,7 @@ class QueueManager(QtCore.QObject):
             self.queueChanged.emit()
 
     def _delete_queue_files(self, paths):
-        """Delete the files of shots the queue has finished with.
-
-        Also lets go of the last shot sent if its file was one of them."""
-        paths = list(paths)
+        """Delete the files of shots the queue has finished with."""
         for path in paths:
             try:
                 os.remove(path)
@@ -1188,8 +1171,6 @@ class QueueManager(QtCore.QObject):
                     % (os.path.basename(path), str(exc)),
                     red=True,
                 )
-        if self.controller.forget_last_sent(paths):
-            self.queueChanged.emit()
 
     def set_empty_queue_policy(self, value):
         self.controller.set_empty_queue_policy(value)

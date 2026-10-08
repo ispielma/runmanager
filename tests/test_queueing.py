@@ -908,6 +908,17 @@ class ContinuingSequenceAnchorTests(unittest.TestCase):
             'and the sequence still carries on from the submitted shot',
         )
 
+    def test_loading_a_configuration_mid_session_keeps_the_anchor(self):
+        self.run_a_shot_and_let_blacs_ask_again(self.app)
+
+        self.app.queue_manager.restore_state({}, restore_rows=False)
+
+        self.assertEqual(
+            self.app.get_submission_anchor(main_module.SUBMISSION_MODE_LAST_SEQUENCE),
+            os.path.join(self.directory, 'experiment_00.h5'),
+            'the shot that ran is still the end of the last sequence',
+        )
+
     def test_the_anchor_survives_blacs_finding_the_queue_empty(self):
         # BLACS finds the queue empty within seconds of any batch finishing. If
         # that let go of the shot last sent, "add shots to last sequence" would
@@ -1815,9 +1826,12 @@ class SequenceContinuityTests(unittest.TestCase):
 class DeletedAnchorTests(unittest.TestCase):
     """What a sequence carries on from when that shot has been deleted.
 
-    Deleting the row of the shot last sent to BLACS lets go of it, so the next
-    "add shots to last sequence" starts a sequence.
+    The shot last sent to BLACS stays the end of its sequence, so the next
+    "add shots to last sequence" joins that sequence, whatever became of its
+    row and file.
     """
+
+    SEQUENCE = {'sequence_id': '20260918T101112_experiment', 'sequence_index': 11}
 
     def setUp(self):
         self.directory = tempfile.mkdtemp()
@@ -1828,10 +1842,10 @@ class DeletedAnchorTests(unittest.TestCase):
     def enqueue(self, app, name):
         path = os.path.join(self.directory, name)
         open(path, 'w').close()
-        app.queue_manager.enqueue([queued_shot(path)])
+        app.queue_manager.enqueue([queued_shot(path, sequence_attrs=self.SEQUENCE)])
         return path
 
-    def test_deleting_the_failed_shot_it_named_lets_go_of_the_anchor(self):
+    def test_deleting_the_failed_shot_it_named_keeps_the_anchor(self):
         sent = self.enqueue(self.app, 'experiment_00.h5')
         offered = self.app.offer_shot()
         self.app.queue_manager.shot_finished(
@@ -1841,9 +1855,15 @@ class DeletedAnchorTests(unittest.TestCase):
         self.app.queue_manager.delete_rows([offered['shot_id']])
 
         self.assertFalse(os.path.exists(sent), 'the row took its file with it')
-        self.assertIsNone(
+        self.assertEqual(
             self.app.get_submission_anchor(main_module.SUBMISSION_MODE_LAST_SEQUENCE),
-            'and a deleted shot is not a sequence for the next batch to join',
+            sent,
+            'and the next batch is still numbered after it',
+        )
+        self.assertEqual(
+            self.app.queue_controller.get_queued_sequence_attrs(sent),
+            self.SEQUENCE,
+            'and joins the sequence runmanager recorded for it',
         )
 
     def test_deleting_another_shot_leaves_the_anchor_alone(self):
@@ -1866,7 +1886,7 @@ class DeletedAnchorTests(unittest.TestCase):
             'from',
         )
 
-    def test_a_cancelled_shots_file_going_takes_the_anchor_with_it(self):
+    def test_a_cancelled_shots_file_going_leaves_the_anchor(self):
         # The other way a shot BLACS was given loses its file: the operator
         # deletes the row while BLACS has it, and the file goes at the next
         # request, once nobody can be running it.
@@ -1877,10 +1897,11 @@ class DeletedAnchorTests(unittest.TestCase):
         self.app.offer_shot()
 
         self.assertFalse(os.path.exists(sent), 'and the cancelled row went')
-        self.assertIsNone(
+        self.assertEqual(
             self.app.get_submission_anchor(main_module.SUBMISSION_MODE_LAST_SEQUENCE),
-            'a shot the operator cancelled and whose file has gone is not '
-            'what the next submission carries on from',
+            sent,
+            'a shot the operator cancelled is still what the next submission '
+            'carries on from',
         )
 
 
