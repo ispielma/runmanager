@@ -5447,7 +5447,7 @@ class RunmanagerServer(ZMQServer):
     @inmain_decorator()
     def handle_get_labscript_file(self):
         labscript_file = app.ui.lineEdit_labscript_file.text()
-        return os.path.abspath(labscript_file)
+        return os.path.abspath(labscript_file) if labscript_file else ''
 
     @inmain_decorator()
     def handle_set_labscript_file(self, value):
