@@ -2739,9 +2739,6 @@ class RunManager(LabscriptApplication):
             return None
         return os.path.abspath(queue_paths[-1])
 
-    def get_last_sent_from_queue_filepath(self):
-        return self.queue_controller.get_queue_state()['last_sent_from_queue']
-
     def get_submission_anchor(self, submission_mode):
         """The shot this mode numbers its batch after, or None for a new one.
 
@@ -2760,9 +2757,10 @@ class RunManager(LabscriptApplication):
         mode = SUBMISSION_MODES[submission_mode]
         if not mode.joins_sequence:
             return None
+        last_sent = self.queue_controller.get_queue_state()['last_sent_from_queue']
         if mode.clears_queue:
-            return self.get_last_sent_from_queue_filepath() or self.get_queue_append_filepath()
-        return self.get_queue_append_filepath() or self.get_last_sent_from_queue_filepath()
+            return last_sent or self.get_queue_append_filepath()
+        return self.get_queue_append_filepath() or last_sent
 
     def can_use_alternate_submission_mode(self):
         """Whether the menu offers the alternate submission modes right now.

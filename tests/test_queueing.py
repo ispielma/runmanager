@@ -311,7 +311,6 @@ class FakeRunManager(object):
     apply_shot_outcome = RunManager.apply_shot_outcome
     offer_shot = RunManager.offer_shot
     get_queue_append_filepath = RunManager.get_queue_append_filepath
-    get_last_sent_from_queue_filepath = RunManager.get_last_sent_from_queue_filepath
     get_submission_anchor = RunManager.get_submission_anchor
     reindex_run_file_infos = RunManager.reindex_run_file_infos
     name_run_files = RunManager.name_run_files
@@ -849,7 +848,7 @@ class ContinuingSequenceAnchorTests(unittest.TestCase):
         self.app.offer_shot()
 
         self.assertEqual(
-            self.app.get_last_sent_from_queue_filepath(),
+            self.app.queue_controller.get_queue_state()['last_sent_from_queue'],
             sent,
             'BLACS has the first shot',
         )
@@ -1861,7 +1860,7 @@ class DeletedAnchorTests(unittest.TestCase):
         self.app.queue_manager.delete_rows([waiting_id])
 
         self.assertEqual(
-            self.app.get_last_sent_from_queue_filepath(),
+            self.app.queue_controller.get_queue_state()['last_sent_from_queue'],
             sent,
             'the shot BLACS was given is still what the sequence carries on '
             'from',

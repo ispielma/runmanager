@@ -127,7 +127,6 @@ class SubmittingApp(object):
     AXES_ROLE_NAME = RunManager.AXES_ROLE_NAME
 
     get_queue_append_filepath = RunManager.get_queue_append_filepath
-    get_last_sent_from_queue_filepath = RunManager.get_last_sent_from_queue_filepath
     get_submission_anchor = RunManager.get_submission_anchor
     compile_and_queue_shots = RunManager.compile_and_queue_shots
     reindex_run_file_infos = RunManager.reindex_run_file_infos
