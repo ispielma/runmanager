@@ -1742,9 +1742,6 @@ class SequenceContinuityTests(unittest.TestCase):
         )
 
     def test_a_shot_written_earlier_keeps_the_extent_it_was_written_with(self):
-        # n_runs is how far the sequence reached as of the shot it is written
-        # into, so the shots written before this batch, which may already have
-        # run, are not rewritten to agree with it.
         anchor = self.path('experiment_00.h5')
         runmanager.make_single_run_file(anchor, None, {}, self.existing, 0, 1)
 

@@ -147,26 +147,9 @@ SubmissionMode = collections.namedtuple(
     'SubmissionMode', ['joins_sequence', 'clears_queue']
 )
 
-# Everything a submission mode decides, in one place. A mode that joins a
-# sequence takes it from the last queued shot or the shot last sent, and starts
-# one when there is neither; any other mode starts a sequence of its own.
-#
-# "Add shots to last sequence" falls back to the shot last sent to BLACS
-# because the queue empties on its own: it drains as BLACS works through it,
-# and stands empty between batches. The shot last sent is the end of the last
-# sequence whether the queue still holds work, has just been drained, or has
-# been idle for hours -- so the fallback is the ordinary answer once a batch
-# has run, as much as it is the answer when BLACS takes the last shot between
-# the menu being drawn and the item being clicked. On a runmanager that has
-# queued nothing and sent nothing there is no last sequence at all, and
-# starting one is the only thing the words can mean.
-#
-# Emptying the queue takes the shot numbers of the deleted shots back, so a
-# batch replacing the queue is numbered from 0 again; and it throws away the
-# work still waiting, so the sequence it joins is the one BLACS is running
-# rather than the one about to be deleted -- which need not be the same, since
-# a batch engaged as a new sequence while BLACS works through the last one
-# leaves the queue holding one sequence and BLACS running another.
+# What each submission mode decides: whether the batch joins the last sequence,
+# and whether it first empties the queue. See get_submission_anchor for which
+# shot a joining batch is numbered after.
 SUBMISSION_MODES = {
     SUBMISSION_MODE_NEW_SEQUENCE: SubmissionMode(
         joins_sequence=False, clears_queue=False
@@ -2766,9 +2749,10 @@ class RunManager(LabscriptApplication):
         """The shot this mode numbers its batch after, or None for a new one.
 
         A mode that joins a sequence tries the last queued shot, then the shot
-        last sent, or the reverse if it empties the queue. None means there is
-        no sequence to join, and a batch with nothing to be numbered after
-        starts one of its own.
+        last sent, or the reverse if it empties the queue. The queue drains as
+        BLACS works through it, and the shot last sent then ends the last
+        sequence. None means there is no sequence to join, and a batch with
+        nothing to be numbered after starts one of its own.
 
         Read here, where the answer is used, and once. The queue moves on its
         own -- BLACS takes the last shot on the server thread -- so a mode
@@ -2785,13 +2769,8 @@ class RunManager(LabscriptApplication):
     def can_use_alternate_submission_mode(self):
         """Whether the menu offers the alternate submission modes right now.
 
-        A menu question and only that: their wording names a last sequence,
-        so they are greyed out while there is none to name. It is asked as the
-        menu is about to be drawn, and which source names that sequence can
-        change before an action is chosen -- BLACS takes the last queued shot,
-        or the file of the shot last sent is deleted; nothing is decided on
-        it. Which sequence a submission joins is settled in
-        get_submission_anchor, against the queue the batch is written into."""
+        Their wording names a last sequence, so they are greyed out while
+        there is none."""
         return (
             self.ui.checkBox_run_shots.isChecked()
             and self.get_submission_anchor(SUBMISSION_MODE_LAST_SEQUENCE) is not None
@@ -2854,14 +2833,8 @@ class RunManager(LabscriptApplication):
             # for a number other than its own.
             run_file_info['run_no'] = next_index
             next_index += 1
-        # n_runs is how far the sequence reaches as of the shot it is written
-        # into: runs 0 up to the highest just numbered exist once this batch
-        # is written. It is neither the size of this batch nor a total for the
-        # sequence, and it is not uniform across a sequence that has been
-        # added to -- the shots written before this batch keep the smaller
-        # number they were written with, and are not rewritten to agree,
-        # having possibly already run. So no one shot's n_runs says how many
-        # runs its sequence has.
+        # How far the sequence reaches as of these shots (see make_single_run_file);
+        # those written earlier keep the n_runs they were written with.
         runs_in_sequence = next_index
         for run_file_info in run_file_infos:
             run_file_info['n_runs'] = runs_in_sequence
@@ -2961,11 +2934,6 @@ class RunManager(LabscriptApplication):
         sequence_attrs = None
         name_format = None
         if indexed_path_base is not None and (mode.clears_queue or sequence is None):
-            # Read before the Clear rather than after it. With nothing yet
-            # sent to BLACS the shot being added to is a queued one, and
-            # the Clear takes its row and deletes its file -- so asked
-            # afterwards, nothing would be left to say which sequence the
-            # replacement batch is joining.
             sequence_attrs = self.queue_controller.get_queued_sequence_attrs(
                 indexed_path_base
             )
@@ -2980,8 +2948,7 @@ class RunManager(LabscriptApplication):
                 # there are skipped over.
                 index_start = 0
             else:
-                # "Add shots to last sequence" numbers from the record, as a remote
-                # join does, when there is one, and after the anchor's file if not.
+                # Numbered from the sequence's record if it has one.
                 key = (sequence_attrs['sequence_id'], sequence_attrs['sequence_index'])
                 if key in self.sequences:
                     sequence = key
@@ -5203,14 +5170,7 @@ class RunManager(LabscriptApplication):
                 or queue_state['n_items']
             ):
                 self.discard_default_shot()
-                # Having nothing to offer leaves the anchor alone. An empty
-                # queue is the ordinary state between batches -- BLACS asks
-                # continuously, so it is reached within seconds of any batch
-                # finishing -- and it says nothing about which sequence the
-                # shot last sent belongs to. "Add shots to last sequence"
-                # means that sequence whether or not anything is queued now;
-                # the anchor is let go of where that shot's file is deleted or
-                # a configuration is loaded, and stands until another is sent.
+                # The queue is empty between batches; the anchor stands.
                 return no_shot
             if not os.path.isfile(labscript_file):
                 raise RuntimeError(

@@ -322,10 +322,7 @@ class QueueController(object):
             compile_mode = COMPILE_MODE_EAGER
         record['compile_mode'] = compile_mode
         record['compiled'] = bool(record.get('compiled', compile_mode == COMPILE_MODE_EAGER))
-        # A shot runmanager produced itself because the queue was empty, rather
-        # than one a user engaged. It is queue work like any other, but its
-        # sequence is the day's default one, which no batch joins, so it must
-        # never become the anchor the next Engage batch is written alongside.
+        # A shot runmanager made for an empty queue; no batch joins its sequence.
         record['default_shot'] = bool(record.get('default_shot', False))
         # Whether runviewer was ticked when this shot was engaged. The
         # compile reads it from here, not from the checkbox as it stands then.
@@ -665,9 +662,7 @@ class QueueController(object):
     def forget_last_sent(self, paths):
         """Let go of the last shot sent if one of these paths is its file.
 
-        A deleted file cannot be numbered after or read, so keeping the name
-        would keep a sequence nothing can be added to. Returns True if it
-        changed."""
+        Returns True if it changed."""
         wanted = {os.path.abspath(path) for path in paths}
         with self._lock:
             if self.last_sent_from_queue not in wanted:
@@ -1180,11 +1175,7 @@ class QueueManager(QtCore.QObject):
     def _delete_queue_files(self, paths):
         """Delete the files of shots the queue has finished with.
 
-        Every path a queued shot's file is deleted by comes through here, so
-        this is where the shot last sent to BLACS is let go of if it was one
-        of them -- whether the file went or was already gone. A name that no
-        longer reaches a shot file is no use to the batch that would have been
-        added to that shot's sequence, and nothing puts it back."""
+        Also lets go of the last shot sent if its file was one of them."""
         paths = list(paths)
         for path in paths:
             try:
