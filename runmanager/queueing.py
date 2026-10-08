@@ -602,23 +602,18 @@ class QueueController(object):
             return list(self._row_statuses())
 
     def get_queued_sequence_attrs(self, path):
-        """The sequence attributes of the queued shot at ``path``, or None.
+        """The sequence attributes of the shot at ``path``, or None if none is recorded.
 
-        None is that the queue has no sequence to give for that path, whether
-        because no row holds it or because the row that does records none. A
-        caller with somewhere else to look does the same thing either way.
-
-        The last matching row answers. The queue does not set out to hold two
-        rows with one path, and taking the last means the newer row wins if it
-        ever does."""
+        The last matching row answers, so a newer row wins over an older one."""
         with self._lock:
             for item in reversed(self._items):
                 if item['path'] == path:
                     return dict(item['sequence_attrs']) or None
-            if self.last_sent_from_queue and self.last_sent_sequence_attrs:
-                last_sent = shared_drive.path_to_local(self.last_sent_from_queue)
-                if os.path.abspath(last_sent) == os.path.abspath(path):
-                    return dict(self.last_sent_sequence_attrs)
+            if (
+                self.last_sent_sequence_attrs
+                and self.last_sent_from_queue == os.path.abspath(path)
+            ):
+                return dict(self.last_sent_sequence_attrs)
         return None
 
     def get_shot_path(self, shot_id):
@@ -660,10 +655,13 @@ class QueueController(object):
             return items
 
     def set_last_sent_from_queue(self, value, sequence_attrs=None):
-        """Record the last shot handed out, and the sequence it belongs to.
+        """Record the last shot handed out, by local path, and its sequence.
 
         True if that changed which shot it is."""
-        value = str(value) if value else None
+        if value:
+            value = os.path.abspath(shared_drive.path_to_local(str(value)))
+        else:
+            value = None
         with self._lock:
             self.last_sent_sequence_attrs = dict(sequence_attrs or {}) or None
             if self.last_sent_from_queue == value:
@@ -674,25 +672,12 @@ class QueueController(object):
     def forget_last_sent(self, paths):
         """Let go of the last shot sent if one of these paths is its file.
 
-        Called where a queued shot's file is deleted. What that value is for
-        is naming the shot a later batch is numbered after and reading the
-        sequence it belongs to out of; a file that has been deleted answers
-        neither, and no later event puts it back, so keeping the name is
-        keeping a sequence nothing can ever be added to. A caller that finds
-        nothing recorded here starts a sequence instead, which is what it does
-        before anything has run.
-
-        Compared as local paths, because what is recorded here is the
-        shared-drive-agnostic name BLACS was given. Returns True if it
+        A deleted file cannot be numbered after or read, so keeping the name
+        would keep a sequence nothing can be added to. Returns True if it
         changed."""
         wanted = {os.path.abspath(path) for path in paths}
         with self._lock:
-            if self.last_sent_from_queue is None:
-                return False
-            anchor = os.path.abspath(
-                shared_drive.path_to_local(self.last_sent_from_queue)
-            )
-            if anchor not in wanted:
+            if self.last_sent_from_queue not in wanted:
                 return False
             self.last_sent_from_queue = None
             self.last_sent_sequence_attrs = None

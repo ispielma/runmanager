@@ -2760,11 +2760,7 @@ class RunManager(LabscriptApplication):
         return os.path.abspath(queue_paths[-1])
 
     def get_last_sent_from_queue_filepath(self):
-        queue_state = self.queue_controller.get_queue_state()
-        last_sent_from_queue = queue_state.get('last_sent_from_queue')
-        if not last_sent_from_queue:
-            return None
-        return os.path.abspath(shared_drive.path_to_local(last_sent_from_queue))
+        return self.queue_controller.get_queue_state()['last_sent_from_queue']
 
     def get_submission_anchor(self, submission_mode):
         """The shot this mode numbers its batch after, or None for a new one.
