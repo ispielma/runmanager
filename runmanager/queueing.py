@@ -34,7 +34,6 @@ from labscript_utils import shared_drive
 from labscript_utils.qtwidgets.shotqueue import ShotQueueWidget
 from zprocess import raise_exception_in_thread
 
-from runmanager import _plain_value
 from runmanager.client import (
     BLACS_CANCELLED,
     BLACS_COMPLETED,
@@ -288,7 +287,7 @@ class QueueController(object):
         # unaffected and resuming offers the same head again.
         self.paused = False
         self.last_sent_from_queue = None
-        # Kept so that a batch added to that shot's sequence reads no file.
+        # The sequence of that shot, whose row has left the queue.
         self.last_sent_sequence_attrs = None
         self._items = []
         # The record of each shot that left the queue this session, as it was
@@ -323,10 +322,7 @@ class QueueController(object):
             compile_mode = COMPILE_MODE_EAGER
         record['compile_mode'] = compile_mode
         record['compiled'] = bool(record.get('compiled', compile_mode == COMPILE_MODE_EAGER))
-        # A shot runmanager produced itself because the queue was empty, rather
-        # than one a user engaged. It is queue work like any other, but its
-        # sequence is the day's default one, which no batch joins, so it must
-        # never become the anchor the next Engage batch is written alongside.
+        # A shot runmanager made for an empty queue.
         record['default_shot'] = bool(record.get('default_shot', False))
         # Whether runviewer was ticked when this shot was engaged. The
         # compile reads it from here, not from the checkbox as it stands then.
@@ -338,14 +334,8 @@ class QueueController(object):
             str(name): str(expression)
             for name, expression in record.get('frozen_globals', {}).items()
         }
-        # The values as well as the names, because a record is saved into the
-        # app config: a sequence read back out of a shot file arrives as h5py
-        # answered with it, and a queue holding one of those cannot be written
-        # at all. Where the caller read them is not the queue's business; that
-        # a queued shot can be saved is.
         record['sequence_attrs'] = {
-            str(name): _plain_value(value)
-            for name, value in record.get('sequence_attrs', {}).items()
+            str(name): value for name, value in record.get('sequence_attrs', {}).items()
         }
         record['active_groups'] = {
             str(name): os.path.abspath(str(path))
@@ -602,23 +592,18 @@ class QueueController(object):
             return list(self._row_statuses())
 
     def get_queued_sequence_attrs(self, path):
-        """The sequence attributes of the queued shot at ``path``, or None.
+        """The sequence attributes of the shot at ``path``, or None if none is recorded.
 
-        None is that the queue has no sequence to give for that path, whether
-        because no row holds it or because the row that does records none. A
-        caller with somewhere else to look does the same thing either way.
-
-        The last matching row answers. The queue does not set out to hold two
-        rows with one path, and taking the last means the newer row wins if it
-        ever does."""
+        The last matching row answers, so a newer row wins over an older one."""
         with self._lock:
             for item in reversed(self._items):
                 if item['path'] == path:
                     return dict(item['sequence_attrs']) or None
-            if self.last_sent_from_queue and self.last_sent_sequence_attrs:
-                last_sent = shared_drive.path_to_local(self.last_sent_from_queue)
-                if os.path.abspath(last_sent) == os.path.abspath(path):
-                    return dict(self.last_sent_sequence_attrs)
+            if (
+                self.last_sent_sequence_attrs
+                and self.last_sent_from_queue == os.path.abspath(path)
+            ):
+                return dict(self.last_sent_sequence_attrs)
         return None
 
     def get_shot_path(self, shot_id):
@@ -660,42 +645,18 @@ class QueueController(object):
             return items
 
     def set_last_sent_from_queue(self, value, sequence_attrs=None):
-        """Record the last shot handed out, and the sequence it belongs to.
+        """Record the last shot handed out, by local path, and its sequence.
 
         True if that changed which shot it is."""
-        value = str(value) if value else None
+        if value:
+            value = os.path.abspath(shared_drive.path_to_local(str(value)))
+        else:
+            value = None
         with self._lock:
             self.last_sent_sequence_attrs = dict(sequence_attrs or {}) or None
             if self.last_sent_from_queue == value:
                 return False
             self.last_sent_from_queue = value
-            return True
-
-    def forget_last_sent(self, paths):
-        """Let go of the last shot sent if one of these paths is its file.
-
-        Called where a queued shot's file is deleted. What that value is for
-        is naming the shot a later batch is numbered after and reading the
-        sequence it belongs to out of; a file that has been deleted answers
-        neither, and no later event puts it back, so keeping the name is
-        keeping a sequence nothing can ever be added to. A caller that finds
-        nothing recorded here starts a sequence instead, which is what it does
-        before anything has run.
-
-        Compared as local paths, because what is recorded here is the
-        shared-drive-agnostic name BLACS was given. Returns True if it
-        changed."""
-        wanted = {os.path.abspath(path) for path in paths}
-        with self._lock:
-            if self.last_sent_from_queue is None:
-                return False
-            anchor = os.path.abspath(
-                shared_drive.path_to_local(self.last_sent_from_queue)
-            )
-            if anchor not in wanted:
-                return False
-            self.last_sent_from_queue = None
-            self.last_sent_sequence_attrs = None
             return True
 
     def export_state(self):
@@ -758,8 +719,6 @@ class QueueController(object):
             # A configuration written before there was a pause control opens
             # with the queue running, rather than silently stopped:
             self.paused = bool(state.get('paused', False))
-            self.last_sent_from_queue = None
-            self.last_sent_sequence_attrs = None
             if restore_rows:
                 self._items = [
                     self._normalise_item(item) for item in state.get('items', [])
@@ -1101,25 +1060,15 @@ class QueueManager(QtCore.QObject):
     def compile_shots(self, records, send_to_BLACS, send_to_runviewer):
         """Queue these records if send_to_BLACS, and compile them.
 
-        Returns the records, each now carrying the identifier its row has, for
-        a caller that has to say which shots it submitted. Each also carries
-        ``send_to_runviewer``, the choice made with its batch, which is what
-        its compile reads.
-
-        A batch bound for the queue is queued at once, so that its rows are
-        there to show, to add to and to empty while they compile: the worker
-        compiles the eager ones in order, and a lazy one is compiled when
-        BLACS asks for it. A batch not bound for the queue is compiled for
-        runviewer and queues nothing."""
+        Returns the records, each now carrying its shot id and its batch's
+        ``send_to_runviewer``. A batch not bound for the queue is compiled for
+        runviewer and queues nothing; one that is queued compiles its eager
+        rows in order, and BLACS asks for the lazy ones."""
         records = list(records)
         for record in records:
-            # As text, which is what the row made from this record will hold
-            # it as: an id reported to the caller and written into the shot
-            # file as anything else names no row, so the caller polls for a
-            # shot the queue has never heard of while its shot runs.
-            record['shot_id'] = (
-                str(record['shot_id']) if record.get('shot_id') else new_shot_id()
-            )
+            # Set before enqueue so the returned record and the shot file carry
+            # the row's id.
+            record['shot_id'] = new_shot_id()
             record['send_to_runviewer'] = send_to_runviewer
         if send_to_BLACS:
             self.enqueue(records)
@@ -1210,14 +1159,7 @@ class QueueManager(QtCore.QObject):
             self.queueChanged.emit()
 
     def _delete_queue_files(self, paths):
-        """Delete the files of shots the queue has finished with.
-
-        Every path a queued shot's file is deleted by comes through here, so
-        this is where the shot last sent to BLACS is let go of if it was one
-        of them -- whether the file went or was already gone. A name that no
-        longer reaches a shot file is no use to the batch that would have been
-        added to that shot's sequence, and nothing puts it back."""
-        paths = list(paths)
+        """Delete the files of shots the queue has finished with."""
         for path in paths:
             try:
                 os.remove(path)
@@ -1229,8 +1171,6 @@ class QueueManager(QtCore.QObject):
                     % (os.path.basename(path), str(exc)),
                     red=True,
                 )
-        if self.controller.forget_last_sent(paths):
-            self.queueChanged.emit()
 
     def set_empty_queue_policy(self, value):
         self.controller.set_empty_queue_policy(value)

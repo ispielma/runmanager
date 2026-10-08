@@ -204,6 +204,9 @@ class RunmanagerClient(ZMQClient):
             first while 'BLACS' is unticked, since the others are about the
             queue, and when there is no labscript file or output folder, or the
             globals cannot be evaluated or expand into no shots.
+        SequenceRefused
+            For a last sequence runmanager has no record of, or one of another
+            labscript file.
         Exception
             Whatever else stops the batch being made.
         """

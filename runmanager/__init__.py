@@ -232,6 +232,32 @@ def get_frozen_globals(globals_details, shot):
     return frozen_globals
 
 
+def get_shots_with_frozen_globals(globals_details, expansion_order=None):
+    """Expand the globals into shots, each with the globals to freeze for it.
+
+    Parameters
+    ----------
+    globals_details : dict
+        The globals as returned by ``globals_file.get_globals_details``.
+    expansion_order : dict, optional
+        How the expansions are ordered and shuffled, as ``expand_globals`` takes.
+
+    Returns
+    -------
+    list
+        One ``(shot globals, frozen globals)`` pair per shot.
+    dict
+        The expansion type of each global.
+    """
+    sequence_globals = _details_to_sequence_globals(globals_details)
+    evaled_globals, _, expansions = evaluate_globals(sequence_globals)
+    shots = expand_globals(sequence_globals, evaled_globals, expansion_order)
+    return (
+        [(shot, get_frozen_globals(globals_details, shot)) for shot in shots],
+        expansions,
+    )
+
+
 def get_queue_compile_globals(groups, frozen_globals=None, default_globals=False):
     """The globals a queued shot's file is written from.
 
@@ -482,45 +508,6 @@ def expand_globals(sequence_globals, evaled_globals, expansion_config = None, re
         return shots, dimensions
     else:
         return shots
-
-
-#: The attributes that say which sequence a shot belongs to. Written into
-#: every shot file by make_single_run_file, and read back out of one by
-#: get_sequence_attrs when a later batch is added to an existing sequence.
-#: new_sequence_details produces exactly these.
-SEQUENCE_ATTRS = (
-    'script_basename',
-    'sequence_date',
-    'sequence_index',
-    'sequence_id',
-)
-
-
-def _plain_value(value):
-    """The plain Python value an h5 attribute stands for.
-
-    h5py answers with numpy scalars, which are equal to the numbers they stand
-    for without being them, and the difference tells wherever a value has to
-    be one rather than merely compare equal to one: a TOML app config holds
-    strings, numbers and booleans, so a queue record carrying a numpy integer
-    cannot be saved at all.
-
-    A value that is not a numpy scalar is returned untouched. This says what
-    one scalar is and makes no claim about anything else."""
-    if isinstance(value, np.generic):
-        return value.item()
-    return value
-
-
-def get_sequence_attrs(filename):
-    """Return the sequence attributes of an existing shot file.
-
-    The inverse of what make_single_run_file writes, for adding shots to the
-    sequence a shot already on disk belongs to. The values come back as the
-    plain ones that were written: they are written again into every shot added
-    to the sequence and kept in those shots' queue records, which are saved."""
-    with h5py.File(filename, 'r') as f:
-        return {name: _plain_value(f.attrs[name]) for name in SEQUENCE_ATTRS}
 
 
 def next_sequence_index(shot_basedir, dt, increment=True):
