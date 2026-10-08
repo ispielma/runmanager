@@ -2633,7 +2633,7 @@ class RunManager(LabscriptApplication):
 
     def on_reset_shot_output_folder_clicked(self, checked):
         current_default_output_folder = self.get_default_output_folder()
-        if current_default_output_folder is None:
+        if not current_default_output_folder:
             return
         self.ui.lineEdit_shot_output_folder.setText(current_default_output_folder)
         self.check_output_folder_update()
@@ -3709,7 +3709,7 @@ class RunManager(LabscriptApplication):
         whole check happens at once in the Qt main thread and hence is atomic
         and can't be interfered with by other Qt calls in the program."""
         current_default_output_folder = self.get_default_output_folder()
-        if current_default_output_folder is None:
+        if not current_default_output_folder:
             # No labscript file selected:
             return
         currently_selected_output_folder = self.ui.lineEdit_shot_output_folder.text()
@@ -5447,7 +5447,7 @@ class RunmanagerServer(ZMQServer):
     @inmain_decorator()
     def handle_get_labscript_file(self):
         labscript_file = app.ui.lineEdit_labscript_file.text()
-        return os.path.abspath(labscript_file)
+        return os.path.abspath(labscript_file) if labscript_file else ''
 
     @inmain_decorator()
     def handle_set_labscript_file(self, value):

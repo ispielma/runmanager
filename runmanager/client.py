@@ -267,7 +267,7 @@ class RunmanagerClient(ZMQClient):
         return self.request('n_shots')
 
     def get_labscript_file(self):
-        """Get the path of the current experiment script"""
+        """Get the path of the current experiment script, or '' if none is selected"""
         return self.request('get_labscript_file')
 
     def set_labscript_file(self, value):
