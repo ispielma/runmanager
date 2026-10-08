@@ -748,7 +748,7 @@ class ShotStatusTests(RemoteCommandTestCase):
         since = {}
 
         def submit(*shot_ids):
-            manager.compile_shots(
+            manager.enqueue(
                 [
                     {
                         'path': os.path.join(self.directory, '%s.h5' % shot_id),
@@ -757,10 +757,9 @@ class ShotStatusTests(RemoteCommandTestCase):
                         'compiled': False,
                     }
                     for shot_id in shot_ids
-                ],
-                True,
-                False,
+                ]
             )
+            manager.compile_ahead()
 
         def ask():
             answer = self.request(self.client.shot_status, ids)

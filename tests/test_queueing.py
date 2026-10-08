@@ -1976,58 +1976,5 @@ class DeletedAnchorTests(unittest.TestCase):
         )
 
 
-class CallerChosenShotIdTests(unittest.TestCase):
-    """An id the caller chose names the same row every other id does.
-
-    compile_shots keeps the id a record arrives with, and the row made from it
-    takes it as text, so the caller polls for the shot it was handed the id of.
-    """
-
-    def setUp(self):
-        self.directory = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.directory, True)
-        self.written = []
-        self.controller = QueueController()
-        self.manager = QueueManager(
-            self.controller,
-            lambda item, default_globals: self.written.append(item['shot_id']),
-            lambda labscript_file, path: (True, ''),
-            lambda path: None,
-            lambda *args, **kwargs: None,
-        )
-        self.addCleanup(self.manager.shutdown)
-
-    def test_the_queue_answers_about_the_id_the_caller_was_given(self):
-        records = self.manager.compile_shots(
-            [
-                {
-                    'path': os.path.join(self.directory, 'shot.h5'),
-                    'labscript_file': os.path.join(self.directory, 'e.py'),
-                    'compile_mode': COMPILE_MODE_EAGER,
-                    'compiled': False,
-                    'frozen_globals': {},
-                    'shot_id': 7,
-                }
-            ],
-            True,
-            False,
-        )
-        shot_id = records[0]['shot_id']
-        for _ in range(500):
-            if self.written:
-                break
-            time.sleep(0.01)
-
-        self.assertTrue(
-            self.controller.get_shot_statuses([shot_id])[shot_id]['pending'],
-            'the queue holds the shot under the id its submitter was handed',
-        )
-        self.assertEqual(
-            self.written,
-            [self.controller.get_queue_display_items()[0]['shot_id']],
-            'and the id written into the shot file is the one its row has',
-        )
-
-
 if __name__ == '__main__':
     unittest.main()

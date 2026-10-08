@@ -1086,25 +1086,15 @@ class QueueManager(QtCore.QObject):
     def compile_shots(self, records, send_to_BLACS, send_to_runviewer):
         """Queue these records if send_to_BLACS, and compile them.
 
-        Returns the records, each now carrying the identifier its row has, for
-        a caller that has to say which shots it submitted. Each also carries
-        ``send_to_runviewer``, the choice made with its batch, which is what
-        its compile reads.
-
-        A batch bound for the queue is queued at once, so that its rows are
-        there to show, to add to and to empty while they compile: the worker
-        compiles the eager ones in order, and a lazy one is compiled when
-        BLACS asks for it. A batch not bound for the queue is compiled for
-        runviewer and queues nothing."""
+        Returns the records, each now carrying its shot id and its batch's
+        ``send_to_runviewer``. A batch not bound for the queue is compiled for
+        runviewer and queues nothing; one that is queued compiles its eager
+        rows in order, and BLACS asks for the lazy ones."""
         records = list(records)
         for record in records:
-            # As text, which is what the row made from this record will hold
-            # it as: an id reported to the caller and written into the shot
-            # file as anything else names no row, so the caller polls for a
-            # shot the queue has never heard of while its shot runs.
-            record['shot_id'] = (
-                str(record['shot_id']) if record.get('shot_id') else new_shot_id()
-            )
+            # Set before enqueue so the returned record and the shot file carry
+            # the row's id.
+            record['shot_id'] = new_shot_id()
             record['send_to_runviewer'] = send_to_runviewer
         if send_to_BLACS:
             self.enqueue(records)
